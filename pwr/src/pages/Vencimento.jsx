@@ -49,7 +49,11 @@ const normalizeFileName = (name) => String(name || '')
   .replace(/[\u0300-\u036f]/g, '')
 
 const pickPreferredFile = (files) => {
-  const candidates = files.filter((file) => file && file.name && file.name.toLowerCase().endsWith('.xlsx') && !file.name.startsWith('~$'))
+  const candidates = files.filter((file) => {
+    if (!file || !file.name) return false
+    const lower = file.name.toLowerCase()
+    return (lower.endsWith('.xlsx') || lower.endsWith('.xls')) && !file.name.startsWith('~$')
+  })
   if (!candidates.length) return null
   const preferred = candidates.find((file) => {
     const normalized = normalizeFileName(file.name)
@@ -308,7 +312,8 @@ const Vencimento = () => {
         let pickedFile = null
         const files = []
         for await (const entry of handle.values()) {
-          if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.xlsx') && !entry.name.startsWith('~$')) {
+          const lowerName = entry.name.toLowerCase()
+          if (entry.kind === 'file' && (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) && !entry.name.startsWith('~$')) {
             const file = await entry.getFile()
             files.push(file)
           }
@@ -348,23 +353,31 @@ const Vencimento = () => {
       return
     }
     setIsParsing(true)
+    const isLocalHost = typeof window !== 'undefined'
+      && ['localhost', '127.0.0.1'].includes(window.location.hostname)
     try {
-      const formData = new FormData()
-      formData.append('file', pendingFile)
-      const response = await fetch('/api/vencimentos/parse', {
-        method: 'POST',
-        body: formData,
-      })
-      if (!response.ok) throw new Error('api-failed')
-      const data = await response.json()
-      if (!data?.rows) throw new Error('api-invalid')
-      setOperations(data.rows)
-      notify('Planilha vinculada e calculada.', 'success')
+      if (isLocalHost) {
+        const formData = new FormData()
+        formData.append('file', pendingFile)
+        const response = await fetch('/api/vencimentos/parse', {
+          method: 'POST',
+          body: formData,
+        })
+        if (!response.ok) throw new Error('api-failed')
+        const data = await response.json()
+        if (!data?.rows) throw new Error('api-invalid')
+        setOperations(data.rows)
+        notify('Planilha vinculada e calculada.', 'success')
+        return
+      }
+      const parsed = await parseWorkbook(pendingFile)
+      setOperations(parsed)
+      notify('Planilha calculada no navegador.', 'success')
     } catch {
       try {
         const parsed = await parseWorkbook(pendingFile)
         setOperations(parsed)
-        notify('API indisponivel. Calculo local aplicado.', 'warning')
+        notify('Calculo local aplicado.', 'warning')
       } catch {
         notify('Falha ao calcular os dados da planilha.', 'warning')
       }
@@ -456,7 +469,7 @@ const Vencimento = () => {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".xlsx"
+              accept=".xlsx,.xls"
               onChange={handleFileChange}
               multiple
               webkitdirectory="true"
