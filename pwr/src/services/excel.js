@@ -107,9 +107,7 @@ const normalizeDate = (value, XLSX) => {
   return value
 }
 
-export const parseWorkbook = async (file) => {
-  const XLSX = await import(/* @vite-ignore */ XLSX_URL)
-  const buffer = await file.arrayBuffer()
+const parseBuffer = (buffer, XLSX) => {
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
   const sheetName = pickSheetName(workbook)
   const sheet = workbook.Sheets[sheetName]
@@ -146,4 +144,14 @@ export const parseWorkbook = async (file) => {
       pernas: pernas.length ? pernas : columnLegs,
     }
   })
+}
+
+export const parseWorkbookBuffer = async (buffer) => {
+  const XLSX = await import(/* @vite-ignore */ XLSX_URL)
+  return parseBuffer(buffer, XLSX)
+}
+
+export const parseWorkbook = async (file) => {
+  const buffer = await file.arrayBuffer()
+  return parseWorkbookBuffer(buffer)
 }

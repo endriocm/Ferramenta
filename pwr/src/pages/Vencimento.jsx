@@ -10,7 +10,7 @@ import { formatCurrency, formatDate, formatNumber } from '../utils/format'
 import { fetchYahooMarketData } from '../services/marketData'
 import { computeBarrierStatus, computeResult } from '../services/settlement'
 import { clearOverride, loadOverrides, saveOverrides, updateOverride } from '../services/overrides'
-import { parseWorkbook } from '../services/excel'
+import { parseWorkbook, parseWorkbookBuffer } from '../services/excel'
 import { exportReportPdf } from '../services/pdf'
 import { useToast } from '../hooks/useToast'
 
@@ -63,6 +63,15 @@ const pickPreferredFile = (files) => {
   return candidates.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0))[0]
 }
 
+const toArrayBuffer = (data) => {
+  if (!data) return null
+  if (data instanceof ArrayBuffer) return data
+  if (ArrayBuffer.isView(data)) {
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+  }
+  return null
+}
+
 const Vencimento = () => {
   const { notify } = useToast()
   const [filters, setFilters] = useState({ search: '', broker: '', assessor: '', cliente: '', status: '' })
@@ -80,6 +89,17 @@ const Vencimento = () => {
   useEffect(() => {
     saveOverrides(overrides)
   }, [overrides])
+
+  useEffect(() => {
+    if (!window?.electronAPI?.resolveFolder) return
+    const savedFolder = window.localStorage.getItem('pwr.vencimento.folder')
+    if (!savedFolder) return
+    window.electronAPI.resolveFolder(savedFolder).then((meta) => {
+      if (!meta?.filePath) return
+      setPendingFile({ source: 'electron', ...meta })
+      setFolderLabel(`${meta.folderPath} • ${meta.fileName}`)
+    })
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -307,6 +327,18 @@ const Vencimento = () => {
 
   const handlePickFolder = useCallback(async () => {
     try {
+      if (window?.electronAPI?.selectFolder) {
+        const meta = await window.electronAPI.selectFolder()
+        if (!meta?.filePath) {
+          notify('Selecao de pasta cancelada.', 'warning')
+          return
+        }
+        setPendingFile({ source: 'electron', ...meta })
+        setFolderLabel(`${meta.folderPath} • ${meta.fileName}`)
+        window.localStorage.setItem('pwr.vencimento.folder', meta.folderPath)
+        notify('Pasta vinculada. Clique em calcular.', 'success')
+        return
+      }
       if ('showDirectoryPicker' in window) {
         const handle = await window.showDirectoryPicker()
         let pickedFile = null
@@ -324,7 +356,7 @@ const Vencimento = () => {
           setPendingFile(null)
           return
         }
-        setPendingFile(pickedFile)
+        setPendingFile({ source: 'browser', file: pickedFile })
         setFolderLabel(`${handle.name} • ${pickedFile.name}`)
         notify('Pasta selecionada. Clique em vincular para calcular.', 'success')
       } else {
@@ -343,7 +375,7 @@ const Vencimento = () => {
       return
     }
     setFolderLabel(file.name)
-    setPendingFile(file)
+    setPendingFile({ source: 'browser', file })
     notify('Planilha pronta. Clique em vincular para calcular.', 'success')
   }
 
@@ -354,8 +386,17 @@ const Vencimento = () => {
     }
     setIsParsing(true)
     try {
+      if (pendingFile?.source === 'electron') {
+        const raw = await window.electronAPI.readFile(pendingFile.filePath)
+        const buffer = toArrayBuffer(raw)
+        if (!buffer) throw new Error('buffer-invalid')
+        const parsed = await parseWorkbookBuffer(buffer)
+        setOperations(parsed)
+        notify('Planilha vinculada e calculada.', 'success')
+        return
+      }
       const formData = new FormData()
-      formData.append('file', pendingFile)
+      formData.append('file', pendingFile?.file || pendingFile)
       const response = await fetch('/api/vencimentos/parse', {
         method: 'POST',
         body: formData,
@@ -367,7 +408,8 @@ const Vencimento = () => {
       notify('Planilha vinculada e calculada.', 'success')
     } catch {
       try {
-        const parsed = await parseWorkbook(pendingFile)
+        const file = pendingFile?.file || pendingFile
+        const parsed = await parseWorkbook(file)
         setOperations(parsed)
         notify('API indisponivel. Calculo local aplicado.', 'warning')
       } catch {
