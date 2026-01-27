@@ -50,6 +50,80 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+const mapLegType = (value) => {
+  const upper = String(value || '').toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+  if (!upper) return null
+  if (upper.includes('STOCK') || upper.includes('ESTOQUE') || upper.includes('ACAO')) return 'STOCK'
+  if (upper.includes('CALL')) return 'CALL'
+  if (upper.includes('PUT')) return 'PUT'
+  return null
+}
+
+const parsePosicaoConsolidada = (normalizedRow, XLSX) => {
+  const hasLayout = normalizedRow.tipo1 || normalizedRow.quantidadeativa1 || normalizedRow.valordostrike1
+  if (!hasLayout) return null
+
+  const legs = []
+  let quantidadeStock = null
+
+  for (let i = 1; i <= 4; i += 1) {
+    const tipoRaw = getValue(normalizedRow, [`tipo${i}`])
+    const mapped = mapLegType(tipoRaw)
+    const qty = toNumber(getValue(normalizedRow, [`quantidadeativa${i}`]))
+    const strike = toNumber(getValue(normalizedRow, [`valordostrike${i}`]))
+    const barreiraValor = toNumber(getValue(normalizedRow, [`valordabarreira${i}`]))
+    const barreiraTipo = getValue(normalizedRow, [`tipodabarreira${i}`])
+    const rebate = toNumber(getValue(normalizedRow, [`valordorebate${i}`]))
+
+    if (!mapped && qty == null && strike == null && barreiraValor == null) continue
+
+    if (mapped === 'STOCK') {
+      if (qty != null) quantidadeStock = (quantidadeStock ?? 0) + qty
+      continue
+    }
+
+    if (mapped === 'CALL' || mapped === 'PUT') {
+      legs.push({
+        id: `leg-${i}`,
+        tipo: mapped,
+        quantidade: qty ?? 0,
+        strike: strike ?? null,
+        barreiraValor: barreiraValor ?? null,
+        barreiraTipo,
+        rebate: rebate ?? 0,
+      })
+    }
+  }
+
+  const spotInicial = toNumber(getValue(normalizedRow, ['valorativo']))
+  const custoUnitarioRaw = toNumber(getValue(normalizedRow, ['custounitariocliente']))
+  const custoUnitario = custoUnitarioRaw > 0 ? custoUnitarioRaw : spotInicial
+
+  const codigoCliente = getValue(normalizedRow, ['codigodocliente'])
+  const codigoOperacao = getValue(normalizedRow, ['codigodaoperacao'])
+
+  return {
+    id: String(codigoOperacao || Math.random().toString(36).slice(2)),
+    codigoCliente,
+    cliente: codigoCliente,
+    assessor: getValue(normalizedRow, ['codigodoassessor', 'assessor', 'consultor']),
+    broker: getValue(normalizedRow, ['canaldeorigem', 'broker', 'corretora']),
+    ativo: getValue(normalizedRow, ['ativo', 'ticker']),
+    estrutura: getValue(normalizedRow, ['estrutura', 'tipoestrutura']),
+    codigoOperacao,
+    dataRegistro: normalizeDate(getValue(normalizedRow, ['dataregistro']), XLSX),
+    vencimento: normalizeDate(getValue(normalizedRow, ['datavencimento']), XLSX),
+    spotInicial: spotInicial ?? null,
+    custoUnitario: custoUnitario ?? null,
+    quantidade: quantidadeStock ?? 0,
+    cupom: getValue(normalizedRow, ['cupom', 'taxacupom']),
+    pagou: toNumber(getValue(normalizedRow, ['pagou'])),
+    pernas: legs,
+  }
+}
+
 const parseLegs = (row) => {
   const legs = []
   for (let i = 1; i <= 4; i += 1) {
@@ -104,6 +178,16 @@ const normalizeDate = (value, XLSX) => {
       return date.toISOString().slice(0, 10)
     }
   }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    const match = trimmed.match(/(\d{2})[\/-](\d{2})[\/-](\d{4})/)
+    if (match) {
+      const [, day, month, year] = match
+      const date = new Date(`${year}-${month}-${day}T00:00:00`)
+      if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10)
+    }
+    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10)
+  }
   return value
 }
 
@@ -118,6 +202,9 @@ const parseBuffer = (buffer, XLSX) => {
       acc[normalizeKey(key)] = row[key]
       return acc
     }, {})
+
+    const posicaoRow = parsePosicaoConsolidada(normalizedRow, XLSX)
+    if (posicaoRow) return posicaoRow
 
     const dataRegistro = normalizeDate(getValue(normalizedRow, ['dataregistro', 'dataderegistro', 'dataentrada', 'datainicio', 'entrada']), XLSX)
     const dataVencimento = normalizeDate(getValue(normalizedRow, ['datavencimento', 'datadevencimento', 'datafim', 'vencimento']), XLSX)

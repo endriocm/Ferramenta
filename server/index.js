@@ -18,6 +18,22 @@ const normalizeKey = (value) => String(value || '')
   .replace(/\s+/g, '')
   .replace(/[^a-z0-9]/g, '')
 
+const normalizeSheetName = (value) => String(value || '')
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/\s+/g, '')
+
+const pickSheetName = (workbook) => {
+  if (!workbook?.SheetNames?.length) return null
+  const preferred = workbook.SheetNames.find((name) => {
+    const normalized = normalizeSheetName(name)
+    return normalized.includes('posicaoconsolidada')
+      || (normalized.includes('posicao') && normalized.includes('consolidada'))
+  })
+  return preferred || workbook.SheetNames[0]
+}
+
 const getValue = (row, keys) => {
   for (const key of keys) {
     if (row[key] != null && row[key] !== '') return row[key]
@@ -57,6 +73,16 @@ const normalizeDate = (value) => {
       return date.toISOString().slice(0, 10)
     }
   }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    const match = trimmed.match(/(\d{2})[\/-](\d{2})[\/-](\d{4})/)
+    if (match) {
+      const [, day, month, year] = match
+      const date = new Date(`${year}-${month}-${day}T00:00:00`)
+      if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10)
+    }
+    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10)
+  }
   return value
 }
 
@@ -67,6 +93,80 @@ const readBodySnippet = async (response) => {
     return text.length > 300 ? `${text.slice(0, 300)}...` : text
   } catch {
     return ''
+  }
+}
+
+const mapLegType = (value) => {
+  const upper = String(value || '').toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+  if (!upper) return null
+  if (upper.includes('STOCK') || upper.includes('ESTOQUE') || upper.includes('ACAO')) return 'STOCK'
+  if (upper.includes('CALL')) return 'CALL'
+  if (upper.includes('PUT')) return 'PUT'
+  return null
+}
+
+const parsePosicaoConsolidada = (normalizedRow) => {
+  const hasLayout = normalizedRow.tipo1 || normalizedRow.quantidadeativa1 || normalizedRow.valordostrike1
+  if (!hasLayout) return null
+
+  const legs = []
+  let quantidadeStock = null
+
+  for (let i = 1; i <= 4; i += 1) {
+    const tipoRaw = getValue(normalizedRow, [`tipo${i}`])
+    const mapped = mapLegType(tipoRaw)
+    const qty = toNumber(getValue(normalizedRow, [`quantidadeativa${i}`]))
+    const strike = toNumber(getValue(normalizedRow, [`valordostrike${i}`]))
+    const barreiraValor = toNumber(getValue(normalizedRow, [`valordabarreira${i}`]))
+    const barreiraTipo = getValue(normalizedRow, [`tipodabarreira${i}`])
+    const rebate = toNumber(getValue(normalizedRow, [`valordorebate${i}`]))
+
+    if (!mapped && qty == null && strike == null && barreiraValor == null) continue
+
+    if (mapped === 'STOCK') {
+      if (qty != null) quantidadeStock = (quantidadeStock ?? 0) + qty
+      continue
+    }
+
+    if (mapped === 'CALL' || mapped === 'PUT') {
+      legs.push({
+        id: `leg-${i}`,
+        tipo: mapped,
+        quantidade: qty ?? 0,
+        strike: strike ?? null,
+        barreiraValor: barreiraValor ?? null,
+        barreiraTipo,
+        rebate: rebate ?? 0,
+      })
+    }
+  }
+
+  const spotInicial = toNumber(getValue(normalizedRow, ['valorativo']))
+  const custoUnitarioRaw = toNumber(getValue(normalizedRow, ['custounitariocliente']))
+  const custoUnitario = custoUnitarioRaw > 0 ? custoUnitarioRaw : spotInicial
+
+  const codigoCliente = getValue(normalizedRow, ['codigodocliente'])
+  const codigoOperacao = getValue(normalizedRow, ['codigodaoperacao'])
+
+  return {
+    id: String(codigoOperacao || Math.random().toString(36).slice(2)),
+    codigoCliente,
+    cliente: codigoCliente,
+    assessor: getValue(normalizedRow, ['codigodoassessor', 'assessor', 'consultor']),
+    broker: getValue(normalizedRow, ['canaldeorigem', 'broker', 'corretora']),
+    ativo: getValue(normalizedRow, ['ativo', 'ticker']),
+    estrutura: getValue(normalizedRow, ['estrutura', 'tipoestrutura']),
+    codigoOperacao,
+    dataRegistro: normalizeDate(getValue(normalizedRow, ['dataregistro'])),
+    vencimento: normalizeDate(getValue(normalizedRow, ['datavencimento'])),
+    spotInicial: spotInicial ?? null,
+    custoUnitario: custoUnitario ?? null,
+    quantidade: quantidadeStock ?? 0,
+    cupom: getValue(normalizedRow, ['cupom', 'taxacupom']),
+    pagou: toNumber(getValue(normalizedRow, ['pagou'])),
+    pernas: legs,
   }
 }
 
@@ -116,7 +216,7 @@ const parseColumnLegs = (row, quantity) => {
 
 const parseBuffer = (buffer) => {
   const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
-  const sheetName = workbook.SheetNames[0]
+  const sheetName = pickSheetName(workbook)
   const sheet = workbook.Sheets[sheetName]
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
 
@@ -125,6 +225,9 @@ const parseBuffer = (buffer) => {
       acc[normalizeKey(key)] = row[key]
       return acc
     }, {})
+
+    const posicaoRow = parsePosicaoConsolidada(normalizedRow)
+    if (posicaoRow) return posicaoRow
 
     const dataRegistro = normalizeDate(getValue(normalizedRow, ['dataregistro', 'dataderegistro', 'dataentrada', 'datainicio', 'entrada']))
     const dataVencimento = normalizeDate(getValue(normalizedRow, ['datavencimento', 'datadevencimento', 'datafim', 'vencimento']))

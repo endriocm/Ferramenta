@@ -88,7 +88,17 @@ export const computeResult = (operation, market, barrierStatus) => {
   const quantidade = Number(operation.quantidade || 0)
   const custoUnitario = Number(operation.custoUnitario || 0)
   const custoTotal = quantidade * custoUnitario
-  const pagou = operation.pagou != null && operation.pagou !== '' ? Number(operation.pagou) : custoTotal
+  const pagouManual = operation.pagou != null && operation.pagou !== '' ? Number(operation.pagou) : null
+  const optionQtyList = (operation.pernas || [])
+    .filter((leg) => ['CALL', 'PUT'].includes(String(leg?.tipo || '').toUpperCase()))
+    .map((leg) => Math.abs(Number(leg?.quantidade || 0)))
+    .filter((qty) => qty > 0)
+  const optionQtyBase = optionQtyList.length ? Math.max(...optionQtyList) : 0
+  const optionEntryUnit = Math.abs(custoUnitario || 0)
+  const optionEntryTotal = optionEntryUnit && optionQtyBase ? optionEntryUnit * optionQtyBase : 0
+  const pagou = pagouManual != null
+    ? pagouManual
+    : (!quantidade && optionEntryTotal ? optionEntryTotal : custoTotal)
 
   const spotFinal = market?.close ?? operation.spotInicial ?? 0
   const vendaAtivo = quantidade ? spotFinal * quantidade : 0
@@ -143,6 +153,8 @@ export const computeResult = (operation, market, barrierStatus) => {
     vendaAtivo,
     custoTotal,
     pagou,
+    valorEntrada: pagou,
+    debito: Math.max(0, pagou),
     payoff,
     ganhoCall,
     ganhoPut,

@@ -34,8 +34,9 @@ const getBarrierBadge = (status) => {
 }
 
 const buildCopySummary = (row) => {
+  const clienteLabel = row.codigoCliente || row.cliente || '-'
   return [
-    `Cliente: ${row.cliente}`,
+    `Cliente: ${clienteLabel}`,
     `Ativo: ${row.ativo}`,
     `Estrutura: ${row.estrutura}`,
     `Resultado: ${formatCurrency(row.result.financeiroFinal)}`,
@@ -294,10 +295,12 @@ const Vencimento = () => {
       })
       .filter((entry) => {
         const query = filters.search.toLowerCase()
-        if (query && !`${entry.cliente} ${entry.ativo} ${entry.estrutura}`.toLowerCase().includes(query)) return false
+        const searchBase = `${entry.codigoCliente || entry.cliente || ''} ${entry.ativo || ''} ${entry.estrutura || ''} ${entry.assessor || ''} ${entry.broker || ''}`.toLowerCase()
+        if (query && !searchBase.includes(query)) return false
         if (filters.broker && entry.broker !== filters.broker) return false
         if (filters.assessor && entry.assessor !== filters.assessor) return false
-        if (filters.cliente && entry.cliente !== filters.cliente) return false
+        const clienteMatch = entry.codigoCliente || entry.cliente
+        if (filters.cliente && clienteMatch !== filters.cliente) return false
         if (filters.status && entry.status.key !== filters.status) return false
         return true
       })
@@ -325,27 +328,32 @@ const Vencimento = () => {
   const columns = useMemo(
     () => [
       {
-        key: 'datas',
-        label: 'Datas',
-        render: (row) => (
-          <div className="cell-stack">
-            <strong>{formatDate(row.dataRegistro)}</strong>
-            <small>{formatDate(row.vencimento)}</small>
-          </div>
-        ),
+        key: 'assessor',
+        label: 'Assessor',
+        render: (row) => row.assessor || '—',
       },
       {
-        key: 'cliente',
-        label: 'Cliente',
-        render: (row) => (
-          <div className="cell-stack">
-            <strong>{row.cliente}</strong>
-            <small>{row.assessor}</small>
-          </div>
-        ),
+        key: 'broker',
+        label: 'Broker',
+        render: (row) => row.broker || '—',
+      },
+      {
+        key: 'codigoCliente',
+        label: 'Codigo cliente',
+        render: (row) => row.codigoCliente || row.cliente || '—',
+      },
+      {
+        key: 'dataRegistro',
+        label: 'Data registro',
+        render: (row) => formatDate(row.dataRegistro),
       },
       { key: 'ativo', label: 'Ativo' },
       { key: 'estrutura', label: 'Estrutura' },
+      {
+        key: 'vencimento',
+        label: 'Vencimento',
+        render: (row) => formatDate(row.vencimento),
+      },
       {
         key: 'spot',
         label: 'Spot',
@@ -369,8 +377,43 @@ const Vencimento = () => {
         ),
       },
       {
+        key: 'valorEntrada',
+        label: 'Valor de entrada',
+        render: (row) => formatCurrency(row.result.valorEntrada ?? row.result.pagou),
+      },
+      {
+        key: 'resultado',
+        label: 'Resultado $',
+        render: (row) => formatCurrency(row.result.financeiroFinal),
+      },
+      {
+        key: 'vendaAtivo',
+        label: 'Venda do ativo',
+        render: (row) => formatCurrency(row.result.vendaAtivo),
+      },
+      {
+        key: 'resultadoPercent',
+        label: 'Resultado %',
+        render: (row) => `${(row.result.percent * 100).toFixed(2)}%`,
+      },
+      {
+        key: 'debito',
+        label: 'Debito',
+        render: (row) => formatCurrency(row.result.debito ?? Math.max(0, row.result.pagou || 0)),
+      },
+      {
+        key: 'ganhosOpcoes',
+        label: 'Ganho nas opcoes',
+        render: (row) => formatCurrency(row.result.ganhosOpcoes),
+      },
+      {
+        key: 'cupom',
+        label: 'Cupom',
+        render: (row) => row.cupom || 'N/A',
+      },
+      {
         key: 'barreira',
-        label: 'Barreira',
+        label: 'Status barreira',
         render: (row) => {
           const badge = getBarrierBadge(row.barrierStatus)
           const manual = row.override?.high !== 'auto' || row.override?.low !== 'auto'
@@ -381,36 +424,6 @@ const Vencimento = () => {
             </div>
           )
         },
-      },
-      {
-        key: 'resultado',
-        label: 'Resultado',
-        render: (row) => (
-          <div className="cell-stack">
-            <strong>{formatCurrency(row.result.financeiroFinal)}</strong>
-            <small>{(row.result.percent * 100).toFixed(2)}%</small>
-          </div>
-        ),
-      },
-      {
-        key: 'pagou',
-        label: 'Pagou',
-        render: (row) => formatCurrency(row.result.pagou),
-      },
-      {
-        key: 'dividendos',
-        label: 'Dividendos',
-        render: (row) => formatCurrency(row.result.dividends),
-      },
-      {
-        key: 'cupom',
-        label: 'Cupom/Rebate',
-        render: (row) => (
-          <div className="cell-stack">
-            <small>Cupom {row.cupom || 'N/A'}</small>
-            <small>Rebate {formatCurrency(row.result.rebateTotal)}</small>
-          </div>
-        ),
       },
       {
         key: 'acoes',
@@ -443,7 +456,7 @@ const Vencimento = () => {
         ),
       },
     ],
-    [handleReportClick, handleOverrideClick],
+    [handleRefreshData, handleReportClick, handleOverrideClick],
   )
 
   const chips = [
