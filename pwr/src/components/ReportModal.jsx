@@ -94,8 +94,24 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
               <strong>{formatCurrency(row.result.custoTotal)}</strong>
             </div>
             <div>
-              <span>Payoff opcoes</span>
-              <strong>{formatCurrency(row.result.payoff)}</strong>
+              <span>Pagou</span>
+              <strong>{formatCurrency(row.result.pagou)}</strong>
+            </div>
+            <div>
+              <span>Venda do ativo</span>
+              <strong>{formatCurrency(row.result.vendaAtivo)}</strong>
+            </div>
+            <div>
+              <span>Ganho na Call</span>
+              <strong>{formatCurrency(row.result.ganhoCall)}</strong>
+            </div>
+            <div>
+              <span>Ganho na Put</span>
+              <strong>{formatCurrency(row.result.ganhoPut)}</strong>
+            </div>
+            <div>
+              <span>Ganhos nas opcoes</span>
+              <strong>{formatCurrency(row.result.ganhosOpcoes)}</strong>
             </div>
             <div>
               <span>Dividendos</span>

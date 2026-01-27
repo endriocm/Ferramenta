@@ -9,8 +9,13 @@
 
 const resolveBarrierDirection = (type, barrierValue, spotInicial) => {
   const upper = (type || '').toUpperCase()
-  if (upper.includes('UP') || upper.includes('UO') || upper.includes('UI') || upper.includes('KO')) return 'high'
-  if (upper.includes('DOWN') || upper.includes('DO') || upper.includes('DI') || upper.includes('KI')) return 'low'
+  if (upper.includes('UP') || upper.includes('UO') || upper.includes('UI')) return 'high'
+  if (upper.includes('DOWN') || upper.includes('DO') || upper.includes('DI')) return 'low'
+  if (upper.includes('KO') || upper.includes('KI')) {
+    if (barrierValue != null && spotInicial != null) {
+      return Number(barrierValue) >= Number(spotInicial) ? 'high' : 'low'
+    }
+  }
   if (barrierValue != null && spotInicial != null) {
     return Number(barrierValue) >= Number(spotInicial) ? 'high' : 'low'
   }
@@ -83,15 +88,20 @@ export const computeResult = (operation, market, barrierStatus) => {
   const quantidade = Number(operation.quantidade || 0)
   const custoUnitario = Number(operation.custoUnitario || 0)
   const custoTotal = quantidade * custoUnitario
+  const pagou = operation.pagou != null && operation.pagou !== '' ? Number(operation.pagou) : custoTotal
 
   const spotFinal = market?.close ?? operation.spotInicial ?? 0
   const vendaAtivo = quantidade ? spotFinal * quantidade : 0
 
+  let ganhoCall = 0
+  let ganhoPut = 0
+
   const payoff = (operation.pernas || []).reduce((sum, leg) => {
     if (!isLegActive(leg, barrierStatus)) return sum
     const strike = Number(leg.strike || 0)
-    const qty = Number(leg.quantidade || quantidade)
-    if (!qty) return sum
+    const rawQty = Number(leg.quantidade || quantidade)
+    if (!rawQty) return sum
+    const qty = Math.abs(rawQty)
     const tipo = (leg.tipo || '').toUpperCase()
     let intrinsic = 0
     if (tipo === 'CALL') {
@@ -100,7 +110,11 @@ export const computeResult = (operation, market, barrierStatus) => {
       intrinsic = Math.max(strike - spotFinal, 0)
     }
     const side = (leg.side || 'long').toLowerCase() === 'short' ? -1 : 1
-    return sum + intrinsic * qty * side
+    const signedSide = rawQty < 0 ? side * -1 : side
+    const result = intrinsic * qty * signedSide
+    if (tipo === 'CALL') ganhoCall += result
+    if (tipo === 'PUT') ganhoPut += result
+    return sum + result
   }, 0)
 
   const dividends = (market?.dividendsTotal || 0) * (quantidade || 0)
@@ -109,23 +123,30 @@ export const computeResult = (operation, market, barrierStatus) => {
   const rebateTotal = (operation.pernas || []).reduce((sum, leg) => {
     if (!leg?.rebate) return sum
     if (!isLegActive(leg, barrierStatus)) return sum
-    const qty = Number(leg.quantidade || quantidade)
+    const rawQty = Number(leg.quantidade || quantidade)
+    const qty = Math.abs(rawQty)
     return sum + Number(leg.rebate || 0) * qty
   }, 0)
 
-  let financeiroFinal = vendaAtivo - custoTotal + payoff + dividends + cupomTotal + rebateTotal
-  if (!Number.isFinite(financeiroFinal) || (!custoTotal && operation.pl != null)) {
+  const ganhosOpcoes = ganhoCall + ganhoPut
+
+  let financeiroFinal = vendaAtivo - pagou + ganhosOpcoes + dividends + cupomTotal + rebateTotal
+  if (!Number.isFinite(financeiroFinal) || (!pagou && operation.pl != null)) {
     financeiroFinal = Number(operation.pl || 0)
   }
 
   const ganho = financeiroFinal
-  const percent = custoTotal ? ganho / custoTotal : 0
+  const percent = pagou ? ganho / pagou : 0
 
   return {
     spotFinal,
     vendaAtivo,
     custoTotal,
+    pagou,
     payoff,
+    ganhoCall,
+    ganhoPut,
+    ganhosOpcoes,
     dividends,
     cupomTotal,
     rebateTotal,

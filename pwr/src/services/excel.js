@@ -34,6 +34,28 @@ const parseLegs = (row) => {
   return legs
 }
 
+const parseColumnLegs = (row, quantity) => {
+  const legs = []
+  const callComprada = getValue(row, ['callcomprada', 'callcompra'])
+  const callVendida = getValue(row, ['callvendida', 'callvenda'])
+  const putComprada = getValue(row, ['putcomprada', 'putcompra'])
+  const putComprada2 = getValue(row, ['putcomprada2', 'putcompra2'])
+  const putVendida = getValue(row, ['putvendida', 'putvenda'])
+
+  if (callComprada) legs.push({ id: 'call-comprada', tipo: 'CALL', side: 'long', strike: callComprada, quantidade: quantity })
+  if (callVendida) legs.push({ id: 'call-vendida', tipo: 'CALL', side: 'short', strike: callVendida, quantidade: quantity })
+  if (putComprada) legs.push({ id: 'put-comprada', tipo: 'PUT', side: 'long', strike: putComprada, quantidade: quantity })
+  if (putComprada2) legs.push({ id: 'put-comprada-2', tipo: 'PUT', side: 'long', strike: putComprada2, quantidade: quantity })
+  if (putVendida) legs.push({ id: 'put-vendida', tipo: 'PUT', side: 'short', strike: putVendida, quantidade: quantity })
+
+  const barreiraKi = getValue(row, ['barreiraki', 'barreira_ki'])
+  const barreiraKo = getValue(row, ['barreirako', 'barreira_ko'])
+  if (barreiraKi) legs.push({ id: 'barreira-ki', barreiraValor: barreiraKi, barreiraTipo: 'KI' })
+  if (barreiraKo) legs.push({ id: 'barreira-ko', barreiraValor: barreiraKo, barreiraTipo: 'KO' })
+
+  return legs
+}
+
 const normalizeDate = (value, XLSX) => {
   if (!value) return ''
   if (value instanceof Date) return value.toISOString().slice(0, 10)
@@ -64,6 +86,10 @@ export const parseWorkbook = async (file) => {
     const dataRegistro = normalizeDate(getValue(normalizedRow, ['dataregistro', 'dataentrada', 'datainicio']), XLSX)
     const dataVencimento = normalizeDate(getValue(normalizedRow, ['datavencimento', 'datafim']), XLSX)
 
+    const quantidade = getValue(normalizedRow, ['quantidade', 'qtd', 'lote'])
+    const pernas = parseLegs(normalizedRow)
+    const columnLegs = parseColumnLegs(normalizedRow, quantidade)
+
     return {
       id: String(getValue(normalizedRow, ['id', 'operacao', 'codigooperacao']) || Math.random().toString(36).slice(2)),
       cliente: getValue(normalizedRow, ['cliente', 'nomecliente']),
@@ -74,11 +100,12 @@ export const parseWorkbook = async (file) => {
       codigoOperacao: getValue(normalizedRow, ['codigooperacao', 'operacao']),
       dataRegistro: dataRegistro || '',
       vencimento: dataVencimento || '',
-      spotInicial: getValue(normalizedRow, ['spotinicial', 'spotentrada', 'spot']),
+      spotInicial: getValue(normalizedRow, ['spotinicial', 'spotentrada', 'spot', 'valordecompra', 'valorentrada']),
       custoUnitario: getValue(normalizedRow, ['custounitario', 'custounit', 'custo']),
-      quantidade: getValue(normalizedRow, ['quantidade', 'qtd', 'lote']),
+      quantidade,
       cupom: getValue(normalizedRow, ['cupom', 'taxacupom']),
-      pernas: parseLegs(normalizedRow),
+      pagou: getValue(normalizedRow, ['pagou']),
+      pernas: pernas.length ? pernas : columnLegs,
     }
   })
 }
