@@ -353,31 +353,23 @@ const Vencimento = () => {
       return
     }
     setIsParsing(true)
-    const isLocalHost = typeof window !== 'undefined'
-      && ['localhost', '127.0.0.1'].includes(window.location.hostname)
     try {
-      if (isLocalHost) {
-        const formData = new FormData()
-        formData.append('file', pendingFile)
-        const response = await fetch('/api/vencimentos/parse', {
-          method: 'POST',
-          body: formData,
-        })
-        if (!response.ok) throw new Error('api-failed')
-        const data = await response.json()
-        if (!data?.rows) throw new Error('api-invalid')
-        setOperations(data.rows)
-        notify('Planilha vinculada e calculada.', 'success')
-        return
-      }
-      const parsed = await parseWorkbook(pendingFile)
-      setOperations(parsed)
-      notify('Planilha calculada no navegador.', 'success')
+      const formData = new FormData()
+      formData.append('file', pendingFile)
+      const response = await fetch('/api/vencimentos/parse', {
+        method: 'POST',
+        body: formData,
+      })
+      if (!response.ok) throw new Error('api-failed')
+      const data = await response.json()
+      if (!data?.rows) throw new Error('api-invalid')
+      setOperations(data.rows)
+      notify('Planilha vinculada e calculada.', 'success')
     } catch {
       try {
         const parsed = await parseWorkbook(pendingFile)
         setOperations(parsed)
-        notify('Calculo local aplicado.', 'warning')
+        notify('API indisponivel. Calculo local aplicado.', 'warning')
       } catch {
         notify('Falha ao calcular os dados da planilha.', 'warning')
       }

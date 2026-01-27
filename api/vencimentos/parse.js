@@ -1,4 +1,5 @@
-﻿const XLSX_URL = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'
+const Busboy = require('busboy')
+const XLSX = require('xlsx')
 
 const normalizeKey = (value) => String(value || '')
   .toLowerCase()
@@ -50,6 +51,19 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+const normalizeDate = (value) => {
+  if (!value) return ''
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  if (typeof value === 'number' && XLSX?.SSF?.parse_date_code) {
+    const parsed = XLSX.SSF.parse_date_code(value)
+    if (parsed?.y && parsed?.m && parsed?.d) {
+      const date = new Date(parsed.y, parsed.m - 1, parsed.d)
+      return date.toISOString().slice(0, 10)
+    }
+  }
+  return value
+}
+
 const parseLegs = (row) => {
   const legs = []
   for (let i = 1; i <= 4; i += 1) {
@@ -94,23 +108,8 @@ const parseColumnLegs = (row, quantity) => {
   return legs
 }
 
-const normalizeDate = (value, XLSX) => {
-  if (!value) return ''
-  if (value instanceof Date) return value.toISOString().slice(0, 10)
-  if (typeof value === 'number' && XLSX?.SSF?.parse_date_code) {
-    const parsed = XLSX.SSF.parse_date_code(value)
-    if (parsed?.y && parsed?.m && parsed?.d) {
-      const date = new Date(parsed.y, parsed.m - 1, parsed.d)
-      return date.toISOString().slice(0, 10)
-    }
-  }
-  return value
-}
-
-export const parseWorkbook = async (file) => {
-  const XLSX = await import(/* @vite-ignore */ XLSX_URL)
-  const buffer = await file.arrayBuffer()
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
+const parseBuffer = (buffer) => {
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
   const sheetName = pickSheetName(workbook)
   const sheet = workbook.Sheets[sheetName]
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
@@ -121,8 +120,8 @@ export const parseWorkbook = async (file) => {
       return acc
     }, {})
 
-    const dataRegistro = normalizeDate(getValue(normalizedRow, ['dataregistro', 'dataderegistro', 'dataentrada', 'datainicio', 'entrada']), XLSX)
-    const dataVencimento = normalizeDate(getValue(normalizedRow, ['datavencimento', 'datadevencimento', 'datafim', 'vencimento']), XLSX)
+    const dataRegistro = normalizeDate(getValue(normalizedRow, ['dataregistro', 'dataderegistro', 'dataentrada', 'datainicio', 'entrada']))
+    const dataVencimento = normalizeDate(getValue(normalizedRow, ['datavencimento', 'datadevencimento', 'datafim', 'vencimento']))
 
     const quantidade = toNumber(getValue(normalizedRow, ['quantidade', 'qtd', 'lote']))
     const pernas = parseLegs(normalizedRow)
@@ -146,4 +145,65 @@ export const parseWorkbook = async (file) => {
       pernas: pernas.length ? pernas : columnLegs,
     }
   })
+}
+
+module.exports = (req, res) => {
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    res.status(204).end()
+    return
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Metodo nao permitido.' })
+    return
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', '*')
+
+  const busboy = Busboy({
+    headers: req.headers,
+    limits: { fileSize: 25 * 1024 * 1024 },
+  })
+
+  let fileBuffer = null
+  let fileName = null
+  let fileTooLarge = false
+
+  busboy.on('file', (_name, file, info) => {
+    fileName = info?.filename || null
+    const chunks = []
+    file.on('data', (data) => {
+      chunks.push(data)
+    })
+    file.on('limit', () => {
+      fileTooLarge = true
+    })
+    file.on('end', () => {
+      if (!fileTooLarge) {
+        fileBuffer = Buffer.concat(chunks)
+      }
+    })
+  })
+
+  busboy.on('finish', () => {
+    if (fileTooLarge) {
+      res.status(413).json({ error: 'Arquivo muito grande.' })
+      return
+    }
+    if (!fileBuffer) {
+      res.status(400).json({ error: 'Arquivo nao enviado.' })
+      return
+    }
+    try {
+      const rows = parseBuffer(fileBuffer)
+      res.status(200).json({ rows, fileName })
+    } catch (error) {
+      res.status(500).json({ error: 'Falha ao ler a planilha.' })
+    }
+  })
+
+  req.pipe(busboy)
 }
