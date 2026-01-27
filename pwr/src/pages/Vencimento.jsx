@@ -43,6 +43,22 @@ const buildCopySummary = (row) => {
   ].join('\n')
 }
 
+const normalizeFileName = (name) => String(name || '')
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+
+const pickPreferredFile = (files) => {
+  const candidates = files.filter((file) => file && file.name && file.name.toLowerCase().endsWith('.xlsx') && !file.name.startsWith('~$'))
+  if (!candidates.length) return null
+  const preferred = candidates.find((file) => {
+    const normalized = normalizeFileName(file.name)
+    return normalized.includes('relatorio') && normalized.includes('posicao')
+  })
+  if (preferred) return preferred
+  return candidates.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0))[0]
+}
+
 const Vencimento = () => {
   const { notify } = useToast()
   const [filters, setFilters] = useState({ search: '', broker: '', assessor: '', cliente: '', status: '' })
@@ -290,12 +306,14 @@ const Vencimento = () => {
       if ('showDirectoryPicker' in window) {
         const handle = await window.showDirectoryPicker()
         let pickedFile = null
+        const files = []
         for await (const entry of handle.values()) {
-          if (entry.kind === 'file' && entry.name.endsWith('.xlsx')) {
-            pickedFile = await entry.getFile()
-            break
+          if (entry.kind === 'file' && entry.name.toLowerCase().endsWith('.xlsx') && !entry.name.startsWith('~$')) {
+            const file = await entry.getFile()
+            files.push(file)
           }
         }
+        pickedFile = pickPreferredFile(files)
         if (!pickedFile) {
           notify('Nenhuma planilha .xlsx encontrada.', 'warning')
           setPendingFile(null)
@@ -314,7 +332,7 @@ const Vencimento = () => {
 
   const handleFileChange = async (event) => {
     const files = Array.from(event.target.files || [])
-    const file = files.find((item) => item.name.endsWith('.xlsx'))
+    const file = pickPreferredFile(files)
     if (!file) {
       notify('Selecione um arquivo .xlsx.', 'warning')
       return
@@ -331,11 +349,25 @@ const Vencimento = () => {
     }
     setIsParsing(true)
     try {
-      const parsed = await parseWorkbook(pendingFile)
-      setOperations(parsed)
+      const formData = new FormData()
+      formData.append('file', pendingFile)
+      const response = await fetch('/api/vencimentos/parse', {
+        method: 'POST',
+        body: formData,
+      })
+      if (!response.ok) throw new Error('api-failed')
+      const data = await response.json()
+      if (!data?.rows) throw new Error('api-invalid')
+      setOperations(data.rows)
       notify('Planilha vinculada e calculada.', 'success')
     } catch {
-      notify('Falha ao calcular os dados da planilha.', 'warning')
+      try {
+        const parsed = await parseWorkbook(pendingFile)
+        setOperations(parsed)
+        notify('API indisponivel. Calculo local aplicado.', 'warning')
+      } catch {
+        notify('Falha ao calcular os dados da planilha.', 'warning')
+      }
     } finally {
       setIsParsing(false)
     }
@@ -426,6 +458,9 @@ const Vencimento = () => {
               type="file"
               accept=".xlsx"
               onChange={handleFileChange}
+              multiple
+              webkitdirectory="true"
+              directory="true"
               hidden
             />
           </div>

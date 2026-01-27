@@ -1,4 +1,17 @@
-﻿const XLSX_URL = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'
+const express = require('express')
+const cors = require('cors')
+const multer = require('multer')
+const XLSX = require('xlsx')
+
+const PORT = process.env.PORT || 4170
+
+const app = express()
+app.use(cors())
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+})
 
 const normalizeKey = (value) => String(value || '')
   .toLowerCase()
@@ -32,6 +45,19 @@ const toNumber = (value) => {
   }
   const parsed = Number(cleaned)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+const normalizeDate = (value) => {
+  if (!value) return ''
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  if (typeof value === 'number' && XLSX?.SSF?.parse_date_code) {
+    const parsed = XLSX.SSF.parse_date_code(value)
+    if (parsed?.y && parsed?.m && parsed?.d) {
+      const date = new Date(parsed.y, parsed.m - 1, parsed.d)
+      return date.toISOString().slice(0, 10)
+    }
+  }
+  return value
 }
 
 const parseLegs = (row) => {
@@ -78,23 +104,8 @@ const parseColumnLegs = (row, quantity) => {
   return legs
 }
 
-const normalizeDate = (value, XLSX) => {
-  if (!value) return ''
-  if (value instanceof Date) return value.toISOString().slice(0, 10)
-  if (typeof value === 'number' && XLSX?.SSF?.parse_date_code) {
-    const parsed = XLSX.SSF.parse_date_code(value)
-    if (parsed?.y && parsed?.m && parsed?.d) {
-      const date = new Date(parsed.y, parsed.m - 1, parsed.d)
-      return date.toISOString().slice(0, 10)
-    }
-  }
-  return value
-}
-
-export const parseWorkbook = async (file) => {
-  const XLSX = await import(/* @vite-ignore */ XLSX_URL)
-  const buffer = await file.arrayBuffer()
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
+const parseBuffer = (buffer) => {
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
   const sheetName = workbook.SheetNames[0]
   const sheet = workbook.Sheets[sheetName]
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
@@ -105,8 +116,8 @@ export const parseWorkbook = async (file) => {
       return acc
     }, {})
 
-    const dataRegistro = normalizeDate(getValue(normalizedRow, ['dataregistro', 'dataderegistro', 'dataentrada', 'datainicio', 'entrada']), XLSX)
-    const dataVencimento = normalizeDate(getValue(normalizedRow, ['datavencimento', 'datadevencimento', 'datafim', 'vencimento']), XLSX)
+    const dataRegistro = normalizeDate(getValue(normalizedRow, ['dataregistro', 'dataderegistro', 'dataentrada', 'datainicio', 'entrada']))
+    const dataVencimento = normalizeDate(getValue(normalizedRow, ['datavencimento', 'datadevencimento', 'datafim', 'vencimento']))
 
     const quantidade = toNumber(getValue(normalizedRow, ['quantidade', 'qtd', 'lote']))
     const pernas = parseLegs(normalizedRow)
@@ -131,3 +142,24 @@ export const parseWorkbook = async (file) => {
     }
   })
 }
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true })
+})
+
+app.post('/api/vencimentos/parse', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: 'Arquivo nao enviado.' })
+    return
+  }
+  try {
+    const rows = parseBuffer(req.file.buffer)
+    res.json({ rows, fileName: req.file.originalname })
+  } catch (error) {
+    res.status(500).json({ error: 'Falha ao ler a planilha.' })
+  }
+})
+
+app.listen(PORT, () => {
+  console.log(`API rodando em http://localhost:${PORT}`)
+})
