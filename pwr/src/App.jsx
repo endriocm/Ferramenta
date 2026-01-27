@@ -1,17 +1,18 @@
-﻿import { useEffect, useMemo, useState } from 'react'
+﻿import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import Sidebar from './components/Sidebar'
 import Topbar from './components/Topbar'
 import ToastProvider from './components/ToastProvider'
 import { useHashRoute } from './hooks/useHashRoute'
 import { routeTitles } from './data/navigation'
-import Dashboard from './pages/Dashboard'
-import RevenueStructured from './pages/RevenueStructured'
-import RevenueBovespa from './pages/RevenueBovespa'
-import RevenueBmf from './pages/RevenueBmf'
-import RevenueManual from './pages/RevenueManual'
-import Vencimento from './pages/Vencimento'
-import Tags from './pages/Tags'
-import NotFound from './pages/NotFound'
+
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const RevenueStructured = lazy(() => import('./pages/RevenueStructured'))
+const RevenueBovespa = lazy(() => import('./pages/RevenueBovespa'))
+const RevenueBmf = lazy(() => import('./pages/RevenueBmf'))
+const RevenueManual = lazy(() => import('./pages/RevenueManual'))
+const Vencimento = lazy(() => import('./pages/Vencimento'))
+const Tags = lazy(() => import('./pages/Tags'))
+const NotFound = lazy(() => import('./pages/NotFound'))
 
 const routeMap = {
   '/': Dashboard,
@@ -37,6 +38,15 @@ const resolvePath = (path) => {
   if (path === '/receita') return '/receita/estruturadas'
   return path
 }
+
+const LoadingFallback = () => (
+  <div className="page">
+    <div className="panel">
+      <h3>Carregando</h3>
+      <p className="muted">Preparando painel...</p>
+    </div>
+  </div>
+)
 
 function App() {
   const { path, navigate } = useHashRoute('/')
@@ -76,7 +86,9 @@ function App() {
             currentPath={resolvedPath}
           />
           <main className="page-content">
-            <CurrentPage />
+            <Suspense fallback={<LoadingFallback />}>
+              <CurrentPage />
+            </Suspense>
           </main>
         </div>
       </div>

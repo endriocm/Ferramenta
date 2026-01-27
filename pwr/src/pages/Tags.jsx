@@ -17,19 +17,22 @@ const Tags = () => {
     })
   }, [query])
 
-  const columns = [
-    { key: 'cliente', label: 'Cliente' },
-    { key: 'assessor', label: 'Assessor' },
-    { key: 'broker', label: 'Broker' },
-    {
-      key: 'status',
-      label: 'Status',
-      render: (row) => {
-        const tone = row.status === 'ativo' ? 'green' : row.status === 'pendente' ? 'amber' : 'violet'
-        return <Badge tone={tone}>{row.status}</Badge>
+  const columns = useMemo(
+    () => [
+      { key: 'cliente', label: 'Cliente' },
+      { key: 'assessor', label: 'Assessor' },
+      { key: 'broker', label: 'Broker' },
+      {
+        key: 'status',
+        label: 'Status',
+        render: (row) => {
+          const tone = row.status === 'ativo' ? 'green' : row.status === 'pendente' ? 'amber' : 'violet'
+          return <Badge tone={tone}>{row.status}</Badge>
+        },
       },
-    },
-  ]
+    ],
+    [],
+  )
 
   return (
     <div className="page">

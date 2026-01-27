@@ -1,4 +1,6 @@
-﻿const DataTable = ({ columns, rows, onRowClick, emptyMessage = 'Sem dados para exibir.' }) => {
+﻿import { memo } from 'react'
+
+const DataTable = ({ columns, rows, onRowClick, emptyMessage = 'Sem dados para exibir.' }) => {
   if (!rows.length) {
     return (
       <div className="empty-state">
@@ -35,4 +37,4 @@
   )
 }
 
-export default DataTable
+export default memo(DataTable)

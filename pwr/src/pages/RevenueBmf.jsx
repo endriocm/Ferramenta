@@ -21,18 +21,21 @@ const RevenueBmf = () => {
       })
   }, [filters])
 
-  const columns = [
-    { key: 'data', label: 'Data', render: (row) => formatDate(row.data) },
-    { key: 'cliente', label: 'Cliente' },
-    { key: 'assessor', label: 'Assessor' },
-    { key: 'ativo', label: 'Contrato' },
-    {
-      key: 'status',
-      label: 'Status',
-      render: (row) => <Badge tone={row.status === 'ok' ? 'green' : 'amber'}>{row.status === 'ok' ? 'OK' : 'Aviso'}</Badge>,
-    },
-    { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
-  ]
+  const columns = useMemo(
+    () => [
+      { key: 'data', label: 'Data', render: (row) => formatDate(row.data) },
+      { key: 'cliente', label: 'Cliente' },
+      { key: 'assessor', label: 'Assessor' },
+      { key: 'ativo', label: 'Contrato' },
+      {
+        key: 'status',
+        label: 'Status',
+        render: (row) => <Badge tone={row.status === 'ok' ? 'green' : 'amber'}>{row.status === 'ok' ? 'OK' : 'Aviso'}</Badge>,
+      },
+      { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
+    ],
+    [],
+  )
 
   return (
     <div className="page">

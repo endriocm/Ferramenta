@@ -27,23 +27,26 @@ const RevenueStructured = () => {
       })
   }, [filters])
 
-  const columns = [
-    { key: 'data', label: 'Data', render: (row) => formatDate(row.data) },
-    { key: 'cliente', label: 'Cliente' },
-    { key: 'assessor', label: 'Assessor' },
-    { key: 'ativo', label: 'Ativo' },
-    { key: 'estrutura', label: 'Estrutura' },
-    {
-      key: 'status',
-      label: 'Status',
-      render: (row) => {
-        const tone = row.status === 'ok' ? 'green' : row.status === 'duplicado' ? 'amber' : 'violet'
-        const label = row.status === 'ok' ? 'OK' : row.status === 'duplicado' ? 'Duplicado' : 'Aviso'
-        return <Badge tone={tone}>{label}</Badge>
+  const columns = useMemo(
+    () => [
+      { key: 'data', label: 'Data', render: (row) => formatDate(row.data) },
+      { key: 'cliente', label: 'Cliente' },
+      { key: 'assessor', label: 'Assessor' },
+      { key: 'ativo', label: 'Ativo' },
+      { key: 'estrutura', label: 'Estrutura' },
+      {
+        key: 'status',
+        label: 'Status',
+        render: (row) => {
+          const tone = row.status === 'ok' ? 'green' : row.status === 'duplicado' ? 'amber' : 'violet'
+          const label = row.status === 'ok' ? 'OK' : row.status === 'duplicado' ? 'Duplicado' : 'Aviso'
+          return <Badge tone={tone}>{label}</Badge>
+        },
       },
-    },
-    { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
-  ]
+      { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
+    ],
+    [],
+  )
 
   return (
     <div className="page">

@@ -1,4 +1,4 @@
-﻿import { useMemo, useState } from 'react'
+﻿import { useCallback, useMemo, useState } from 'react'
 import PageHeader from '../components/PageHeader'
 import DataTable from '../components/DataTable'
 import Badge from '../components/Badge'
@@ -42,22 +42,25 @@ const Vencimento = () => {
     return { total, criticos, alertas }
   }, [rows])
 
-  const columns = [
-    { key: 'vencimento', label: 'Data', render: (row) => formatDate(row.vencimento) },
-    { key: 'ativo', label: 'Ativo' },
-    { key: 'estrutura', label: 'Estrutura' },
-    { key: 'cliente', label: 'Cliente' },
-    {
-      key: 'status',
-      label: 'Status',
-      render: (row) => {
-        const config = statusConfig[row.status.key]
-        return <Badge tone={config.tone}>{config.label}</Badge>
+  const columns = useMemo(
+    () => [
+      { key: 'vencimento', label: 'Data', render: (row) => formatDate(row.vencimento) },
+      { key: 'ativo', label: 'Ativo' },
+      { key: 'estrutura', label: 'Estrutura' },
+      { key: 'cliente', label: 'Cliente' },
+      {
+        key: 'status',
+        label: 'Status',
+        render: (row) => {
+          const config = statusConfig[row.status.key]
+          return <Badge tone={config.tone}>{config.label}</Badge>
+        },
       },
-    },
-    { key: 'barreira', label: 'Barreira' },
-    { key: 'cupom', label: 'Cupom' },
-  ]
+      { key: 'barreira', label: 'Barreira' },
+      { key: 'cupom', label: 'Cupom' },
+    ],
+    [],
+  )
 
   const chips = [
     { key: 'broker', label: filters.broker },
@@ -65,6 +68,14 @@ const Vencimento = () => {
     { key: 'cliente', label: filters.cliente },
     { key: 'status', label: filters.status },
   ].filter((chip) => chip.label)
+
+  const handleRowClick = useCallback(
+    (row) => {
+      setSelected(row)
+      setTab('resumo')
+    },
+    [setSelected, setTab],
+  )
 
   return (
     <div className="page">
@@ -130,10 +141,7 @@ const Vencimento = () => {
           rows={rows}
           columns={columns}
           emptyMessage="Nenhuma estrutura encontrada."
-          onRowClick={(row) => {
-            setSelected(row)
-            setTab('resumo')
-          }}
+          onRowClick={handleRowClick}
         />
       </section>
 

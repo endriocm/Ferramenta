@@ -1,4 +1,4 @@
-﻿import { useState } from 'react'
+﻿import { useMemo, useState } from 'react'
 import PageHeader from '../components/PageHeader'
 import DataTable from '../components/DataTable'
 import Badge from '../components/Badge'
@@ -52,21 +52,24 @@ const RevenueManual = () => {
     setForm((prev) => ({ ...prev, cliente: '', assessor: '', ativo: '', valor: '' }))
   }
 
-  const columns = [
-    { key: 'data', label: 'Data', render: (row) => formatDate(row.data) },
-    { key: 'cliente', label: 'Cliente' },
-    { key: 'assessor', label: 'Assessor' },
-    { key: 'ativo', label: 'Ativo' },
-    { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
-    { key: 'status', label: 'Status', render: () => <Badge tone="green">OK</Badge> },
-  ]
+  const columns = useMemo(
+    () => [
+      { key: 'data', label: 'Data', render: (row) => formatDate(row.data) },
+      { key: 'cliente', label: 'Cliente' },
+      { key: 'assessor', label: 'Assessor' },
+      { key: 'ativo', label: 'Ativo' },
+      { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
+      { key: 'status', label: 'Status', render: () => <Badge tone="green">OK</Badge> },
+    ],
+    [],
+  )
 
   return (
     <div className="page">
       <PageHeader
         title="Receita Manual"
         subtitle="Lancamentos precisos com confirmacao inteligente."
-        meta={[{ label: 'Periodo selecionado', value: 'Jan 2026' }, { label: 'Entradas', value: entries.length }]} 
+        meta={[{ label: 'Periodo selecionado', value: 'Jan 2026' }, { label: 'Entradas', value: entries.length }]}
         actions={[{ label: 'Exportar', icon: 'download', variant: 'btn-secondary' }]}
       />
 

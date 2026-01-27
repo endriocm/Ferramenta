@@ -22,18 +22,25 @@ const RevenueBovespa = () => {
       })
   }, [filters])
 
-  const columns = [
-    { key: 'data', label: 'Data', render: (row) => formatDate(row.data) },
-    { key: 'cliente', label: 'Cliente' },
-    { key: 'ativo', label: 'Ativo' },
-    { key: 'estrutura', label: 'Estrutura' },
-    {
-      key: 'status',
-      label: 'Status',
-      render: (row) => <Badge tone={row.status === 'duplicado' ? 'amber' : 'green'}>{row.status === 'duplicado' ? 'Duplicado' : 'OK'}</Badge>,
-    },
-    { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
-  ]
+  const columns = useMemo(
+    () => [
+      { key: 'data', label: 'Data', render: (row) => formatDate(row.data) },
+      { key: 'cliente', label: 'Cliente' },
+      { key: 'ativo', label: 'Ativo' },
+      { key: 'estrutura', label: 'Estrutura' },
+      {
+        key: 'status',
+        label: 'Status',
+        render: (row) => (
+          <Badge tone={row.status === 'duplicado' ? 'amber' : 'green'}>
+            {row.status === 'duplicado' ? 'Duplicado' : 'OK'}
+          </Badge>
+        ),
+      },
+      { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
+    ],
+    [],
+  )
 
   return (
     <div className="page">
