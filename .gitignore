@@ -2,3 +2,12 @@
 .env*.local
 node_modules/
 pwr/node_modules/
+dist/
+build/
+out/
+release/
+pwr/dist/
+*.exe
+*.msi
+*.dmg
+*.zip

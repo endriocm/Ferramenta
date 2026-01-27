@@ -1,3 +1,0 @@
-*electron.zip filter=lfs diff=lfs merge=lfs -text
-electron/build/MeuInstalador.exe filter=lfs diff=lfs merge=lfs -text
-electron/** filter=lfs diff=lfs merge=lfs -text
