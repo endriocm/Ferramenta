@@ -390,6 +390,59 @@ const Vencimento = () => {
     }
   }, [notify])
 
+  const rows = useMemo(() => {
+    const vencimentoSet = new Set(filters.vencimentos)
+    return operations
+      .map((operation) => {
+        const market = marketMap[operation.id]
+        const override = overrides[operation.id] || { high: 'auto', low: 'auto', cupomManual: '' }
+        const spotBase = resolveSpotBase(operation, market)
+        const operationWithSpot = spotBase != null ? { ...operation, spotInicial: spotBase } : operation
+        const barrierStatus = computeBarrierStatus(operationWithSpot, market, override)
+        const cupomManual = override?.cupomManual != null && String(override.cupomManual).trim() !== ''
+          ? override.cupomManual
+          : null
+        const cupomResolved = cupomManual ?? operation.cupom
+        const result = computeResult(operationWithSpot, market, barrierStatus, override)
+        return {
+          ...operation,
+          market,
+          spotBase,
+          override,
+          cupomManual,
+          cupomResolved,
+          barrierStatus,
+          result,
+          status: getStatus(operation.vencimento),
+        }
+      })
+      .filter((entry) => {
+        const query = filters.search.toLowerCase()
+        const searchBase = `${entry.codigoCliente || entry.cliente || ''} ${entry.ativo || ''} ${entry.estrutura || ''} ${entry.assessor || ''} ${entry.broker || ''}`.toLowerCase()
+        if (query && !searchBase.includes(query)) return false
+        if (filters.broker && entry.broker !== filters.broker) return false
+        if (filters.assessor && entry.assessor !== filters.assessor) return false
+        const clienteMatch = entry.codigoCliente || entry.cliente
+        if (filters.cliente && clienteMatch !== filters.cliente) return false
+        if (filters.estrutura && entry.estrutura !== filters.estrutura) return false
+        if (vencimentoSet.size && !vencimentoSet.has(normalizeDateKey(entry.vencimento))) return false
+        if (filters.status && entry.status.key !== filters.status) return false
+        return true
+      })
+  }, [filters, operations, marketMap, overrides])
+
+  const pageCount = useMemo(() => Math.max(1, Math.ceil(rows.length / PAGE_SIZE)), [rows.length])
+  const paginationItems = useMemo(() => buildPagination(currentPage, pageCount), [currentPage, pageCount])
+  useEffect(() => {
+    setCurrentPage((prev) => Math.min(Math.max(prev, 1), pageCount))
+  }, [pageCount])
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [filters, operations])
+
+  const pageStart = (currentPage - 1) * PAGE_SIZE
+  const visibleRows = useMemo(() => rows.slice(pageStart, pageStart + PAGE_SIZE), [rows, pageStart])
+
   const handleRefreshAll = useCallback(async () => {
     setIsRefreshingAll(true)
     try {
@@ -445,59 +498,6 @@ const Vencimento = () => {
       setIsRefreshingAll(false)
     }
   }, [visibleRows, notify])
-
-  const rows = useMemo(() => {
-    const vencimentoSet = new Set(filters.vencimentos)
-    return operations
-      .map((operation) => {
-        const market = marketMap[operation.id]
-        const override = overrides[operation.id] || { high: 'auto', low: 'auto', cupomManual: '' }
-        const spotBase = resolveSpotBase(operation, market)
-        const operationWithSpot = spotBase != null ? { ...operation, spotInicial: spotBase } : operation
-        const barrierStatus = computeBarrierStatus(operationWithSpot, market, override)
-        const cupomManual = override?.cupomManual != null && String(override.cupomManual).trim() !== ''
-          ? override.cupomManual
-          : null
-        const cupomResolved = cupomManual ?? operation.cupom
-        const result = computeResult(operationWithSpot, market, barrierStatus, override)
-        return {
-          ...operation,
-          market,
-          spotBase,
-          override,
-          cupomManual,
-          cupomResolved,
-          barrierStatus,
-          result,
-          status: getStatus(operation.vencimento),
-        }
-      })
-      .filter((entry) => {
-        const query = filters.search.toLowerCase()
-        const searchBase = `${entry.codigoCliente || entry.cliente || ''} ${entry.ativo || ''} ${entry.estrutura || ''} ${entry.assessor || ''} ${entry.broker || ''}`.toLowerCase()
-        if (query && !searchBase.includes(query)) return false
-        if (filters.broker && entry.broker !== filters.broker) return false
-        if (filters.assessor && entry.assessor !== filters.assessor) return false
-        const clienteMatch = entry.codigoCliente || entry.cliente
-        if (filters.cliente && clienteMatch !== filters.cliente) return false
-        if (filters.estrutura && entry.estrutura !== filters.estrutura) return false
-        if (vencimentoSet.size && !vencimentoSet.has(normalizeDateKey(entry.vencimento))) return false
-        if (filters.status && entry.status.key !== filters.status) return false
-        return true
-      })
-  }, [filters, operations, marketMap, overrides])
-
-  const pageCount = useMemo(() => Math.max(1, Math.ceil(rows.length / PAGE_SIZE)), [rows.length])
-  const paginationItems = useMemo(() => buildPagination(currentPage, pageCount), [currentPage, pageCount])
-  useEffect(() => {
-    setCurrentPage((prev) => Math.min(Math.max(prev, 1), pageCount))
-  }, [pageCount])
-  useEffect(() => {
-    setCurrentPage(1)
-  }, [filters, operations])
-
-  const pageStart = (currentPage - 1) * PAGE_SIZE
-  const visibleRows = useMemo(() => rows.slice(pageStart, pageStart + PAGE_SIZE), [rows, pageStart])
 
   const totals = useMemo(() => {
     const total = rows.length
