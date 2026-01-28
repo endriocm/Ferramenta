@@ -148,18 +148,3 @@
     ],
   },
 ]
-
-export const statusConfig = {
-  ok: {
-    label: 'Neutro',
-    tone: 'cyan',
-  },
-  alerta: {
-    label: 'Alerta',
-    tone: 'amber',
-  },
-  critico: {
-    label: 'Critico',
-    tone: 'red',
-  },
-}

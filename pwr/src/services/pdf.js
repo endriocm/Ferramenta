@@ -45,7 +45,7 @@ export const exportReportPdf = ({ title, header, summary, details, barriers, war
     ${barriers.map((item) => buildRow(item.label, item.value)).join('')}
   </table>
 
-  ${warnings.length ? `<h2>Observacoes</h2><ul>${warnings.map((w) => `<li class=\"warning\">${w}</li>`).join('')}</ul>` : ''}
+  ${warnings.length ? `<h2>Observacoes</h2><ul>${warnings.map((w) => `<li class="warning">${w}</li>`).join('')}</ul>` : ''}
 </body>
 </html>
 `

@@ -180,7 +180,7 @@ const normalizeDate = (value, XLSX) => {
   }
   if (typeof value === 'string') {
     const trimmed = value.trim()
-    const match = trimmed.match(/(\d{2})[\/-](\d{2})[\/-](\d{4})/)
+    const match = trimmed.match(/(\d{2})[/-](\d{2})[/-](\d{4})/)
     if (match) {
       const [, day, month, year] = match
       const date = new Date(`${year}-${month}-${day}T00:00:00`)

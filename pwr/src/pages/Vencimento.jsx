@@ -6,7 +6,7 @@ import Icon from '../components/Icons'
 import ReportModal from '../components/ReportModal'
 import OverrideModal from '../components/OverrideModal'
 import SelectMenu from '../components/SelectMenu'
-import { vencimentos, statusConfig } from '../data/vencimento'
+import { vencimentos } from '../data/vencimento'
 import { formatCurrency, formatDate, formatNumber } from '../utils/format'
 import { fetchYahooMarketData } from '../services/marketData'
 import { computeBarrierStatus, computeResult } from '../services/settlement'
@@ -632,7 +632,7 @@ const Vencimento = () => {
     const payload = {
       title: `Relatorio - ${row.cliente}`,
       header: `${row.ativo} | ${row.estrutura} | ${formatDate(row.vencimento)}`,
-      summary: `<strong>${formatCurrency(row.result.financeiroFinal)}</strong> <span class=\"badge\">${barrierBadge.label}</span>`,
+      summary: `<strong>${formatCurrency(row.result.financeiroFinal)}</strong> <span class="badge">${barrierBadge.label}</span>`,
       details: [
         { label: 'Spot', value: formatSpotValue(row.spotBase ?? row.spotInicial) },
         { label: 'Quantidade', value: formatNumber(row.quantidade) },
