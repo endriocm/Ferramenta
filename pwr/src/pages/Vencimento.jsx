@@ -598,7 +598,7 @@ const Vencimento = () => {
       {
         key: 'debito',
         label: 'Debito',
-        render: (row) => formatCurrency(row.result.debito ?? Math.max(0, row.result.pagou || 0)),
+        render: (row) => formatCurrency(row.result.debito ?? 0),
       },
       {
         key: 'ganhosOpcoes',
@@ -787,8 +787,9 @@ const Vencimento = () => {
 
   const handleExportPdf = (row) => {
     const barrierBadge = getBarrierBadge(row.barrierStatus)
+    const clienteLabel = row.cliente || row.codigoCliente || 'Cliente'
     const payload = {
-      title: `Relatorio - ${row.cliente}`,
+      title: `Relatorio - ${clienteLabel}`,
       header: `${row.ativo} | ${row.estrutura} | ${formatDate(row.vencimento)}`,
       summary: `<strong>${formatCurrency(row.result.financeiroFinal)}</strong> <span class="badge">${barrierBadge.label}</span>`,
       details: [
@@ -820,7 +821,7 @@ const Vencimento = () => {
         row.cupomManual != null && String(row.cupomManual).trim() !== '' ? 'Cupom manual aplicado.' : null,
       ].filter(Boolean),
     }
-    exportReportPdf(payload, `${row.cliente}_${row.ativo}_${row.vencimento}`)
+    exportReportPdf(payload, `${clienteLabel}_${row.ativo}_${row.vencimento}`)
   }
 
   const handleCopy = async (row) => {

@@ -40,12 +40,13 @@ export const computeBarrierStatus = (operation, market, override) => {
 
   const highBarriers = barriers.filter((item) => item.direction === 'high')
   const lowBarriers = barriers.filter((item) => item.direction === 'low')
+  const spotFinal = market?.close ?? operation?.spotInicial ?? null
 
-  const autoHigh = highBarriers.length && market?.high != null
-    ? highBarriers.some((item) => Number(market.high) >= Number(item.barreiraValor))
+  const autoHigh = highBarriers.length && spotFinal != null
+    ? highBarriers.some((item) => Number(spotFinal) >= Number(item.barreiraValor))
     : null
-  const autoLow = lowBarriers.length && market?.low != null
-    ? lowBarriers.some((item) => Number(market.low) <= Number(item.barreiraValor))
+  const autoLow = lowBarriers.length && spotFinal != null
+    ? lowBarriers.some((item) => Number(spotFinal) <= Number(item.barreiraValor))
     : null
 
   const highOverride = override?.high && override.high !== 'auto' ? override.high === 'hit' : null
@@ -82,6 +83,20 @@ const isLegActive = (leg, barrierStatus) => {
     if (mode === 'in') return barrierStatus.low
   }
   return true
+}
+
+const isShortLeg = (leg) => {
+  const side = String(leg?.side || '').toLowerCase()
+  if (side === 'short' || side === 'vendida' || side === 'venda') return true
+  const qty = Number(leg?.quantidade || 0)
+  return qty < 0
+}
+
+const resolveDebitQuantity = (leg, fallback) => {
+  const baseQty = Math.abs(Number(fallback || 0))
+  if (baseQty) return baseQty
+  const legQty = Math.abs(Number(leg?.quantidade || 0))
+  return legQty || 0
 }
 
 const isCupomRecorrente = (estrutura) => {
@@ -148,6 +163,20 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
 
   const ganhosOpcoes = ganhoCall + ganhoPut
 
+  const debito = (operation.pernas || []).reduce((sum, leg) => {
+    if (!isLegActive(leg, barrierStatus)) return sum
+    const tipo = String(leg?.tipo || '').toUpperCase()
+    if (tipo !== 'CALL' && tipo !== 'PUT') return sum
+    if (!isShortLeg(leg)) return sum
+    const strike = Number(leg?.strike || 0)
+    if (!Number.isFinite(strike) || strike <= 0) return sum
+    const liquidou = tipo === 'CALL' ? spotFinal >= strike : spotFinal <= strike
+    if (!liquidou) return sum
+    const qty = resolveDebitQuantity(leg, quantidade)
+    if (!qty) return sum
+    return sum + strike * qty
+  }, 0)
+
   const valorSaida = isCupomRecorrente(operation.estrutura) ? pagou : vendaAtivo
   let financeiroFinal = valorSaida - pagou + ganhosOpcoes + dividends + cupomTotal + rebateTotal
   if (!Number.isFinite(financeiroFinal) || (!pagou && operation.pl != null)) {
@@ -164,7 +193,7 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
     custoTotal,
     pagou,
     valorEntrada: pagou,
-    debito: Math.max(0, pagou),
+    debito: Number.isFinite(debito) ? debito : 0,
     payoff,
     ganhoCall,
     ganhoPut,

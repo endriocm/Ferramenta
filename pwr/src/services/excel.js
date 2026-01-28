@@ -50,6 +50,38 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+const CODIGO_CLIENTE_KEYS = ['codigocliente', 'codigodocliente', 'codcliente', 'clienteid', 'conta', 'numerodaconta', 'codconta']
+const CODIGO_OPERACAO_KEYS = ['codigooperacao', 'codigodaoperacao', 'codoperacao', 'operacaoid', 'idoperacao', 'operacao', 'codigo']
+
+const hashString = (value) => {
+  let hash = 5381
+  const str = String(value || '')
+  for (let i = 0; i < str.length; i += 1) {
+    hash = ((hash << 5) + hash) + str.charCodeAt(i)
+    hash &= 0xffffffff
+  }
+  return Math.abs(hash).toString(36)
+}
+
+const buildOperationId = (payload) => {
+  const base = [
+    payload.codigoOperacao,
+    payload.codigoCliente,
+    payload.cliente,
+    payload.ativo,
+    payload.estrutura,
+    payload.dataRegistro,
+    payload.vencimento,
+    payload.spotInicial,
+    payload.custoUnitario,
+    payload.quantidade,
+  ].map((item) => String(item || '').trim()).join('|')
+  const legs = (payload.pernas || [])
+    .map((leg) => `${leg.tipo || ''}:${leg.side || ''}:${leg.quantidade || ''}:${leg.strike || ''}:${leg.barreiraTipo || ''}:${leg.barreiraValor || ''}`)
+    .join('|')
+  return `op-${hashString(`${base}|${legs}`)}`
+}
+
 const mapLegType = (value) => {
   const upper = String(value || '').toUpperCase()
     .normalize('NFD')
@@ -101,13 +133,27 @@ const parsePosicaoConsolidada = (normalizedRow, XLSX) => {
   const custoUnitarioRaw = toNumber(getValue(normalizedRow, ['custounitariocliente']))
   const custoUnitario = custoUnitarioRaw > 0 ? custoUnitarioRaw : spotInicial
 
-  const codigoCliente = getValue(normalizedRow, ['codigodocliente'])
-  const codigoOperacao = getValue(normalizedRow, ['codigodaoperacao'])
+  const codigoCliente = getValue(normalizedRow, CODIGO_CLIENTE_KEYS)
+  const codigoOperacao = getValue(normalizedRow, CODIGO_OPERACAO_KEYS)
+  const clienteNome = getValue(normalizedRow, ['cliente', 'nomecliente'])
+  const clienteLabel = clienteNome || codigoCliente
 
   return {
-    id: String(codigoOperacao || Math.random().toString(36).slice(2)),
+    id: codigoOperacao != null && codigoOperacao !== '' ? String(codigoOperacao) : buildOperationId({
+      codigoOperacao,
+      codigoCliente,
+      cliente: clienteLabel,
+      ativo: getValue(normalizedRow, ['ativo', 'ticker']),
+      estrutura: getValue(normalizedRow, ['estrutura', 'tipoestrutura']),
+      dataRegistro: normalizeDate(getValue(normalizedRow, ['dataregistro']), XLSX),
+      vencimento: normalizeDate(getValue(normalizedRow, ['datavencimento']), XLSX),
+      spotInicial: spotInicial ?? null,
+      custoUnitario: custoUnitario ?? null,
+      quantidade: quantidadeStock ?? 0,
+      pernas: legs,
+    }),
     codigoCliente,
-    cliente: codigoCliente,
+    cliente: clienteLabel,
     assessor: getValue(normalizedRow, ['codigodoassessor', 'assessor', 'consultor']),
     broker: getValue(normalizedRow, ['canaldeorigem', 'broker', 'corretora']),
     ativo: getValue(normalizedRow, ['ativo', 'ticker']),
@@ -212,15 +258,32 @@ const parseBuffer = (buffer, XLSX) => {
     const quantidade = toNumber(getValue(normalizedRow, ['quantidade', 'qtd', 'lote']))
     const pernas = parseLegs(normalizedRow)
     const columnLegs = parseColumnLegs(normalizedRow, quantidade)
+    const codigoCliente = getValue(normalizedRow, CODIGO_CLIENTE_KEYS)
+    const codigoOperacao = getValue(normalizedRow, CODIGO_OPERACAO_KEYS)
+    const clienteNome = getValue(normalizedRow, ['cliente', 'nomecliente'])
+    const clienteLabel = clienteNome || codigoCliente
 
     return {
-      id: String(getValue(normalizedRow, ['id', 'operacao', 'codigooperacao']) || Math.random().toString(36).slice(2)),
-      cliente: getValue(normalizedRow, ['cliente', 'nomecliente']),
+      id: codigoOperacao != null && codigoOperacao !== '' ? String(codigoOperacao) : buildOperationId({
+        codigoOperacao,
+        codigoCliente,
+        cliente: clienteLabel,
+        ativo: getValue(normalizedRow, ['ativo', 'ticker']),
+        estrutura: getValue(normalizedRow, ['estrutura', 'tipoestrutura']),
+        dataRegistro: dataRegistro || '',
+        vencimento: dataVencimento || '',
+        spotInicial: toNumber(getValue(normalizedRow, ['spotinicial', 'spotentrada', 'spot', 'valordecompra', 'valorentrada'])),
+        custoUnitario: toNumber(getValue(normalizedRow, ['custounitario', 'custounit', 'custo'])),
+        quantidade: quantidade ?? 0,
+        pernas: pernas.length ? pernas : columnLegs,
+      }),
+      cliente: clienteLabel,
+      codigoCliente,
       assessor: getValue(normalizedRow, ['assessor', 'consultor']),
       broker: getValue(normalizedRow, ['broker', 'corretora']),
       ativo: getValue(normalizedRow, ['ativo', 'ticker']),
       estrutura: getValue(normalizedRow, ['estrutura', 'tipoestrutura']),
-      codigoOperacao: getValue(normalizedRow, ['codigooperacao', 'operacao', 'codigo']),
+      codigoOperacao,
       dataRegistro: dataRegistro || '',
       vencimento: dataVencimento || '',
       spotInicial: toNumber(getValue(normalizedRow, ['spotinicial', 'spotentrada', 'spot', 'valordecompra', 'valorentrada'])),

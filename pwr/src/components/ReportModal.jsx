@@ -17,6 +17,7 @@ const getBarrierBadge = (status) => {
 const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
   if (!row) return null
 
+  const clienteLabel = row.cliente || row.codigoCliente || '—'
   const spotLabel = row.spotBase ?? row.spotInicial
   const spotValue = spotLabel == null || Number.isNaN(Number(spotLabel)) ? '—' : formatNumber(spotLabel)
 
@@ -39,13 +40,13 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
     <Modal
       open={open}
       onClose={onClose}
-      title={`Relatorio - ${row.cliente}`}
+      title={`Relatorio - ${clienteLabel}`}
       subtitle={`${row.ativo} | ${row.estrutura}`}
     >
       <div className="report-header">
         <div>
           <strong>Cliente</strong>
-          <p className="muted">{row.cliente}</p>
+          <p className="muted">{clienteLabel}</p>
         </div>
         <div>
           <strong>Codigo</strong>
