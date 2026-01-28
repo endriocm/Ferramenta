@@ -206,8 +206,8 @@ const buildPagination = (current, total) => {
 
 const buildDividendRequest = (operation) => {
   const ticker = normalizeYahooSymbol(operation?.ativo)
-  const from = operation?.dataRegistro
-  const to = operation?.vencimento
+  const from = normalizeDateKey(operation?.dataRegistro)
+  const to = normalizeDateKey(operation?.vencimento)
   if (!ticker || !from || !to) return null
   return {
     key: buildDividendKey(ticker, from, to),

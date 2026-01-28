@@ -1,4 +1,6 @@
-﻿const currencyFormatter = new Intl.NumberFormat('pt-BR', {
+import { normalizeDateKey } from './dateKey'
+
+const currencyFormatter = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
   currency: 'BRL',
   maximumFractionDigits: 0,
@@ -44,20 +46,34 @@ export const formatNumber = (value) => {
   return cacheSet(numberCache, number, numberFormatter.format(number))
 }
 
+const parseDateOnly = (value) => {
+  if (!value) return null
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value
+  }
+  const key = normalizeDateKey(value)
+  if (key) {
+    const [year, month, day] = key.split('-').map(Number)
+    return new Date(year, month - 1, day)
+  }
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
 export const formatDate = (value) => {
   if (!value) return '-'
-  const date = new Date(value)
+  const date = parseDateOnly(value)
+  if (!date) return '-'
   const time = date.getTime()
-  if (Number.isNaN(time)) return '-'
   if (dateCache.has(time)) return dateCache.get(time)
   return cacheSet(dateCache, time, dateFormatter.format(date))
 }
 
 export const formatShortDate = (value) => {
   if (!value) return '-'
-  const date = new Date(value)
+  const date = parseDateOnly(value)
+  if (!date) return '-'
   const time = date.getTime()
-  if (Number.isNaN(time)) return '-'
   if (shortDateCache.has(time)) return shortDateCache.get(time)
   return cacheSet(shortDateCache, time, shortDateFormatter.format(date))
 }
