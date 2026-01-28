@@ -6,6 +6,7 @@ import Icon from '../components/Icons'
 import ReportModal from '../components/ReportModal'
 import OverrideModal from '../components/OverrideModal'
 import SelectMenu from '../components/SelectMenu'
+import TreeSelect from '../components/TreeSelect'
 import { vencimentos } from '../data/vencimento'
 import { formatCurrency, formatDate, formatNumber } from '../utils/format'
 import { fetchYahooMarketData } from '../services/marketData'
@@ -106,19 +107,76 @@ const formatUpdateError = (error, prefix = 'Falha ao atualizar') => {
   return `${prefix}${providerLabel}: ${detail}`
 }
 
-const getMonthKey = (value) => {
+const normalizeDateKey = (value) => {
   if (!value) return ''
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
+  const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
-  return `${date.getFullYear()}-${month}`
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
-const formatMonthLabel = (key) => {
-  if (!key) return ''
-  const [year, month] = key.split('-')
-  if (!year || !month) return key
-  return `${month}/${year}`
+const formatMonthName = (year, month) => {
+  const date = new Date(Number(year), Number(month) - 1, 1)
+  if (Number.isNaN(date.getTime())) return `${month}/${year}`
+  const label = date.toLocaleDateString('pt-BR', { month: 'long' })
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}`
+}
+
+const formatDayLabel = (key) => {
+  const [year, month, day] = String(key || '').split('-')
+  if (!year || !month || !day) return String(key || '')
+  return day
+}
+
+const buildVencimentoTree = (items) => {
+  const years = new Map()
+  const allValues = new Set()
+
+  items.forEach((item) => {
+    const key = normalizeDateKey(item?.vencimento)
+    if (!key) return
+    allValues.add(key)
+    const [year, month] = key.split('-')
+    if (!years.has(year)) years.set(year, new Map())
+    const monthMap = years.get(year)
+    if (!monthMap.has(month)) monthMap.set(month, new Set())
+    monthMap.get(month).add(key)
+  })
+
+  const tree = Array.from(years.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([year, monthMap]) => {
+      const months = Array.from(monthMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([month, daySet]) => {
+          const days = Array.from(daySet).sort()
+          const children = days.map((key) => ({
+            key,
+            label: formatDayLabel(key),
+            value: key,
+            values: [key],
+          }))
+          return {
+            key: `${year}-${month}`,
+            label: `${formatMonthName(year, month)} (${month})`,
+            children,
+            values: days,
+            count: days.length,
+          }
+        })
+      const values = months.flatMap((month) => month.values)
+      return {
+        key: year,
+        label: year,
+        children: months,
+        values,
+        count: values.length,
+      }
+    })
+
+  return { tree, allValues: Array.from(allValues).sort() }
 }
 
 const buildOptions = (values, placeholder) => {
@@ -133,6 +191,25 @@ const getResultTone = (value) => {
   const number = Number(value)
   if (!Number.isFinite(number) || number === 0) return ''
   return number > 0 ? 'text-positive' : 'text-negative'
+}
+
+const buildPagination = (current, total) => {
+  if (total <= 1) return [1]
+  const delta = 1
+  const range = []
+  for (let page = 1; page <= total; page += 1) {
+    if (page === 1 || page === total || (page >= current - delta && page <= current + delta)) {
+      range.push(page)
+    }
+  }
+  const items = []
+  let previous = 0
+  range.forEach((page) => {
+    if (page - previous > 1) items.push('ellipsis')
+    items.push(page)
+    previous = page
+  })
+  return items
 }
 
 const fetchSpotPrice = async (ticker, { force = false } = {}) => {
@@ -191,13 +268,13 @@ const resolveSpotBase = (operation, market) => {
 
 const Vencimento = () => {
   const { notify } = useToast()
-  const [filters, setFilters] = useState({ search: '', broker: '', assessor: '', cliente: '', status: '', estrutura: '', vencimento: '' })
+  const [filters, setFilters] = useState({ search: '', broker: '', assessor: '', cliente: '', status: '', estrutura: '', vencimentos: [] })
   const [operations, setOperations] = useState(vencimentos)
   const [marketMap, setMarketMap] = useState({})
   const [overrides, setOverrides] = useState(() => loadOverrides())
   const [selectedReport, setSelectedReport] = useState(null)
   const [selectedOverride, setSelectedOverride] = useState(null)
-  const [overrideDraft, setOverrideDraft] = useState({ high: 'auto', low: 'auto' })
+  const [overrideDraft, setOverrideDraft] = useState({ high: 'auto', low: 'auto', cupomManual: '' })
   const [folderLabel, setFolderLabel] = useState('Nenhuma pasta vinculada')
   const [pendingFile, setPendingFile] = useState(null)
   const [isParsing, setIsParsing] = useState(false)
@@ -255,12 +332,10 @@ const Vencimento = () => {
   const brokerOptions = useMemo(() => buildOptions(operations.map((item) => item.broker), 'Broker'), [operations])
   const assessorOptions = useMemo(() => buildOptions(operations.map((item) => item.assessor), 'Assessor'), [operations])
   const estruturaOptions = useMemo(() => buildOptions(operations.map((item) => item.estrutura), 'Estrutura'), [operations])
-  const vencimentoOptions = useMemo(() => {
-    const unique = Array.from(new Set(
-      operations.map((item) => getMonthKey(item.vencimento)).filter(Boolean),
-    )).sort()
-    return [{ value: '', label: 'Vencimento' }, ...unique.map((value) => ({ value, label: formatMonthLabel(value) }))]
-  }, [operations])
+  const { tree: vencimentoTree, allValues: vencimentoValues } = useMemo(
+    () => buildVencimentoTree(operations),
+    [operations],
+  )
 
   const handleRefreshData = useCallback(async (operation) => {
     try {
@@ -317,19 +392,26 @@ const Vencimento = () => {
   }, [operations, notify])
 
   const rows = useMemo(() => {
+    const vencimentoSet = new Set(filters.vencimentos)
     return operations
       .map((operation) => {
         const market = marketMap[operation.id]
-        const override = overrides[operation.id] || { high: 'auto', low: 'auto' }
+        const override = overrides[operation.id] || { high: 'auto', low: 'auto', cupomManual: '' }
         const spotBase = resolveSpotBase(operation, market)
         const operationWithSpot = spotBase != null ? { ...operation, spotInicial: spotBase } : operation
         const barrierStatus = computeBarrierStatus(operationWithSpot, market, override)
-        const result = computeResult(operationWithSpot, market, barrierStatus)
+        const cupomManual = override?.cupomManual != null && String(override.cupomManual).trim() !== ''
+          ? override.cupomManual
+          : null
+        const cupomResolved = cupomManual ?? operation.cupom
+        const result = computeResult(operationWithSpot, market, barrierStatus, override)
         return {
           ...operation,
           market,
           spotBase,
           override,
+          cupomManual,
+          cupomResolved,
           barrierStatus,
           result,
           status: getStatus(operation.vencimento),
@@ -344,13 +426,14 @@ const Vencimento = () => {
         const clienteMatch = entry.codigoCliente || entry.cliente
         if (filters.cliente && clienteMatch !== filters.cliente) return false
         if (filters.estrutura && entry.estrutura !== filters.estrutura) return false
-        if (filters.vencimento && getMonthKey(entry.vencimento) !== filters.vencimento) return false
+        if (vencimentoSet.size && !vencimentoSet.has(normalizeDateKey(entry.vencimento))) return false
         if (filters.status && entry.status.key !== filters.status) return false
         return true
       })
   }, [filters, operations, marketMap, overrides])
 
   const pageCount = useMemo(() => Math.max(1, Math.ceil(rows.length / PAGE_SIZE)), [rows.length])
+  const paginationItems = useMemo(() => buildPagination(currentPage, pageCount), [currentPage, pageCount])
   useEffect(() => {
     setCurrentPage((prev) => Math.min(Math.max(prev, 1), pageCount))
   }, [pageCount])
@@ -373,7 +456,7 @@ const Vencimento = () => {
   }, [])
 
   const handleOverrideClick = useCallback((row) => {
-    const current = overrides[row.id] || { high: 'auto', low: 'auto' }
+    const current = overrides[row.id] || { high: 'auto', low: 'auto', cupomManual: '' }
     setOverrideDraft(current)
     setSelectedOverride(row)
   }, [overrides])
@@ -468,9 +551,23 @@ const Vencimento = () => {
         render: (row) => formatCurrency(row.result.ganhosOpcoes),
       },
       {
+        key: 'dividendos',
+        label: 'Dividendos',
+        render: (row) => formatCurrency(row.result.dividends),
+      },
+      {
         key: 'cupom',
         label: 'Cupom',
-        render: (row) => row.cupom || 'N/A',
+        render: (row) => {
+          const manual = row.cupomManual != null
+          const label = row.cupomResolved || row.cupom || 'N/A'
+          return (
+            <div className="cell-stack">
+              <strong>{label}</strong>
+              {manual ? <small>Manual</small> : <small>Automatico</small>}
+            </div>
+          )
+        },
       },
       {
         key: 'barreira',
@@ -520,12 +617,18 @@ const Vencimento = () => {
     [handleRefreshData, handleReportClick, handleOverrideClick],
   )
 
+  const vencimentoChipLabel = filters.vencimentos.length
+    ? (filters.vencimentos.length === 1
+      ? formatDate(filters.vencimentos[0])
+      : `${filters.vencimentos.length} vencimentos`)
+    : ''
+
   const chips = [
     { key: 'broker', label: filters.broker },
     { key: 'assessor', label: filters.assessor },
     { key: 'cliente', label: filters.cliente },
     { key: 'estrutura', label: filters.estrutura },
-    { key: 'vencimento', label: filters.vencimento ? formatMonthLabel(filters.vencimento) : '' },
+    { key: 'vencimentos', label: vencimentoChipLabel },
     { key: 'status', label: filters.status },
   ].filter((chip) => chip.label)
 
@@ -659,6 +762,7 @@ const Vencimento = () => {
       warnings: [
         row.market?.source !== 'yahoo' ? 'Cotacao em fallback.' : null,
         row.override?.high !== 'auto' || row.override?.low !== 'auto' ? 'Override manual aplicado.' : null,
+        row.cupomManual != null && String(row.cupomManual).trim() !== '' ? 'Cupom manual aplicado.' : null,
       ].filter(Boolean),
     }
     exportReportPdf(payload, `${row.cliente}_${row.ativo}_${row.vencimento}`)
@@ -758,11 +862,12 @@ const Vencimento = () => {
             onChange={(value) => setFilters((prev) => ({ ...prev, estrutura: value }))}
             placeholder="Estrutura"
           />
-          <SelectMenu
-            value={filters.vencimento}
-            options={vencimentoOptions}
-            onChange={(value) => setFilters((prev) => ({ ...prev, vencimento: value }))}
-            placeholder="Vencimento"
+          <TreeSelect
+            value={filters.vencimentos}
+            tree={vencimentoTree}
+            allValues={vencimentoValues}
+            onChange={(value) => setFilters((prev) => ({ ...prev, vencimentos: value }))}
+            placeholder="Vencimento da estrutura"
           />
           <input className="input" placeholder="Cliente" value={filters.cliente} onChange={(event) => setFilters((prev) => ({ ...prev, cliente: event.target.value }))} />
           <SelectMenu
@@ -783,7 +888,10 @@ const Vencimento = () => {
               <button
                 key={chip.key}
                 className="chip"
-                onClick={() => setFilters((prev) => ({ ...prev, [chip.key]: '' }))}
+                onClick={() => setFilters((prev) => ({
+                  ...prev,
+                  [chip.key]: Array.isArray(prev[chip.key]) ? [] : '',
+                }))}
                 type="button"
               >
                 {chip.label}
@@ -793,7 +901,7 @@ const Vencimento = () => {
             <button
               className="btn btn-secondary"
               type="button"
-              onClick={() => setFilters({ search: '', broker: '', assessor: '', cliente: '', status: '', estrutura: '', vencimento: '' })}
+              onClick={() => setFilters({ search: '', broker: '', assessor: '', cliente: '', status: '', estrutura: '', vencimentos: [] })}
             >
               Limpar tudo
             </button>
@@ -812,6 +920,14 @@ const Vencimento = () => {
             </button>
             <span className="muted">Mostrando {visibleRows.length} de {rows.length}</span>
           </div>
+        </div>
+        <DataTable
+          rows={visibleRows}
+          columns={columns}
+          emptyMessage="Nenhuma estrutura encontrada."
+          onRowClick={handleReportClick}
+        />
+        <div className="table-footer">
           <div className="table-pagination">
             <button
               className="btn btn-secondary"
@@ -821,16 +937,24 @@ const Vencimento = () => {
             >
               Anterior
             </button>
-            <SelectMenu
-              className="table-page-select"
-              value={currentPage}
-              options={Array.from({ length: pageCount }, (_, index) => index + 1).map((page) => ({
-                value: page,
-                label: `Pagina ${page} de ${pageCount}`,
-              }))}
-              onChange={(value) => setCurrentPage(Number(value))}
-              placeholder="Pagina"
-            />
+            <div className="page-list" role="navigation" aria-label="Paginacao">
+              <span className="page-label">Pagina</span>
+              {paginationItems.map((item, index) => (
+                item === 'ellipsis' ? (
+                  <span key={`ellipsis-${index}`} className="page-ellipsis">…</span>
+                ) : (
+                  <button
+                    key={`page-${item}`}
+                    className={`page-number ${item === currentPage ? 'active' : ''}`}
+                    type="button"
+                    onClick={() => setCurrentPage(item)}
+                    aria-current={item === currentPage ? 'page' : undefined}
+                  >
+                    {item}
+                  </button>
+                )
+              ))}
+            </div>
             <button
               className="btn btn-secondary"
               type="button"
@@ -841,12 +965,6 @@ const Vencimento = () => {
             </button>
           </div>
         </div>
-        <DataTable
-          rows={visibleRows}
-          columns={columns}
-          emptyMessage="Nenhuma estrutura encontrada."
-          onRowClick={handleReportClick}
-        />
       </section>
 
       <section className="panel">

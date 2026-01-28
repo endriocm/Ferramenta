@@ -22,6 +22,7 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
 
   const badge = getBarrierBadge(row.barrierStatus)
   const overrideManual = row.override?.high !== 'auto' || row.override?.low !== 'auto'
+  const cupomManual = row.cupomManual != null && String(row.cupomManual).trim() !== ''
   const warnings = []
 
   if (row.market?.source !== 'yahoo') {
@@ -29,6 +30,9 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
   }
   if (overrideManual) {
     warnings.push('Override manual aplicado nas barreiras.')
+  }
+  if (cupomManual) {
+    warnings.push('Cupom manual aplicado.')
   }
 
   return (
@@ -117,7 +121,7 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
               <strong>{formatCurrency(row.result.dividends)}</strong>
             </div>
             <div>
-              <span>Cupom</span>
+              <span>{cupomManual ? 'Cupom (manual)' : 'Cupom'}</span>
               <strong>{formatCurrency(row.result.cupomTotal)}</strong>
             </div>
             <div>

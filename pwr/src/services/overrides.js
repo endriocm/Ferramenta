@@ -18,7 +18,7 @@ export const updateOverride = (overrides, id, next) => {
   return {
     ...overrides,
     [id]: {
-      ...(overrides[id] || { high: 'auto', low: 'auto' }),
+      ...(overrides[id] || { high: 'auto', low: 'auto', cupomManual: '' }),
       ...next,
     },
   }

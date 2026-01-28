@@ -84,7 +84,12 @@ const isLegActive = (leg, barrierStatus) => {
   return true
 }
 
-export const computeResult = (operation, market, barrierStatus) => {
+const isCupomRecorrente = (estrutura) => {
+  const normalized = String(estrutura || '').trim().toLowerCase()
+  return normalized === 'cupom recorrente' || normalized === 'cupom recorrente europeia'
+}
+
+export const computeResult = (operation, market, barrierStatus, override = {}) => {
   const quantidade = Number(operation.quantidade || 0)
   const custoUnitario = Number(operation.custoUnitario || 0)
   const custoTotal = quantidade * custoUnitario
@@ -128,7 +133,10 @@ export const computeResult = (operation, market, barrierStatus) => {
   }, 0)
 
   const dividends = (market?.dividendsTotal || 0) * (quantidade || 0)
-  const cupomTotal = custoTotal ? parsePercent(operation.cupom) * custoTotal : 0
+  const cupomBase = override?.cupomManual != null && String(override.cupomManual).trim() !== ''
+    ? override.cupomManual
+    : operation.cupom
+  const cupomTotal = custoTotal ? parsePercent(cupomBase) * custoTotal : 0
 
   const rebateTotal = (operation.pernas || []).reduce((sum, leg) => {
     if (!leg?.rebate) return sum
@@ -140,7 +148,8 @@ export const computeResult = (operation, market, barrierStatus) => {
 
   const ganhosOpcoes = ganhoCall + ganhoPut
 
-  let financeiroFinal = vendaAtivo - pagou + ganhosOpcoes + dividends + cupomTotal + rebateTotal
+  const valorSaida = isCupomRecorrente(operation.estrutura) ? pagou : vendaAtivo
+  let financeiroFinal = valorSaida - pagou + ganhosOpcoes + dividends + cupomTotal + rebateTotal
   if (!Number.isFinite(financeiroFinal) || (!pagou && operation.pl != null)) {
     financeiroFinal = Number(operation.pl || 0)
   }
@@ -150,7 +159,8 @@ export const computeResult = (operation, market, barrierStatus) => {
 
   return {
     spotFinal,
-    vendaAtivo,
+    vendaAtivo: valorSaida,
+    valorSaida,
     custoTotal,
     pagou,
     valorEntrada: pagou,

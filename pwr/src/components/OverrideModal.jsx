@@ -22,6 +22,17 @@ const OverrideModal = ({ open, onClose, value, onChange, onApply, onReset }) => 
             <option value="nohit">Forcar nao bateu</option>
           </select>
         </label>
+        <label>
+          Cupom manual
+          <input
+            className="input"
+            type="text"
+            placeholder="Ex: 1.2%"
+            value={value.cupomManual ?? ''}
+            onChange={(event) => onChange({ ...value, cupomManual: event.target.value })}
+          />
+          <small className="muted">Deixa vazio para usar o cupom automatico.</small>
+        </label>
       </div>
       <p className="muted">Override manual altera o resultado imediatamente.</p>
       <div className="report-actions">

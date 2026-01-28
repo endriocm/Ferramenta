@@ -554,6 +554,72 @@ button {
   font-size: 0.85rem;
 }
 
+.tree-menu {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  max-height: none;
+  overflow: visible;
+}
+
+.tree-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--stroke);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tree-search .input {
+  border: none;
+  padding: 6px;
+  background: transparent;
+  width: 100%;
+}
+
+.tree-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tree-content {
+  display: grid;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.tree-node:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tree-node input {
+  accent-color: var(--cyan);
+}
+
+.tree-children {
+  display: grid;
+  gap: 4px;
+}
+
+.tree-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -998,6 +1064,43 @@ button {
 
 .table-pagination .input {
   min-width: 160px;
+}
+
+.table-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.page-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.page-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.page-number {
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--stroke);
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.page-number.active {
+  border-color: rgba(40, 242, 230, 0.6);
+  color: var(--cyan);
+  box-shadow: var(--glow-cyan);
+}
+
+.page-ellipsis {
+  color: var(--muted);
+  padding: 0 4px;
 }
 
 .report-header {
