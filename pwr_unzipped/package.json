@@ -1,0 +1,31 @@
+{
+  "name": "ferramenta",
+  "version": "1.0.0",
+  "description": "",
+  "main": "electron/main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "serve .",
+    "dev:api": "node server/index.js",
+    "dev:ui": "cd pwr && npm run dev",
+    "dev:electron": "set VITE_DEV_SERVER_URL=http://localhost:5173&& electron .",
+    "build:ui": "cd pwr && npm run build",
+    "start:electron": "electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "serve": "^14.2.5"
+  },
+  "dependencies": {
+    "axios": "^1.13.3",
+    "busboy": "^1.6.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "xlsx": "^0.18.5"
+  }
+}
