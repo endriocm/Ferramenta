@@ -143,7 +143,7 @@ const getFirstNumber = (obj, keys) => {
   return null
 }
 
-const getOptionQty = (operation, legs, fallback) => {
+const getOptionQty = (operation, legs) => {
   const direct = getFirstNumber(operation, [
     'qtdAtivaOpcao',
     'quantidadeAtivaOpcao',
@@ -157,21 +157,17 @@ const getOptionQty = (operation, legs, fallback) => {
     .map((leg) => Math.abs(resolveLegQuantity(leg, 0)))
     .filter((qty) => qty > 0)
   if (fromLegs.length) return Math.max(...fromLegs)
-  const fallbackQty = toNumber(fallback)
-  if (fallbackQty != null && fallbackQty !== 0) return Math.abs(fallbackQty)
   return null
 }
 
-const resolveUnitCost = (operation, fallback) => {
+const resolveUnitCost = (operation) => {
   const direct = getFirstNumber(operation, [
     'custoUnitarioOpcao',
     'custoOpcao',
     'premioOpcao',
   ])
   if (direct != null) return direct
-  const next = toNumber(fallback)
-  if (next != null) return next
-  return getFirstNumber(operation, ['custoUnitario', 'custoUnit', 'custo'])
+  return null
 }
 
 const resolvePutUnitCost = (operation) => {
@@ -186,7 +182,7 @@ const resolveStockValue = (operation) => {
   return getFirstNumber(operation, ['valorAtivo', 'precoAtivo', 'spotInicial', 'spotEntrada'])
 }
 
-const computeValorEntrada = (operation, legs, fallbackUnitCost, fallbackQty, fallbackValue) => {
+const computeValorEntrada = (operation, legs, fallbackValue) => {
   const estrutura = operation?.estrutura
   if (isAlocacaoProtegida(estrutura)) {
     const stockQty = getFirstNumber(operation, [
@@ -202,8 +198,8 @@ const computeValorEntrada = (operation, legs, fallbackUnitCost, fallbackQty, fal
       'qtdAtivaPut',
       'quantidadePut',
       'qtdPut',
-    ]) ?? getOptionQty(operation, legs, null)
-    const putUnitCost = resolvePutUnitCost(operation) ?? resolveUnitCost(operation, null)
+    ]) ?? getOptionQty(operation, legs)
+    const putUnitCost = resolvePutUnitCost(operation) ?? resolveUnitCost(operation)
     const missing = [stockQty, stockValue, putQty, putUnitCost]
       .some((value) => value == null || Number.isNaN(Number(value)) || Number(value) === 0)
     if (missing) {
@@ -231,8 +227,8 @@ const computeValorEntrada = (operation, legs, fallbackUnitCost, fallbackQty, fal
   }
 
   if (isCallPutStructure(estrutura)) {
-    const optionQty = getOptionQty(operation, legs, fallbackQty)
-    const optionUnitCost = resolveUnitCost(operation, fallbackUnitCost)
+    const optionQty = getOptionQty(operation, legs)
+    const optionUnitCost = resolveUnitCost(operation)
     const missing = [optionQty, optionUnitCost]
       .some((value) => value == null || Number.isNaN(Number(value)) || Number(value) === 0)
     if (missing) {
@@ -428,13 +424,7 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
   const ganho = financeiroFinal
   const percent = pagou ? ganho / pagou : 0
 
-  const valorEntradaInfo = computeValorEntrada(
-    operation,
-    effectiveLegs,
-    optionEntryUnit || custoUnitario,
-    optionQtyBase || qtyBase,
-    pagou,
-  )
+  const valorEntradaInfo = computeValorEntrada(operation, effectiveLegs, pagou)
 
   return {
     effectiveLegs,

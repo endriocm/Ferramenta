@@ -17,8 +17,11 @@ const MultiSelect = ({
   placeholder = 'Selecionar',
   className = '',
   menuClassName = '',
+  searchPlaceholder = 'Buscar',
 }) => {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const [draft, setDraft] = useState(new Set(value))
   const wrapRef = useRef(null)
   const label = useMemo(() => buildLabel(value, options, placeholder), [value, options, placeholder])
 
@@ -38,10 +41,26 @@ const MultiSelect = ({
     }
   }, [])
 
+  const filteredOptions = useMemo(() => {
+    const query = search.trim().toLowerCase()
+    if (!query) return options
+    return options.filter((option) => String(option.label || option.value || '').toLowerCase().includes(query))
+  }, [options, search])
+
   const toggleValue = (next) => {
-    const exists = value.includes(next)
-    const updated = exists ? value.filter((item) => item !== next) : [...value, next]
-    onChange?.(updated)
+    setDraft((prev) => {
+      const updated = new Set(prev)
+      if (updated.has(next)) updated.delete(next)
+      else updated.add(next)
+      return updated
+    })
+  }
+
+  const handleSelectAll = () => setDraft(new Set(options.map((option) => option.value)))
+  const handleClear = () => setDraft(new Set())
+  const handleApply = () => {
+    onChange?.(Array.from(draft).sort())
+    setOpen(false)
   }
 
   return (
@@ -49,7 +68,14 @@ const MultiSelect = ({
       <button
         className={`select-trigger ${open ? 'open' : ''}`}
         type="button"
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => setOpen((prev) => {
+          const next = !prev
+          if (next) {
+            setDraft(new Set(value))
+            setSearch('')
+          }
+          return next
+        })}
         aria-haspopup="listbox"
         aria-expanded={open}
       >
@@ -58,23 +84,43 @@ const MultiSelect = ({
       </button>
       {open ? (
         <div className={`select-menu ${menuClassName}`} role="listbox">
-          {options.length ? (
-            options.map((option) => {
-              const checked = value.includes(option.value)
-              return (
-                <label key={`${option.value}`} className={`select-option ${checked ? 'active' : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleValue(option.value)}
-                  />
-                  <span>{option.label}</span>
-                </label>
-              )
-            })
-          ) : (
-            <div className="select-empty">Sem opcoes</div>
-          )}
+          <div className="tree-search">
+            <Icon name="search" size={14} />
+            <input
+              className="input"
+              type="search"
+              placeholder={searchPlaceholder}
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </div>
+          <div className="tree-actions">
+            <button className="btn btn-secondary" type="button" onClick={handleSelectAll}>Selecionar tudo</button>
+            <button className="btn btn-secondary" type="button" onClick={handleClear}>Limpar</button>
+          </div>
+          <div className="tree-content">
+            {filteredOptions.length ? (
+              filteredOptions.map((option) => {
+                const checked = draft.has(option.value)
+                return (
+                  <label key={`${option.value}`} className={`select-option ${checked ? 'active' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleValue(option.value)}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                )
+              })
+            ) : (
+              <div className="select-empty">Sem opcoes</div>
+            )}
+          </div>
+          <div className="tree-footer">
+            <button className="btn btn-secondary" type="button" onClick={() => setOpen(false)}>Cancelar</button>
+            <button className="btn btn-primary" type="button" onClick={handleApply}>Aplicar</button>
+          </div>
         </div>
       ) : null}
     </div>

@@ -268,9 +268,10 @@ const buildPagination = (current, total) => {
   return items
 }
 
-const buildDividendRequest = (operation) => {
+const buildDividendRequest = (operation, reportDate) => {
   const ticker = normalizeYahooSymbol(operation?.ativo)
-  const from = normalizeDateKey(operation?.dataRegistro)
+  const baseFrom = normalizeDateKey(reportDate || operation?.dataRegistro)
+  const from = baseFrom ? addDays(baseFrom, 1) : ''
   const to = normalizeDateKey(operation?.vencimento)
   if (!ticker || !from || !to) return null
   return {
@@ -359,14 +360,6 @@ const Vencimento = () => {
     ativos: [],
     assessores: [],
   })
-  const [filtersDraft, setFiltersDraft] = useState({
-    broker: '',
-    status: '',
-    vencimentos: [],
-    estruturas: [],
-    ativos: [],
-    assessores: [],
-  })
   const [operations, setOperations] = useState(vencimentos)
   const [marketMap, setMarketMap] = useState({})
   const [overrides, setOverrides] = useState(() => loadOverrides(userKey))
@@ -439,17 +432,6 @@ const Vencimento = () => {
       // noop
     }
   }, [reportDate, userKey])
-
-  useEffect(() => {
-    setFiltersDraft({
-      broker: filters.broker,
-      status: filters.status,
-      vencimentos: filters.vencimentos,
-      estruturas: filters.estruturas,
-      ativos: filters.ativos,
-      assessores: filters.assessores,
-    })
-  }, [filters.broker, filters.status, filters.vencimentos, filters.estruturas, filters.ativos, filters.assessores])
 
   const broadcastUpdate = useCallback((type, payload = {}) => {
     if (!userKey) return
@@ -700,7 +682,7 @@ const Vencimento = () => {
     let active = true
     const loadMarket = async () => {
       const next = {}
-      const dividendRequests = operations.map(buildDividendRequest).filter(Boolean)
+      const dividendRequests = operations.map((operation) => buildDividendRequest(operation, reportDate)).filter(Boolean)
       let dividendMap = new Map()
       if (dividendRequests.length) {
         try {
@@ -712,7 +694,7 @@ const Vencimento = () => {
       }
       for (const operation of operations) {
         if (!operation.ativo || !operation.dataRegistro || !operation.vencimento) continue
-        const dividendRequest = buildDividendRequest(operation)
+        const dividendRequest = buildDividendRequest(operation, reportDate)
         const dividend = dividendRequest ? dividendMap.get(dividendRequest.key) : null
         try {
           const market = await fetchYahooMarketData({
@@ -832,7 +814,7 @@ const Vencimento = () => {
         endDate: operation.vencimento,
       })
       let dividend = null
-      const dividendRequest = buildDividendRequest(operation)
+      const dividendRequest = buildDividendRequest(operation, reportDate)
       if (dividendRequest) {
         try {
           dividend = await fetchDividend(dividendRequest)
@@ -956,11 +938,17 @@ const Vencimento = () => {
   const pageStart = (currentPage - 1) * PAGE_SIZE
   const visibleRows = useMemo(() => rows.slice(pageStart, pageStart + PAGE_SIZE), [rows, pageStart])
 
+  useEffect(() => {
+    if (!selectedReport) return
+    const updated = rows.find((row) => row.id === selectedReport.id)
+    if (updated && updated !== selectedReport) setSelectedReport(updated)
+  }, [rows, selectedReport])
+
   const handleRefreshAll = useCallback(async () => {
     setIsRefreshingAll(true)
     try {
       const operationMap = new Map(visibleRows.map((operation) => [operation.id, operation]))
-      const dividendRequests = visibleRows.map(buildDividendRequest).filter(Boolean)
+      const dividendRequests = visibleRows.map((operation) => buildDividendRequest(operation, reportDate)).filter(Boolean)
       let dividendMap = new Map()
       if (dividendRequests.length) {
         try {
@@ -992,7 +980,7 @@ const Vencimento = () => {
         updates.forEach((update) => {
           if (update?.id && update.market) {
             const operation = operationMap.get(update.id)
-            const dividendRequest = operation ? buildDividendRequest(operation) : null
+              const dividendRequest = operation ? buildDividendRequest(operation, reportDate) : null
             const dividend = dividendRequest ? dividendMap.get(dividendRequest.key) : null
             next[update.id] = applyDividendsToMarket(update.market, dividend)
           }
@@ -1224,35 +1212,27 @@ const Vencimento = () => {
     : ''
 
   const chips = [
-    { key: 'broker', label: filters.broker, onClear: () => setFilters((prev) => ({ ...prev, broker: '' })) },
+      { key: 'broker', label: filters.broker, onClear: () => setFilters((prev) => ({ ...prev, broker: '' })) },
     { key: 'assessores', label: filters.assessores.length ? `Assessores (${filters.assessores.length})` : '', onClear: () => setFilters((prev) => ({ ...prev, assessores: [] })) },
     { key: 'clientCode', label: clientCodeFilter, onClear: () => setClientCodeFilter('') },
     { key: 'estruturas', label: filters.estruturas.length ? `Estruturas (${filters.estruturas.length})` : '', onClear: () => setFilters((prev) => ({ ...prev, estruturas: [] })) },
     { key: 'ativos', label: filters.ativos.length ? `Ativos (${filters.ativos.length})` : '', onClear: () => setFilters((prev) => ({ ...prev, ativos: [] })) },
     { key: 'vencimentos', label: vencimentoChipLabel, onClear: () => setFilters((prev) => ({ ...prev, vencimentos: [] })) },
-    { key: 'status', label: filters.status, onClear: () => setFilters((prev) => ({ ...prev, status: '' })) },
-  ].filter((chip) => chip.label)
+      { key: 'status', label: filters.status, onClear: () => setFilters((prev) => ({ ...prev, status: '' })) },
+    ].filter((chip) => chip.label)
 
-  const handleClearFilters = useCallback(() => {
-    setFilters({
-      search: '',
-      broker: '',
-      status: '',
-      vencimentos: [],
-      estruturas: [],
-      ativos: [],
-      assessores: [],
-    })
-    setFiltersDraft({
-      broker: '',
-      status: '',
-      vencimentos: [],
-      estruturas: [],
-      ativos: [],
-      assessores: [],
-    })
-    setClientCodeFilter('')
-  }, [setClientCodeFilter])
+    const handleClearFilters = useCallback(() => {
+      setFilters({
+        search: '',
+        broker: '',
+        status: '',
+        vencimentos: [],
+        estruturas: [],
+        ativos: [],
+        assessores: [],
+      })
+      setClientCodeFilter('')
+    }, [setClientCodeFilter])
 
   const handlePickFolder = useCallback(async () => {
     try {
@@ -1527,131 +1507,36 @@ const Vencimento = () => {
         </div>
         <div className="filter-grid">
           <SelectMenu
-            value={filtersDraft.broker}
+            value={filters.broker}
             options={brokerOptions}
-            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, broker: value }))}
+            onChange={(value) => setFilters((prev) => ({ ...prev, broker: value }))}
             placeholder="Broker"
           />
-          <div className="panel-actions">
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => setFilters((prev) => ({ ...prev, broker: filtersDraft.broker }))}
-            >
-              Aplicar
-            </button>
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => {
-                setFilters((prev) => ({ ...prev, broker: '' }))
-                setFiltersDraft((prev) => ({ ...prev, broker: '' }))
-              }}
-            >
-              Limpar
-            </button>
-          </div>
           <MultiSelect
-            value={filtersDraft.assessores}
+            value={filters.assessores}
             options={assessorOptions}
-            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, assessores: value }))}
+            onChange={(value) => setFilters((prev) => ({ ...prev, assessores: value }))}
             placeholder="Assessor"
           />
-          <div className="panel-actions">
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => setFilters((prev) => ({ ...prev, assessores: filtersDraft.assessores }))}
-            >
-              Aplicar
-            </button>
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => {
-                setFilters((prev) => ({ ...prev, assessores: [] }))
-                setFiltersDraft((prev) => ({ ...prev, assessores: [] }))
-              }}
-            >
-              Limpar
-            </button>
-          </div>
           <MultiSelect
-            value={filtersDraft.estruturas}
+            value={filters.estruturas}
             options={estruturaOptions}
-            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, estruturas: value }))}
+            onChange={(value) => setFilters((prev) => ({ ...prev, estruturas: value }))}
             placeholder="Estrutura"
           />
-          <div className="panel-actions">
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => setFilters((prev) => ({ ...prev, estruturas: filtersDraft.estruturas }))}
-            >
-              Aplicar
-            </button>
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => {
-                setFilters((prev) => ({ ...prev, estruturas: [] }))
-                setFiltersDraft((prev) => ({ ...prev, estruturas: [] }))
-              }}
-            >
-              Limpar
-            </button>
-          </div>
           <MultiSelect
-            value={filtersDraft.ativos}
+            value={filters.ativos}
             options={ativoOptions}
-            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, ativos: value }))}
+            onChange={(value) => setFilters((prev) => ({ ...prev, ativos: value }))}
             placeholder="Ativo"
           />
-          <div className="panel-actions">
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => setFilters((prev) => ({ ...prev, ativos: filtersDraft.ativos }))}
-            >
-              Aplicar
-            </button>
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => {
-                setFilters((prev) => ({ ...prev, ativos: [] }))
-                setFiltersDraft((prev) => ({ ...prev, ativos: [] }))
-              }}
-            >
-              Limpar
-            </button>
-          </div>
           <TreeSelect
-            value={filtersDraft.vencimentos}
+            value={filters.vencimentos}
             tree={vencimentoTree}
             allValues={vencimentoValues}
-            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, vencimentos: value }))}
+            onChange={(value) => setFilters((prev) => ({ ...prev, vencimentos: value }))}
             placeholder="Vencimento da estrutura"
           />
-          <div className="panel-actions">
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => setFilters((prev) => ({ ...prev, vencimentos: filtersDraft.vencimentos }))}
-            >
-              Aplicar
-            </button>
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => {
-                setFilters((prev) => ({ ...prev, vencimentos: [] }))
-                setFiltersDraft((prev) => ({ ...prev, vencimentos: [] }))
-              }}
-            >
-              Limpar
-            </button>
-          </div>
           <input
             className="input"
             placeholder="Codigo do cliente"
@@ -1659,35 +1544,16 @@ const Vencimento = () => {
             onChange={(event) => setClientCodeFilter(event.target.value)}
           />
           <SelectMenu
-            value={filtersDraft.status}
+            value={filters.status}
             options={[
               { value: '', label: 'Status' },
               { value: 'ok', label: 'Neutro' },
               { value: 'alerta', label: 'Alerta' },
               { value: 'critico', label: 'Critico' },
             ]}
-            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, status: value }))}
+            onChange={(value) => setFilters((prev) => ({ ...prev, status: value }))}
             placeholder="Status"
           />
-          <div className="panel-actions">
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => setFilters((prev) => ({ ...prev, status: filtersDraft.status }))}
-            >
-              Aplicar
-            </button>
-            <button
-              className="btn btn-secondary"
-              type="button"
-              onClick={() => {
-                setFilters((prev) => ({ ...prev, status: '' }))
-                setFiltersDraft((prev) => ({ ...prev, status: '' }))
-              }}
-            >
-              Limpar
-            </button>
-          </div>
         </div>
         {chips.length ? (
           <div className="chip-row">
