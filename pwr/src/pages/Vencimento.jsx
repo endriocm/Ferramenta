@@ -360,6 +360,9 @@ const Vencimento = () => {
     assessores: [],
   })
   const [filtersDraft, setFiltersDraft] = useState({
+    broker: '',
+    status: '',
+    vencimentos: [],
     estruturas: [],
     ativos: [],
     assessores: [],
@@ -439,11 +442,14 @@ const Vencimento = () => {
 
   useEffect(() => {
     setFiltersDraft({
+      broker: filters.broker,
+      status: filters.status,
+      vencimentos: filters.vencimentos,
       estruturas: filters.estruturas,
       ativos: filters.ativos,
       assessores: filters.assessores,
     })
-  }, [filters.estruturas, filters.ativos, filters.assessores])
+  }, [filters.broker, filters.status, filters.vencimentos, filters.estruturas, filters.ativos, filters.assessores])
 
   const broadcastUpdate = useCallback((type, payload = {}) => {
     if (!userKey) return
@@ -1092,7 +1098,12 @@ const Vencimento = () => {
       {
         key: 'valorEntrada',
         label: 'Valor de entrada',
-        render: (row) => formatCurrency(row.result.valorEntrada ?? row.result.pagou),
+        render: (row) => {
+          const valorEntrada = row.result?.valorEntrada
+          if (row.result?.valorEntradaIncomplete) return <span className="muted">Dados incompletos</span>
+          if (valorEntrada == null || Number.isNaN(Number(valorEntrada))) return '—'
+          return formatCurrency(valorEntrada)
+        },
       },
       {
         key: 'resultado',
@@ -1222,15 +1233,6 @@ const Vencimento = () => {
     { key: 'status', label: filters.status, onClear: () => setFilters((prev) => ({ ...prev, status: '' })) },
   ].filter((chip) => chip.label)
 
-  const handleApplyFilters = useCallback(() => {
-    setFilters((prev) => ({
-      ...prev,
-      estruturas: filtersDraft.estruturas,
-      ativos: filtersDraft.ativos,
-      assessores: filtersDraft.assessores,
-    }))
-  }, [filtersDraft])
-
   const handleClearFilters = useCallback(() => {
     setFilters({
       search: '',
@@ -1241,7 +1243,14 @@ const Vencimento = () => {
       ativos: [],
       assessores: [],
     })
-    setFiltersDraft({ estruturas: [], ativos: [], assessores: [] })
+    setFiltersDraft({
+      broker: '',
+      status: '',
+      vencimentos: [],
+      estruturas: [],
+      ativos: [],
+      assessores: [],
+    })
     setClientCodeFilter('')
   }, [setClientCodeFilter])
 
@@ -1365,7 +1374,7 @@ const Vencimento = () => {
         { label: 'Quantidade base', value: formatNumber(row.qtyBase) },
         { label: 'Bonificacao', value: formatNumber(row.qtyBonus) },
         { label: 'Quantidade atual', value: formatNumber(row.qtyAtual) },
-        { label: 'Pagou', value: formatCurrency(row.result.pagou) },
+        { label: 'Valor de entrada', value: row.result.valorEntradaIncomplete ? 'Dados incompletos' : formatCurrency(row.result.valorEntrada) },
         { label: 'Financeiro final', value: formatCurrency(row.result.financeiroFinal) },
         { label: 'Ganho/Prejuizo', value: formatCurrency(row.result.ganho) },
         { label: 'Ganho %', value: `${(row.result.percent * 100).toFixed(2)}%` },
@@ -1518,36 +1527,131 @@ const Vencimento = () => {
         </div>
         <div className="filter-grid">
           <SelectMenu
-            value={filters.broker}
+            value={filtersDraft.broker}
             options={brokerOptions}
-            onChange={(value) => setFilters((prev) => ({ ...prev, broker: value }))}
+            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, broker: value }))}
             placeholder="Broker"
           />
+          <div className="panel-actions">
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setFilters((prev) => ({ ...prev, broker: filtersDraft.broker }))}
+            >
+              Aplicar
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => {
+                setFilters((prev) => ({ ...prev, broker: '' }))
+                setFiltersDraft((prev) => ({ ...prev, broker: '' }))
+              }}
+            >
+              Limpar
+            </button>
+          </div>
           <MultiSelect
             value={filtersDraft.assessores}
             options={assessorOptions}
             onChange={(value) => setFiltersDraft((prev) => ({ ...prev, assessores: value }))}
             placeholder="Assessor"
           />
+          <div className="panel-actions">
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setFilters((prev) => ({ ...prev, assessores: filtersDraft.assessores }))}
+            >
+              Aplicar
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => {
+                setFilters((prev) => ({ ...prev, assessores: [] }))
+                setFiltersDraft((prev) => ({ ...prev, assessores: [] }))
+              }}
+            >
+              Limpar
+            </button>
+          </div>
           <MultiSelect
             value={filtersDraft.estruturas}
             options={estruturaOptions}
             onChange={(value) => setFiltersDraft((prev) => ({ ...prev, estruturas: value }))}
             placeholder="Estrutura"
           />
+          <div className="panel-actions">
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setFilters((prev) => ({ ...prev, estruturas: filtersDraft.estruturas }))}
+            >
+              Aplicar
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => {
+                setFilters((prev) => ({ ...prev, estruturas: [] }))
+                setFiltersDraft((prev) => ({ ...prev, estruturas: [] }))
+              }}
+            >
+              Limpar
+            </button>
+          </div>
           <MultiSelect
             value={filtersDraft.ativos}
             options={ativoOptions}
             onChange={(value) => setFiltersDraft((prev) => ({ ...prev, ativos: value }))}
             placeholder="Ativo"
           />
+          <div className="panel-actions">
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setFilters((prev) => ({ ...prev, ativos: filtersDraft.ativos }))}
+            >
+              Aplicar
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => {
+                setFilters((prev) => ({ ...prev, ativos: [] }))
+                setFiltersDraft((prev) => ({ ...prev, ativos: [] }))
+              }}
+            >
+              Limpar
+            </button>
+          </div>
           <TreeSelect
-            value={filters.vencimentos}
+            value={filtersDraft.vencimentos}
             tree={vencimentoTree}
             allValues={vencimentoValues}
-            onChange={(value) => setFilters((prev) => ({ ...prev, vencimentos: value }))}
+            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, vencimentos: value }))}
             placeholder="Vencimento da estrutura"
           />
+          <div className="panel-actions">
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setFilters((prev) => ({ ...prev, vencimentos: filtersDraft.vencimentos }))}
+            >
+              Aplicar
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => {
+                setFilters((prev) => ({ ...prev, vencimentos: [] }))
+                setFiltersDraft((prev) => ({ ...prev, vencimentos: [] }))
+              }}
+            >
+              Limpar
+            </button>
+          </div>
           <input
             className="input"
             placeholder="Codigo do cliente"
@@ -1555,24 +1659,35 @@ const Vencimento = () => {
             onChange={(event) => setClientCodeFilter(event.target.value)}
           />
           <SelectMenu
-            value={filters.status}
+            value={filtersDraft.status}
             options={[
               { value: '', label: 'Status' },
               { value: 'ok', label: 'Neutro' },
               { value: 'alerta', label: 'Alerta' },
               { value: 'critico', label: 'Critico' },
             ]}
-            onChange={(value) => setFilters((prev) => ({ ...prev, status: value }))}
+            onChange={(value) => setFiltersDraft((prev) => ({ ...prev, status: value }))}
             placeholder="Status"
           />
-        </div>
-        <div className="panel-actions">
-          <button className="btn btn-secondary" type="button" onClick={handleClearFilters}>
-            Limpar filtros
-          </button>
-          <button className="btn btn-primary" type="button" onClick={handleApplyFilters}>
-            Aplicar filtros
-          </button>
+          <div className="panel-actions">
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setFilters((prev) => ({ ...prev, status: filtersDraft.status }))}
+            >
+              Aplicar
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => {
+                setFilters((prev) => ({ ...prev, status: '' }))
+                setFiltersDraft((prev) => ({ ...prev, status: '' }))
+              }}
+            >
+              Limpar
+            </button>
+          </div>
         </div>
         {chips.length ? (
           <div className="chip-row">

@@ -14,6 +14,16 @@ const getBarrierBadge = (status) => {
   return { label: 'N/A', tone: 'cyan' }
 }
 
+const formatOptionalNumber = (value) => {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return formatNumber(value)
+}
+
+const formatOptionalCurrency = (value) => {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return formatCurrency(value)
+}
+
 const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
   if (!row) return null
 
@@ -27,6 +37,12 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
   const overrideManual = row.override?.high !== 'auto' || row.override?.low !== 'auto'
   const cupomManual = row.manualCouponBRL != null
   const warnings = []
+  const valorEntrada = row.result?.valorEntrada
+  const valorEntradaIncomplete = row.result?.valorEntradaIncomplete
+  const valorEntradaComponents = row.result?.valorEntradaComponents || {}
+  const hasOptionComponents = valorEntradaComponents.optionQty != null || valorEntradaComponents.optionUnitCost != null
+  const hasStockComponents = valorEntradaComponents.stockQty != null || valorEntradaComponents.stockValue != null
+  const hasPutComponents = valorEntradaComponents.putQty != null || valorEntradaComponents.putUnitCost != null
 
   if (row.market?.source !== 'yahoo') {
     warnings.push('Cotacao em fallback (sem Yahoo Finance).')
@@ -108,13 +124,49 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
               <strong>{formatCurrency(row.result.custoTotal)}</strong>
             </div>
             <div>
-              <span>Pagou</span>
-              <strong>{formatCurrency(row.result.pagou)}</strong>
+              <span>Valor de entrada</span>
+              <strong>{valorEntradaIncomplete ? 'Dados incompletos' : formatOptionalCurrency(valorEntrada)}</strong>
             </div>
-            <div>
-              <span>Venda do ativo</span>
-              <strong>{formatCurrency(row.result.vendaAtivo)}</strong>
-            </div>
+            {hasOptionComponents ? (
+              <div>
+                <span>Qtd opcao</span>
+                <strong>{formatOptionalNumber(valorEntradaComponents.optionQty)}</strong>
+              </div>
+            ) : null}
+            {hasOptionComponents ? (
+              <div>
+                <span>Custo unitario opcao</span>
+                <strong>{formatOptionalCurrency(valorEntradaComponents.optionUnitCost)}</strong>
+              </div>
+            ) : null}
+            {hasStockComponents ? (
+              <div>
+                <span>Qtd estoque</span>
+                <strong>{formatOptionalNumber(valorEntradaComponents.stockQty)}</strong>
+              </div>
+            ) : null}
+            {hasStockComponents ? (
+              <div>
+                <span>Valor ativo</span>
+                <strong>{formatOptionalCurrency(valorEntradaComponents.stockValue)}</strong>
+              </div>
+            ) : null}
+            {hasPutComponents ? (
+              <div>
+                <span>Qtd put</span>
+                <strong>{formatOptionalNumber(valorEntradaComponents.putQty)}</strong>
+              </div>
+            ) : null}
+              {hasPutComponents ? (
+                <div>
+                  <span>Custo unitario put</span>
+                  <strong>{formatOptionalCurrency(valorEntradaComponents.putUnitCost)}</strong>
+                </div>
+              ) : null}
+              <div>
+                <span>Venda do ativo</span>
+                <strong>{formatCurrency(row.result.vendaAtivo)}</strong>
+              </div>
             <div>
               <span>Ganho na Call</span>
               <strong>{row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhoCall)}</strong>
