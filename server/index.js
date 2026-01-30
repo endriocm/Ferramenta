@@ -257,6 +257,111 @@ const parseBuffer = (buffer) => {
   })
 }
 
+const normalizeHeader = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/\s+/g, '')
+
+const parseDateBr = (value) => {
+  if (!value) return ''
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10)
+  if (typeof value === 'number' && XLSX?.SSF?.parse_date_code) {
+    const parsed = XLSX.SSF.parse_date_code(value)
+    if (parsed?.y && parsed?.m && parsed?.d) {
+      const date = new Date(parsed.y, parsed.m - 1, parsed.d)
+      return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
+    }
+  }
+  const raw = String(value).trim()
+  const match = raw.match(/(\d{2})[\/-](\d{2})[\/-](\d{4})/)
+  if (match) {
+    const [, day, month, year] = match
+    const date = new Date(Number(year), Number(month) - 1, Number(day))
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10)
+  return ''
+}
+
+const parseStructuredReceitas = (buffer) => {
+  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
+  const sheetName = workbook.SheetNames.find((name) => String(name || '').trim() === 'Operações')
+  if (!sheetName) {
+    return { error: 'Sheet "Operações" nao encontrada.', missingSheet: true }
+  }
+  const sheet = workbook.Sheets[sheetName]
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
+  const headers = rows.length ? Object.keys(rows[0] || {}) : []
+  const headerMap = headers.reduce((acc, header) => {
+    acc[normalizeHeader(header)] = header
+    return acc
+  }, {})
+
+  const required = {
+    codigoCliente: 'codigocliente',
+    dataInclusao: 'datainclusao',
+    estrutura: 'estrutura',
+    ativo: 'ativo',
+    fixing: 'fixing',
+    comissao: 'comissao',
+  }
+  const missing = Object.values(required).filter((key) => !headerMap[key])
+  if (missing.length) {
+    return {
+      error: 'Colunas obrigatorias ausentes.',
+      missingColumns: missing,
+      headers,
+    }
+  }
+
+  let rowsValid = 0
+  let rowsSkipped = 0
+  let totalCommission = 0
+  const months = new Set()
+  const entries = rows.map((row, index) => {
+    const codigoCliente = row[headerMap[required.codigoCliente]]
+    const dataInclusao = parseDateBr(row[headerMap[required.dataInclusao]])
+    const estrutura = row[headerMap[required.estrutura]]
+    const ativo = row[headerMap[required.ativo]]
+    const fixing = parseDateBr(row[headerMap[required.fixing]])
+    const comissao = toNumber(row[headerMap[required.comissao]])
+
+    if (!dataInclusao || comissao == null) {
+      rowsSkipped += 1
+      return null
+    }
+
+    rowsValid += 1
+    totalCommission += comissao
+    months.add(dataInclusao.slice(0, 7))
+
+    return {
+      id: `estr-${index}-${Date.now()}`,
+      codigoCliente: String(codigoCliente || '').trim(),
+      dataEntrada: dataInclusao,
+      estrutura: String(estrutura || '').trim(),
+      ativo: String(ativo || '').trim(),
+      vencimento: fixing || '',
+      comissao,
+      origem: 'Estruturadas',
+      source: 'import',
+    }
+  }).filter(Boolean)
+
+  return {
+    entries,
+    stats: {
+      rowsRead: rows.length,
+      rowsValid,
+      rowsSkipped,
+      totalCommission,
+      months: Array.from(months).sort(),
+    },
+  }
+}
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
 })
@@ -411,6 +516,31 @@ app.post('/api/vencimentos/parse', upload.single('file'), (req, res) => {
   try {
     const rows = parseBuffer(req.file.buffer)
     res.json({ rows, fileName: req.file.originalname })
+  } catch (error) {
+    res.status(500).json({ error: 'Falha ao ler a planilha.' })
+  }
+})
+
+app.post('/api/receitas/estruturadas/import', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: 'Arquivo nao enviado.' })
+    return
+  }
+  try {
+    const result = parseStructuredReceitas(req.file.buffer)
+    if (result?.missingSheet) {
+      res.status(400).json({ error: result.error })
+      return
+    }
+    if (result?.missingColumns?.length) {
+      res.status(400).json({
+        error: result.error,
+        missingColumns: result.missingColumns,
+        headers: result.headers || [],
+      })
+      return
+    }
+    res.json(result)
   } catch (error) {
     res.status(500).json({ error: 'Falha ao ler a planilha.' })
   }
