@@ -113,10 +113,43 @@ const isShortLeg = (leg) => {
   return qty < 0
 }
 
+const normalizeEstrutura = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+
+export const isBooster = (estrutura) => {
+  const normalized = normalizeEstrutura(estrutura)
+  return normalized === 'booster' || normalized === 'booster sob custodia'
+}
+
+const resolveLegQuantity = (leg, fallback) => {
+  if (leg?.quantidadeEfetiva != null) return Number(leg.quantidadeEfetiva)
+  if (leg?.quantidade != null) return Number(leg.quantidade)
+  return Number(fallback || 0)
+}
+
+export const getEffectiveLegs = (operation) => {
+  const legs = Array.isArray(operation?.pernas) ? operation.pernas : []
+  const booster = isBooster(operation?.estrutura)
+  if (!booster) {
+    return legs.map((leg) => ({ ...leg, quantidadeEfetiva: Number(leg?.quantidade || 0) }))
+  }
+  return legs.map((leg) => {
+    const tipo = String(leg?.tipo || '').toUpperCase()
+    const isCall = tipo === 'CALL'
+    const rawQty = Number(leg?.quantidade || 0)
+    const short = isShortLeg(leg)
+    const effectiveQty = isCall && short ? rawQty * 2 : rawQty
+    return { ...leg, quantidadeEfetiva: effectiveQty }
+  })
+}
+
 const resolveDebitQuantity = (leg, fallback) => {
   const baseQty = Math.abs(Number(fallback || 0))
   if (baseQty) return baseQty
-  const legQty = Math.abs(Number(leg?.quantidade || 0))
+  const legQty = Math.abs(resolveLegQuantity(leg, 0))
   return legQty || 0
 }
 
@@ -137,9 +170,10 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
   const custoUnitario = Number(operation.custoUnitario || 0)
   const custoTotal = qtyBase * custoUnitario
   const pagouManual = operation.pagou != null && operation.pagou !== '' ? Number(operation.pagou) : null
-  const optionQtyList = (operation.pernas || [])
+  const effectiveLegs = getEffectiveLegs(operation)
+  const optionQtyList = effectiveLegs
     .filter((leg) => ['CALL', 'PUT'].includes(String(leg?.tipo || '').toUpperCase()))
-    .map((leg) => Math.abs(Number(leg?.quantidade || 0)))
+    .map((leg) => Math.abs(resolveLegQuantity(leg, 0)))
     .filter((qty) => qty > 0)
   const optionQtyBase = optionQtyList.length ? Math.max(...optionQtyList) : 0
   const optionEntryUnit = Math.abs(custoUnitario || 0)
@@ -155,10 +189,10 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
   let ganhoCall = 0
   let ganhoPut = 0
 
-  const payoff = (operation.pernas || []).reduce((sum, leg) => {
+  const payoff = effectiveLegs.reduce((sum, leg) => {
     if (!isLegActive(leg, barrierStatus)) return sum
     const strike = Number(leg.strike || 0)
-    const rawQty = Number(leg.quantidade || qtyBase)
+    const rawQty = resolveLegQuantity(leg, qtyBase)
     if (!rawQty) return sum
     const qty = Math.abs(rawQty)
     const tipo = (leg.tipo || '').toUpperCase()
@@ -189,10 +223,10 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
       ? parsePercent(legacyRaw) * custoTotal
       : (custoTotal ? parsePercent(operation.cupom) * custoTotal : 0)
 
-  const rebateTotal = (operation.pernas || []).reduce((sum, leg) => {
+  const rebateTotal = effectiveLegs.reduce((sum, leg) => {
     if (!leg?.rebate) return sum
     if (!isLegActive(leg, barrierStatus)) return sum
-    const rawQty = Number(leg.quantidade || qtyBase)
+    const rawQty = resolveLegQuantity(leg, qtyBase)
     const qty = Math.abs(rawQty)
     return sum + Number(leg.rebate || 0) * qty
   }, 0)
@@ -203,7 +237,7 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
   }
   const ganhosOpcoes = isRecorrente ? 0 : (ganhoCall + ganhoPut)
 
-  const debito = (operation.pernas || []).reduce((sum, leg) => {
+  const debito = effectiveLegs.reduce((sum, leg) => {
     if (!isLegActive(leg, barrierStatus)) return sum
     const tipo = String(leg?.tipo || '').toUpperCase()
     if (tipo !== 'CALL' && tipo !== 'PUT') return sum

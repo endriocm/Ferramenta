@@ -20,6 +20,8 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
   const clienteLabel = row.nomeCliente || row.cliente || row.codigoCliente || '—'
   const spotLabel = row.spotBase ?? row.spotInicial
   const spotValue = spotLabel == null || Number.isNaN(Number(spotLabel)) ? '—' : formatNumber(spotLabel)
+  const legs = Array.isArray(row.effectiveLegs) ? row.effectiveLegs : (row.pernas || [])
+  const hasLegs = legs.length > 0
 
   const badge = getBarrierBadge(row.barrierStatus)
   const overrideManual = row.override?.high !== 'auto' || row.override?.low !== 'auto'
@@ -155,6 +157,28 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
             })}
           </div>
         </div>
+
+        {hasLegs ? (
+          <div className="report-card">
+            <h4>Pernas</h4>
+            <div className="report-list">
+              {legs.map((leg, index) => {
+                const tipo = String(leg?.tipo || 'N/A').toUpperCase()
+                const isShort = String(leg?.side || '').toLowerCase() === 'short' || Number(leg?.quantidade || 0) < 0
+                const sideLabel = isShort ? 'Vendida' : 'Comprada'
+                const strike = leg?.strike ?? leg?.precoStrike ?? '—'
+                const rawQty = leg?.quantidadeEfetiva ?? leg?.quantidade ?? 0
+                const qtyLabel = formatNumber(Math.abs(Number(rawQty) || 0))
+                return (
+                  <div key={`${leg?.id || index}-${strike}`}>
+                    <span>{tipo} {sideLabel} | Strike {strike}</span>
+                    <strong>Qtd {qtyLabel}</strong>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {warnings.length ? (

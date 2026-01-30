@@ -12,7 +12,7 @@ import { formatCurrency, formatDate, formatNumber } from '../utils/format'
 import { normalizeDateKey } from '../utils/dateKey'
 import { fetchYahooMarketData, normalizeYahooSymbol } from '../services/marketData'
 import { buildDividendKey, fetchDividend, fetchDividendsBatch } from '../services/dividends'
-import { computeBarrierStatus, computeResult } from '../services/settlement'
+import { computeBarrierStatus, computeResult, getEffectiveLegs } from '../services/settlement'
 import { clearOverride, loadOverrides, saveOverrides, updateOverride } from '../services/overrides'
 import { parseWorkbook, parseWorkbookBuffer } from '../services/excel'
 import { exportReportPdf } from '../services/pdf'
@@ -740,6 +740,7 @@ const Vencimento = () => {
           ? formatCurrency(manualCouponBRL)
           : (legacyCouponLabel || operation.cupom || 'N/A')
         const result = computeResult(operationWithSpot, market, barrierStatus, override)
+        const effectiveLegs = getEffectiveLegs(operationWithSpot)
         return {
           ...operation,
           qtyBase,
@@ -753,6 +754,7 @@ const Vencimento = () => {
           cupomResolved,
           barrierStatus,
           result,
+          effectiveLegs,
           status: getStatus(operation.vencimento),
         }
       })
