@@ -251,6 +251,16 @@ const RevenueBovespa = () => {
               ))}
             </div>
           </div>
+          <div className="chart-footer">
+            {seriesKeys.map(([key]) => {
+              if (granularity === 'daily') {
+                const [year, month, day] = key.split('-')
+                return <span key={key} className="muted">{day}/{month}</span>
+              }
+              const [year, month] = key.split('-')
+              return <span key={key} className="muted">{month}/{year.slice(2)}</span>
+            })}
+          </div>
         </div>
       </section>
 

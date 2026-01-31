@@ -446,14 +446,33 @@ app.post('/api/receitas/bovespa/import', upload.single('file'), (req, res) => {
     return
   }
   try {
-    const tipo = String(req.query?.tipo || 'variavel')
-    const result = parseBovespaReceitas(req.file.buffer, { tipo })
+    const result = parseBovespaReceitas(req.file.buffer, { mercado: 'bov', fatorReceita: 0.9335 * 0.8285 })
     if (!result.ok) {
       res.status(400).json(result)
       return
     }
     if (debugReceitas) {
       console.log('[receitas] bovespa:stats', result.summary)
+    }
+    res.status(200).json({ ...result, fileName: req.file.originalname })
+  } catch (error) {
+    res.status(500).json({ ok: false, error: { code: 'PARSER_FAILED', message: 'Falha ao ler a planilha.' } })
+  }
+})
+
+app.post('/api/receitas/bmf/import', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ ok: false, error: { code: 'FILE_NOT_RECEIVED', message: 'Arquivo nao enviado.' } })
+    return
+  }
+  try {
+    const result = parseBovespaReceitas(req.file.buffer, { mercado: 'bmf', fatorReceita: 0.9435 * 0.8285 })
+    if (!result.ok) {
+      res.status(400).json(result)
+      return
+    }
+    if (debugReceitas) {
+      console.log('[receitas] bmf:stats', result.summary)
     }
     res.status(200).json({ ...result, fileName: req.file.originalname })
   } catch (error) {

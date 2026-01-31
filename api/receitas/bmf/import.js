@@ -51,7 +51,7 @@ module.exports = (req, res) => {
       res.status(400).json({ ok: false, error: { code: 'FILE_NOT_RECEIVED', message: 'Arquivo nao enviado.' } })
       return
     }
-    const result = parseBovespaReceitas(fileBuffer, { mercado: 'bov', fatorReceita: 0.9335 * 0.8285 })
+    const result = parseBovespaReceitas(fileBuffer, { mercado: 'bmf', fatorReceita: 0.9435 * 0.8285 })
     if (!result.ok) {
       res.status(400).json(result)
       return

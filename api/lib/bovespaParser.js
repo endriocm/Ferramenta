@@ -62,7 +62,7 @@ const pickSheetName = (workbook) => {
   return preferred || workbook.SheetNames[0]
 }
 
-const parseBovespaReceitas = (buffer, { tipo = 'variavel' } = {}) => {
+const parseBovespaReceitas = (buffer, { mercado = 'bov', fatorReceita = 0.9335 * 0.8285 } = {}) => {
   const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
   const sheetName = pickSheetName(workbook)
   if (!sheetName) {
@@ -94,7 +94,7 @@ const parseBovespaReceitas = (buffer, { tipo = 'variavel' } = {}) => {
     return { ok: false, error: { code: 'MISSING_COLUMN', message: 'Colunas obrigatorias ausentes.', details: { missing, headers } } }
   }
 
-  const tipoTarget = normalizeValue(tipo)
+  const mercadoTarget = normalizeValue(mercado)
   const rowsRead = rows.length
   let rowsValid = 0
   let rowsFiltered = 0
@@ -103,25 +103,19 @@ const parseBovespaReceitas = (buffer, { tipo = 'variavel' } = {}) => {
   let totalVolume = 0
   const uniqueContas = new Set()
   const entries = []
-  const fatorReceita = 0.9335 * 0.8285
-
   rows.forEach((row, index) => {
     const conta = String(row[headerMap[resolveHeader(required.conta)]] || '').trim()
     const corretagem = toNumber(row[headerMap[resolveHeader(required.corretagem)]])
     const volume = toNumber(row[headerMap[resolveHeader(required.volume)]])
     const tipoCorretagem = normalizeValue(row[headerMap[resolveHeader(required.tipoCorretagem)]])
-    const mercado = normalizeValue(row[headerMap[resolveHeader(required.mercado)]])
+    const mercadoValue = normalizeValue(row[headerMap[resolveHeader(required.mercado)]])
     const dataISO = parseDate(row[headerMap[resolveHeader(required.data)]])
 
     if (!conta || corretagem == null || !dataISO) {
       rowsFiltered += 1
       return
     }
-    if (mercado !== 'bov') {
-      rowsFiltered += 1
-      return
-    }
-    if (tipoCorretagem !== tipoTarget) {
+    if (mercadoValue !== mercadoTarget) {
       rowsFiltered += 1
       return
     }
@@ -140,7 +134,7 @@ const parseBovespaReceitas = (buffer, { tipo = 'variavel' } = {}) => {
       corretagem,
       volumeNegociado: volume || 0,
       tipoCorretagem: tipoCorretagem,
-      mercado: mercado.toUpperCase(),
+      mercado: mercadoValue.toUpperCase(),
       receita: Number(receitaCalculada.toFixed(6)),
       origem: 'Bovespa',
       source: 'import',
@@ -159,7 +153,7 @@ const parseBovespaReceitas = (buffer, { tipo = 'variavel' } = {}) => {
       totalVolume: Number(totalVolume.toFixed(2)),
       uniqueContas: uniqueContas.size,
       sheetUsed: sheetName,
-      tipoCorretagem: tipoTarget,
+      mercado: mercadoTarget,
     },
   }
 }

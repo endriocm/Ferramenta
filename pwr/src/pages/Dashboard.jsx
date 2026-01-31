@@ -32,10 +32,16 @@ const getEntryDateKey = (entry) => {
 }
 
 const getEntryValue = (entry) => {
-  const value = entry?.comissao ?? entry?.valor ?? entry?.value
+  const value = entry?.receita ?? entry?.comissao ?? entry?.valor ?? entry?.value
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : 0
 }
+
+const normalizeKey = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
 
 const aggregateByKey = (entries, keyFn) => {
   const map = new Map()
@@ -70,6 +76,15 @@ const Dashboard = () => {
   const bovespaEntries = useMemo(() => loadRevenueByType('Bovespa'), [])
   const bmfEntries = useMemo(() => loadRevenueByType('BMF'), [])
 
+  const bovespaVariavel = useMemo(
+    () => bovespaEntries.filter((entry) => normalizeKey(entry?.tipoCorretagem) === 'variavel'),
+    [bovespaEntries],
+  )
+  const bmfVariavel = useMemo(
+    () => bmfEntries.filter((entry) => normalizeKey(entry?.tipoCorretagem) === 'variavel'),
+    [bmfEntries],
+  )
+
   const structuredEnriched = useMemo(
     () => structuredEntries.map((entry) => enrichRow(entry, tagsIndex)),
     [structuredEntries, tagsIndex],
@@ -81,8 +96,8 @@ const Dashboard = () => {
   }, [granularity])
 
   const structuredMap = useMemo(() => aggregateByKey(structuredEntries, keyFn), [structuredEntries, keyFn])
-  const bovespaMap = useMemo(() => aggregateByKey(bovespaEntries, keyFn), [bovespaEntries, keyFn])
-  const bmfMap = useMemo(() => aggregateByKey(bmfEntries, keyFn), [bmfEntries, keyFn])
+  const bovespaMap = useMemo(() => aggregateByKey(bovespaVariavel, keyFn), [bovespaVariavel, keyFn])
+  const bmfMap = useMemo(() => aggregateByKey(bmfVariavel, keyFn), [bmfVariavel, keyFn])
 
   const allKeys = useMemo(() => {
     const keys = new Set([...structuredMap.keys(), ...bovespaMap.keys(), ...bmfMap.keys()])
@@ -124,7 +139,7 @@ const Dashboard = () => {
     return totalOverall
   }, [originFilter, totalOverall, totalsByOrigin])
 
-  const uniqueBovespa = useMemo(() => collectUniqueClients(bovespaEntries), [bovespaEntries])
+  const uniqueBovespa = useMemo(() => collectUniqueClients(bovespaVariavel), [bovespaVariavel])
   const uniqueEstruturadas = useMemo(() => collectUniqueClients(structuredEntries), [structuredEntries])
 
   const uniqueByBroker = useMemo(() => {
