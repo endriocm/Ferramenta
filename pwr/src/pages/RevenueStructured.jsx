@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PageHeader from '../components/PageHeader'
 import SyncPanel from '../components/SyncPanel'
 import DataTable from '../components/DataTable'
@@ -59,7 +59,7 @@ const RevenueStructured = () => {
       .map((entry) => enrichRow(entry, tagsIndex))
       .filter((entry) => {
         const query = filters.search.toLowerCase()
-        if (query && !`${entry.codigoCliente || ''} ${entry.assessor || ''} ${entry.ativo || ''} ${entry.estrutura || ''}`.toLowerCase().includes(query)) return false
+        if (query && !`${entry.codigoCliente || ''} ${entry.nomeCliente || ''} ${entry.assessor || ''} ${entry.broker || ''} ${entry.ativo || ''} ${entry.estrutura || ''}`.toLowerCase().includes(query)) return false
         if (selectedBroker && entry.broker !== selectedBroker) return false
         if (filters.cliente && entry.codigoCliente !== filters.cliente) return false
         if (filters.assessor && entry.assessor !== filters.assessor) return false
@@ -70,9 +70,26 @@ const RevenueStructured = () => {
       })
   }, [entries, filters, resolvedPeriodKey, selectedBroker, tagsIndex])
 
+  const pageSize = 100
+  const [page, setPage] = useState(1)
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(rows.length / pageSize)), [rows.length, pageSize])
+  const pageStart = (page - 1) * pageSize
+  const pagedRows = useMemo(() => rows.slice(pageStart, pageStart + pageSize), [rows, pageStart, pageSize])
+
+  useEffect(() => {
+    setPage(1)
+  }, [filters.search, filters.cliente, filters.assessor, filters.ativo, filters.estrutura, resolvedPeriodKey, selectedBroker, entries.length])
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages)
+  }, [page, totalPages])
+
   const columns = useMemo(
     () => [
-      { key: 'codigoCliente', label: 'Codigo cliente', render: (row) => row.codigoCliente || '?' },
+      { key: 'codigoCliente', label: 'Codigo cliente', render: (row) => row.codigoCliente || '—' },
+      { key: 'nomeCliente', label: 'Nome do cliente', render: (row) => row.nomeCliente || row.cliente || '—' },
+      { key: 'assessor', label: 'Assessor', render: (row) => row.assessor || '—' },
+      { key: 'broker', label: 'Broker', render: (row) => row.broker || '—' },
       { key: 'dataEntrada', label: 'Data de entrada', render: (row) => formatDate(row.dataEntrada) },
       { key: 'estrutura', label: 'Estrutura' },
       { key: 'ativo', label: 'Ativo' },
@@ -264,7 +281,28 @@ const RevenueStructured = () => {
             ))}
           </select>
         </div>
-        <DataTable rows={rows} columns={columns} emptyMessage="Sem entradas estruturadas." />
+        <DataTable rows={pagedRows} columns={columns} emptyMessage="Sem entradas estruturadas." />
+        <div className="table-footer">
+          <div className="table-pagination">
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
+              disabled={page <= 1}
+            >
+              Anterior
+            </button>
+            <span className="muted">Pagina {page} de {totalPages}</span>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setPage((prev) => Math.min(prev + 1, totalPages))}
+              disabled={page >= totalPages}
+            >
+              Proxima
+            </button>
+          </div>
+        </div>
       </section>
 
       <section className="panel">
