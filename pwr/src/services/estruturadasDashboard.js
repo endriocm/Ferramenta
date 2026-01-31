@@ -131,12 +131,13 @@ export const buildEstruturadasDashboard = ({ entries = [], vencimentoIndex }) =>
       invalidRows.push(idx)
     }
 
-    totalVolume += volume
+    const volumeAbs = Math.abs(volume)
+    totalVolume += volumeAbs
     const estruturaLabel = entry.estrutura || '—'
     const current = byEstrutura.get(estruturaLabel) || { receita: 0, volume: 0, count: 0 }
     byEstrutura.set(estruturaLabel, {
       receita: current.receita + (comissao || 0),
-      volume: current.volume + volume,
+      volume: current.volume + volumeAbs,
       count: current.count + 1,
     })
   })

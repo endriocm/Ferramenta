@@ -10,6 +10,7 @@ import { enrichRow } from '../services/tags'
 import { loadRevenueList, saveRevenueList } from '../services/revenueStore'
 import { buildMonthLabel, getMonthKey } from '../services/revenueStructured'
 import { useToast } from '../hooks/useToast'
+import MultiSelect from '../components/MultiSelect'
 
 const aggregateByKey = (entries, keyFn) => {
   const map = new Map()
@@ -21,11 +22,19 @@ const aggregateByKey = (entries, keyFn) => {
   return map
 }
 
+const buildMultiOptions = (values) => {
+  const unique = Array.from(new Set(values.filter((value) => value != null && value !== '')))
+    .map((value) => String(value).trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  return unique.map((value) => ({ value, label: value }))
+}
+
 const RevenueBovespa = () => {
   const { notify } = useToast()
   const { selectedBroker, tagsIndex } = useGlobalFilters()
   const [entries, setEntries] = useState(() => loadRevenueList('bovespa'))
-  const [filters, setFilters] = useState({ search: '', conta: '', assessor: '', broker: '' })
+  const [filters, setFilters] = useState({ search: '', conta: [], assessor: [], broker: [] })
   const [tipoMode, setTipoMode] = useState('variavel')
   const [granularity, setGranularity] = useState('monthly')
   const [syncing, setSyncing] = useState(false)
@@ -48,14 +57,27 @@ const RevenueBovespa = () => {
     [baseEntries, tagsIndex],
   )
 
+  const contaOptions = useMemo(
+    () => buildMultiOptions(enrichedEntries.map((entry) => entry.codigoCliente || entry.conta)),
+    [enrichedEntries],
+  )
+  const assessorOptions = useMemo(
+    () => buildMultiOptions(enrichedEntries.map((entry) => entry.assessor)),
+    [enrichedEntries],
+  )
+  const brokerOptions = useMemo(
+    () => buildMultiOptions(enrichedEntries.map((entry) => entry.broker)),
+    [enrichedEntries],
+  )
+
   const filteredRows = useMemo(() => {
     return enrichedEntries
       .filter((entry) => {
         const query = filters.search.toLowerCase()
         if (query && !`${entry.codigoCliente || entry.conta || ''} ${entry.nomeCliente || ''} ${entry.assessor || ''} ${entry.broker || ''}`.toLowerCase().includes(query)) return false
-        if (filters.conta && String(entry.codigoCliente || entry.conta || '').trim() !== String(filters.conta).trim()) return false
-        if (filters.assessor && String(entry.assessor || '').trim() !== String(filters.assessor).trim()) return false
-        if (filters.broker && String(entry.broker || '').trim() !== String(filters.broker).trim()) return false
+        if (filters.conta.length && !filters.conta.includes(String(entry.codigoCliente || entry.conta || '').trim())) return false
+        if (filters.assessor.length && !filters.assessor.includes(String(entry.assessor || '').trim())) return false
+        if (filters.broker.length && !filters.broker.includes(String(entry.broker || '').trim())) return false
         if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
         return true
       })
@@ -77,7 +99,7 @@ const RevenueBovespa = () => {
   }, [page, totalPages])
 
   const totalReceita = useMemo(() => filteredRows.reduce((sum, entry) => sum + (Number(entry.receita) || 0), 0), [filteredRows])
-  const totalVolume = useMemo(() => filteredRows.reduce((sum, entry) => sum + (Number(entry.volumeNegociado) || 0), 0), [filteredRows])
+  const totalVolume = useMemo(() => filteredRows.reduce((sum, entry) => sum + Math.abs(Number(entry.volumeNegociado) || 0), 0), [filteredRows])
   const uniqueContas = useMemo(() => new Set(filteredRows.map((entry) => String(entry.codigoCliente || entry.conta || '').trim()).filter(Boolean)), [filteredRows])
 
   const resolvedPeriodKey = useMemo(() => {
@@ -283,23 +305,23 @@ const RevenueBovespa = () => {
           </div>
         </div>
         <div className="filter-grid">
-          <input
-            className="input"
-            placeholder="Conta"
+          <MultiSelect
             value={filters.conta}
-            onChange={(event) => setFilters((prev) => ({ ...prev, conta: event.target.value }))}
+            options={contaOptions}
+            onChange={(value) => setFilters((prev) => ({ ...prev, conta: value }))}
+            placeholder="Conta"
           />
-          <input
-            className="input"
-            placeholder="Assessor"
+          <MultiSelect
             value={filters.assessor}
-            onChange={(event) => setFilters((prev) => ({ ...prev, assessor: event.target.value }))}
+            options={assessorOptions}
+            onChange={(value) => setFilters((prev) => ({ ...prev, assessor: value }))}
+            placeholder="Assessor"
           />
-          <input
-            className="input"
-            placeholder="Broker"
+          <MultiSelect
             value={filters.broker}
-            onChange={(event) => setFilters((prev) => ({ ...prev, broker: event.target.value }))}
+            options={brokerOptions}
+            onChange={(value) => setFilters((prev) => ({ ...prev, broker: value }))}
+            placeholder="Broker"
           />
         </div>
         <DataTable rows={pagedRows} columns={columns} emptyMessage="Sem dados Bovespa." />

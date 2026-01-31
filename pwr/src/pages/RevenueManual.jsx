@@ -2,11 +2,22 @@
 import PageHeader from '../components/PageHeader'
 import DataTable from '../components/DataTable'
 import Badge from '../components/Badge'
+import Icon from '../components/Icons'
+import MultiSelect from '../components/MultiSelect'
 import { formatCurrency, formatDate } from '../utils/format'
 import { useToast } from '../hooks/useToast'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { enrichRow } from '../services/tags'
-import { appendManualRevenue, loadManualRevenue } from '../services/revenueStore'
+import { appendManualRevenue, loadManualRevenue, removeManualRevenue } from '../services/revenueStore'
+import { loadStructuredRevenue } from '../services/revenueStructured'
+
+const buildMultiOptions = (values) => {
+  const unique = Array.from(new Set(values.filter((value) => value != null && value !== '')))
+    .map((value) => String(value).trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  return unique.map((value) => ({ value, label: value }))
+}
 
 const RevenueManual = () => {
   const { notify } = useToast()
@@ -16,9 +27,10 @@ const RevenueManual = () => {
     data: '2026-01-26',
     origem: 'Bovespa',
     cliente: '',
-    assessor: '',
+    assessores: [],
     ativo: '',
     valor: '',
+    tipoEstrutura: '',
   })
 
   const handleChange = (field) => (event) => {
@@ -27,25 +39,41 @@ const RevenueManual = () => {
 
   const handleSubmit = (event) => {
     event.preventDefault()
-    if (!form.origem || !form.cliente || !form.assessor || !form.ativo || !form.valor) {
-      notify('Preencha todos os campos obrigatorios.', 'warning')
-      return
-    }
+    const valorNumber = Number(form.valor)
+    const valor = Number.isFinite(valorNumber) ? valorNumber : 0
+    const assessor = Array.isArray(form.assessores) && form.assessores.length ? form.assessores[0] : ''
     const next = {
       id: `mn-${Date.now()}`,
       data: form.data,
-      origem: form.origem,
-      cliente: form.cliente,
-      assessor: form.assessor,
-      ativo: form.ativo,
-      valor: Number(form.valor),
+      origem: form.origem || '',
+      cliente: form.cliente || '',
+      assessor,
+      ativo: form.ativo || '',
+      estrutura: form.origem === 'Estruturadas' ? (form.tipoEstrutura || '') : undefined,
+      valor,
       status: 'ok',
     }
     const nextEntries = appendManualRevenue(next)
     setEntries(nextEntries)
     notify('Lancamento manual registrado.', 'success')
-    setForm((prev) => ({ ...prev, cliente: '', assessor: '', ativo: '', valor: '' }))
+    setForm((prev) => ({ ...prev, cliente: '', assessores: [], ativo: '', valor: '', tipoEstrutura: '' }))
   }
+
+  const handleDelete = (row) => {
+    const nextEntries = removeManualRevenue(row.id)
+    setEntries(nextEntries)
+    notify('Lancamento removido.', 'success')
+  }
+
+  const structuredEntries = useMemo(() => loadStructuredRevenue(), [])
+  const estruturaOptions = useMemo(
+    () => buildMultiOptions(structuredEntries.map((entry) => entry.estrutura)),
+    [structuredEntries],
+  )
+  const assessorOptions = useMemo(
+    () => buildMultiOptions(tagsIndex?.assessors || []),
+    [tagsIndex],
+  )
 
   const columns = useMemo(
     () => [
@@ -56,8 +84,17 @@ const RevenueManual = () => {
       { key: 'ativo', label: 'Ativo' },
       { key: 'valor', label: 'Valor', render: (row) => formatCurrency(row.valor) },
       { key: 'status', label: 'Status', render: () => <Badge tone="green">OK</Badge> },
+      {
+        key: 'acoes',
+        label: 'Acoes',
+        render: (row) => (
+          <button className="icon-btn" type="button" onClick={() => handleDelete(row)} aria-label="Remover lancamento">
+            <Icon name="x" size={14} />
+          </button>
+        ),
+      },
     ],
-    [],
+    [handleDelete],
   )
 
   const rows = useMemo(() => {
@@ -104,12 +141,34 @@ const RevenueManual = () => {
           </label>
           <label>
             Assessor
-            <input className="input" placeholder="Assessor" value={form.assessor} onChange={handleChange('assessor')} />
+            <MultiSelect
+              value={form.assessores}
+              options={assessorOptions}
+              onChange={(value) => setForm((prev) => ({ ...prev, assessores: value }))}
+              placeholder="Assessor"
+            />
           </label>
           <label>
             Ativo
             <input className="input" placeholder="Ativo" value={form.ativo} onChange={handleChange('ativo')} />
           </label>
+          {form.origem === 'Estruturadas' ? (
+            <label>
+              Tipo de estrutura
+              <input
+                className="input"
+                placeholder="Tipo de estrutura"
+                list="estrutura-suggestions"
+                value={form.tipoEstrutura}
+                onChange={handleChange('tipoEstrutura')}
+              />
+              <datalist id="estrutura-suggestions">
+                {estruturaOptions.map((option) => (
+                  <option key={option.value} value={option.label} />
+                ))}
+              </datalist>
+            </label>
+          ) : null}
           <label>
             Valor
             <input className="input" type="number" placeholder="Valor" value={form.valor} onChange={handleChange('valor')} />

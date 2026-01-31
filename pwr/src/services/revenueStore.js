@@ -47,6 +47,14 @@ export const appendManualRevenue = (entry) => {
   return next
 }
 
+export const removeManualRevenue = (id) => {
+  if (!id) return loadManualRevenue()
+  const current = loadManualRevenue()
+  const next = current.filter((item) => item.id !== id)
+  saveRevenueList('manual', next)
+  return next
+}
+
 export const loadRevenueByType = (type) => {
   const normalized = normalizeTypeKey(type)
   if (normalized === 'estruturadas') return []

@@ -19,7 +19,7 @@ const RevenueStructured = () => {
   const { notify } = useToast()
   const { selectedBroker, tagsIndex } = useGlobalFilters()
   const [userKey] = useState(() => getCurrentUserKey())
-  const [filters, setFilters] = useState({ search: '', cliente: '', assessor: '', ativo: '', estrutura: '', broker: [] })
+  const [filters, setFilters] = useState({ search: '', cliente: [], assessor: [], ativo: [], estrutura: [], broker: [] })
   const [entries, setEntries] = useState(() => loadStructuredRevenue())
   const [selectedDays, setSelectedDays] = useState([])
   const [syncing, setSyncing] = useState(false)
@@ -142,6 +142,22 @@ const RevenueStructured = () => {
     () => buildMultiOptions(enrichedEntries.map((entry) => entry.broker)),
     [enrichedEntries],
   )
+  const clienteOptions = useMemo(
+    () => buildMultiOptions(enrichedEntries.map((entry) => entry.codigoCliente)),
+    [enrichedEntries],
+  )
+  const assessorOptions = useMemo(
+    () => buildMultiOptions(enrichedEntries.map((entry) => entry.assessor)),
+    [enrichedEntries],
+  )
+  const ativoOptions = useMemo(
+    () => buildMultiOptions(enrichedEntries.map((entry) => entry.ativo)),
+    [enrichedEntries],
+  )
+  const estruturaOptions = useMemo(
+    () => buildMultiOptions(enrichedEntries.map((entry) => entry.estrutura)),
+    [enrichedEntries],
+  )
 
   const periodTree = useMemo(() => buildDateTree(enrichedEntries), [enrichedEntries])
 
@@ -159,10 +175,10 @@ const RevenueStructured = () => {
         if (query && !`${entry.codigoCliente || ''} ${entry.nomeCliente || ''} ${entry.assessor || ''} ${entry.broker || ''} ${entry.ativo || ''} ${entry.estrutura || ''}`.toLowerCase().includes(query)) return false
         if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
         if (filters.broker.length && !filters.broker.includes(String(entry.broker || '').trim())) return false
-        if (filters.cliente && entry.codigoCliente !== filters.cliente) return false
-        if (filters.assessor && entry.assessor !== filters.assessor) return false
-        if (filters.ativo && entry.ativo !== filters.ativo) return false
-        if (filters.estrutura && entry.estrutura !== filters.estrutura) return false
+        if (filters.cliente.length && !filters.cliente.includes(String(entry.codigoCliente || '').trim())) return false
+        if (filters.assessor.length && !filters.assessor.includes(String(entry.assessor || '').trim())) return false
+        if (filters.ativo.length && !filters.ativo.includes(String(entry.ativo || '').trim())) return false
+        if (filters.estrutura.length && !filters.estrutura.includes(String(entry.estrutura || '').trim())) return false
         if (effectiveDays.length && !daySet.has(normalizeDateKey(entry.dataEntrada))) return false
         return true
       })
@@ -408,7 +424,7 @@ const RevenueStructured = () => {
               className="btn btn-secondary"
               type="button"
               onClick={() => {
-                setFilters({ search: '', cliente: '', assessor: '', ativo: '', estrutura: '', broker: [] })
+                setFilters({ search: '', cliente: [], assessor: [], ativo: [], estrutura: [], broker: [] })
                 setSelectedDays([])
                 notify('Filtros limpos com sucesso.', 'success')
               }}
@@ -424,29 +440,29 @@ const RevenueStructured = () => {
             onChange={(value) => setFilters((prev) => ({ ...prev, broker: value }))}
             placeholder="Broker"
           />
-          <input
-            className="input"
-            placeholder="Codigo cliente"
+          <MultiSelect
             value={filters.cliente}
-            onChange={(event) => setFilters((prev) => ({ ...prev, cliente: event.target.value }))}
+            options={clienteOptions}
+            onChange={(value) => setFilters((prev) => ({ ...prev, cliente: value }))}
+            placeholder="Codigo cliente"
           />
-          <input
-            className="input"
-            placeholder="Assessor"
+          <MultiSelect
             value={filters.assessor}
-            onChange={(event) => setFilters((prev) => ({ ...prev, assessor: event.target.value }))}
+            options={assessorOptions}
+            onChange={(value) => setFilters((prev) => ({ ...prev, assessor: value }))}
+            placeholder="Assessor"
           />
-          <input
-            className="input"
-            placeholder="Ativo"
+          <MultiSelect
             value={filters.ativo}
-            onChange={(event) => setFilters((prev) => ({ ...prev, ativo: event.target.value }))}
+            options={ativoOptions}
+            onChange={(value) => setFilters((prev) => ({ ...prev, ativo: value }))}
+            placeholder="Ativo"
           />
-          <input
-            className="input"
-            placeholder="Estrutura"
+          <MultiSelect
             value={filters.estrutura}
-            onChange={(event) => setFilters((prev) => ({ ...prev, estrutura: event.target.value }))}
+            options={estruturaOptions}
+            onChange={(value) => setFilters((prev) => ({ ...prev, estrutura: value }))}
+            placeholder="Estrutura"
           />
           <TreeSelect
             value={selectedDays}

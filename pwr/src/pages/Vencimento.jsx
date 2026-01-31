@@ -793,6 +793,10 @@ const Vencimento = () => {
   const estruturaOptions = useMemo(() => buildMultiOptions(operationsByPeriod.map((item) => item.estrutura)), [operationsByPeriod])
   const ativoOptions = useMemo(() => buildMultiOptions(enrichedOperations.map((item) => item.ativo)), [enrichedOperations])
   const assessorOptions = useMemo(() => buildMultiOptions(enrichedOperations.map((item) => item.assessor)), [enrichedOperations])
+  const clienteOptions = useMemo(
+    () => buildMultiOptions(enrichedOperations.map((item) => item.codigoCliente || item.cliente)),
+    [enrichedOperations],
+  )
   const { tree: vencimentoTree, allValues: vencimentoValues } = useMemo(
     () => buildVencimentoTree(enrichedOperations),
     [enrichedOperations],
@@ -906,9 +910,9 @@ const Vencimento = () => {
         if (selectedAssessor.length && !selectedAssessor.includes(String(entry.assessor || '').trim())) return false
         if (filters.broker.length && !filters.broker.includes(String(entry.broker || '').trim())) return false
         if (filters.assessores?.length && !filters.assessores.includes(entry.assessor)) return false
-        if (clientCodeFilter) {
+        if (clientCodeFilter.length) {
           const clienteMatch = String(entry.codigoCliente || entry.cliente || '').trim()
-          if (clienteMatch !== String(clientCodeFilter).trim()) return false
+          if (!clientCodeFilter.includes(clienteMatch)) return false
         }
         if (filters.estruturas?.length && !filters.estruturas.includes(entry.estrutura)) return false
         if (filters.ativos?.length && !filters.ativos.includes(entry.ativo)) return false
@@ -1204,27 +1208,27 @@ const Vencimento = () => {
     : ''
 
   const chips = [
-      { key: 'broker', label: filters.broker.length ? `Broker (${filters.broker.length})` : '', onClear: () => setFilters((prev) => ({ ...prev, broker: [] })) },
+    { key: 'broker', label: filters.broker.length ? `Broker (${filters.broker.length})` : '', onClear: () => setFilters((prev) => ({ ...prev, broker: [] })) },
     { key: 'assessores', label: filters.assessores.length ? `Assessores (${filters.assessores.length})` : '', onClear: () => setFilters((prev) => ({ ...prev, assessores: [] })) },
-    { key: 'clientCode', label: clientCodeFilter, onClear: () => setClientCodeFilter('') },
+    { key: 'clientCode', label: clientCodeFilter.length ? `Clientes (${clientCodeFilter.length})` : '', onClear: () => setClientCodeFilter([]) },
     { key: 'estruturas', label: filters.estruturas.length ? `Estruturas (${filters.estruturas.length})` : '', onClear: () => setFilters((prev) => ({ ...prev, estruturas: [] })) },
     { key: 'ativos', label: filters.ativos.length ? `Ativos (${filters.ativos.length})` : '', onClear: () => setFilters((prev) => ({ ...prev, ativos: [] })) },
     { key: 'vencimentos', label: vencimentoChipLabel, onClear: () => setFilters((prev) => ({ ...prev, vencimentos: [] })) },
-      { key: 'status', label: filters.status, onClear: () => setFilters((prev) => ({ ...prev, status: '' })) },
-    ].filter((chip) => chip.label)
+    { key: 'status', label: filters.status, onClear: () => setFilters((prev) => ({ ...prev, status: '' })) },
+  ].filter((chip) => chip.label)
 
-    const handleClearFilters = useCallback(() => {
-      setFilters({
-        search: '',
-        broker: [],
-        status: '',
-        vencimentos: [],
-        estruturas: [],
-        ativos: [],
-        assessores: [],
-      })
-      setClientCodeFilter('')
-    }, [setClientCodeFilter])
+  const handleClearFilters = useCallback(() => {
+    setFilters({
+      search: '',
+      broker: [],
+      status: '',
+      vencimentos: [],
+      estruturas: [],
+      ativos: [],
+      assessores: [],
+    })
+    setClientCodeFilter([])
+  }, [setClientCodeFilter])
 
   const handlePickFolder = useCallback(async () => {
     try {
@@ -1529,11 +1533,12 @@ const Vencimento = () => {
             onChange={(value) => setFilters((prev) => ({ ...prev, vencimentos: value }))}
             placeholder="Vencimento da estrutura"
           />
-          <input
-            className="input"
-            placeholder="Codigo do cliente"
+          <MultiSelect
             value={clientCodeFilter}
-            onChange={(event) => setClientCodeFilter(event.target.value)}
+            options={clienteOptions}
+            onChange={setClientCodeFilter}
+            placeholder="Codigo do cliente"
+            searchable
           />
           <SelectMenu
             value={filters.status}

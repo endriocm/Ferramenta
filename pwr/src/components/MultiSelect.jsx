@@ -17,6 +17,7 @@ const MultiSelect = ({
   placeholder = 'Selecionar',
   className = '',
   menuClassName = '',
+  searchable = true,
   searchPlaceholder = 'Buscar',
 }) => {
   const [open, setOpen] = useState(false)
@@ -107,16 +108,18 @@ const MultiSelect = ({
       </button>
       {open ? (
         <div className={`select-menu ${menuClassName}`} role="listbox">
-          <div className="tree-search">
-            <Icon name="search" size={14} />
-            <input
-              className="input"
-              type="search"
-              placeholder={searchPlaceholder}
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </div>
+          {searchable ? (
+            <div className="tree-search">
+              <Icon name="search" size={14} />
+              <input
+                className="input"
+                type="search"
+                placeholder={searchPlaceholder}
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </div>
+          ) : null}
           <div className="tree-content">
             <label className={`select-option ${allVisibleSelected ? 'active' : ''}`}>
               <input

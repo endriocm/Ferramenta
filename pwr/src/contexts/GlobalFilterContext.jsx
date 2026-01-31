@@ -47,7 +47,7 @@ export const GlobalFilterProvider = ({ children }) => {
   const [userKey] = useState(() => getCurrentUserKey())
   const [selectedBroker, setSelectedBroker] = useState([])
   const [selectedAssessor, setSelectedAssessor] = useState([])
-  const [clientCodeFilter, setClientCodeFilter] = useState('')
+  const [clientCodeFilter, setClientCodeFilter] = useState([])
   const [tagsPayload, setTagsPayload] = useState(null)
   const channelRef = useRef(null)
   const senderRef = useRef(Math.random().toString(36).slice(2))
@@ -79,7 +79,7 @@ export const GlobalFilterProvider = ({ children }) => {
     applyingRemoteRef.current = true
     setSelectedBroker(normalizeList(payload.broker))
     setSelectedAssessor(normalizeList(payload.assessor))
-    setClientCodeFilter(normalizeValue(payload.clientCode))
+    setClientCodeFilter(normalizeList(payload.clientCode))
     setTimeout(() => {
       applyingRemoteRef.current = false
     }, 0)
@@ -91,7 +91,7 @@ export const GlobalFilterProvider = ({ children }) => {
     if (stored) {
       setSelectedBroker(normalizeList(stored.broker))
       setSelectedAssessor(normalizeList(stored.assessor))
-      setClientCodeFilter(normalizeValue(stored.clientCode))
+      setClientCodeFilter(normalizeList(stored.clientCode))
     }
     loadedRef.current = true
   }, [userKey])
@@ -102,7 +102,7 @@ export const GlobalFilterProvider = ({ children }) => {
       version: STORAGE_VERSION,
       broker: normalizeList(selectedBroker),
       assessor: normalizeList(selectedAssessor),
-      clientCode: normalizeValue(clientCodeFilter),
+      clientCode: normalizeList(clientCodeFilter),
       updatedAt: Date.now(),
     }
     try {
