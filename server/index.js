@@ -4,6 +4,7 @@ const multer = require('multer')
 const XLSX = require('xlsx')
 const { getBrapiToken, getDividendsResult } = require('../api/lib/dividends')
 const { parseStructuredReceitas } = require('../api/lib/estruturadasParser')
+const { parseBovespaReceitas } = require('../api/lib/bovespaParser')
 
 const PORT = process.env.PORT || 4170
 const debugReceitas = process.env.DEBUG_RECEITAS === '1'
@@ -432,6 +433,27 @@ app.post('/api/receitas/estruturadas/import', upload.single('file'), (req, res) 
     }
     if (debugReceitas) {
       console.log('[receitas] structured:stats', result.summary)
+    }
+    res.status(200).json({ ...result, fileName: req.file.originalname })
+  } catch (error) {
+    res.status(500).json({ ok: false, error: { code: 'PARSER_FAILED', message: 'Falha ao ler a planilha.' } })
+  }
+})
+
+app.post('/api/receitas/bovespa/import', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ ok: false, error: { code: 'FILE_NOT_RECEIVED', message: 'Arquivo nao enviado.' } })
+    return
+  }
+  try {
+    const tipo = String(req.query?.tipo || 'variavel')
+    const result = parseBovespaReceitas(req.file.buffer, { tipo })
+    if (!result.ok) {
+      res.status(400).json(result)
+      return
+    }
+    if (debugReceitas) {
+      console.log('[receitas] bovespa:stats', result.summary)
     }
     res.status(200).json({ ...result, fileName: req.file.originalname })
   } catch (error) {
