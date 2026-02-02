@@ -780,6 +780,11 @@ button {
   --chart-pad-left: 52px;
 }
 
+.chart.is-daily {
+  --chart-pad-top: 36px;
+  --chart-pad-bottom: 30px;
+}
+
 .chart-grid {
   position: absolute;
   inset: var(--chart-pad-top) var(--chart-pad-right) var(--chart-pad-bottom) var(--chart-pad-left);
@@ -845,6 +850,52 @@ button {
   position: absolute;
   transform: translateY(50%);
   white-space: nowrap;
+}
+
+.chart-labels-top,
+.chart-labels-bottom {
+  position: absolute;
+  left: var(--chart-pad-left);
+  right: var(--chart-pad-right);
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.chart-labels-top {
+  top: 6px;
+  height: calc(var(--chart-pad-top) - 10px);
+  align-items: end;
+}
+
+.chart-labels-bottom {
+  bottom: 4px;
+  height: calc(var(--chart-pad-bottom) - 8px);
+  align-items: start;
+}
+
+.chart-label-top,
+.chart-label-bottom {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+
+.chart-label-top {
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.chart-label-bottom {
+  font-size: 0.65rem;
+  color: var(--muted);
 }
 
 .sparkline {
