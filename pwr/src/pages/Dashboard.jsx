@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { formatCurrency, formatNumber } from '../utils/format'
 import { normalizeDateKey } from '../utils/dateKey'
 import { loadStructuredRevenue } from '../services/revenueStructured'
-import { loadManualRevenue, loadRevenueByType } from '../services/revenueStore'
+import { loadRevenueByType } from '../services/revenueStore'
 import { enrichRow } from '../services/tags'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { filterByApuracaoMonths, formatMonthLabel } from '../services/apuracao'
@@ -69,20 +69,24 @@ const Dashboard = () => {
   const [granularity, setGranularity] = useState('monthly')
   const [originFilter, setOriginFilter] = useState('all')
 
-  const structuredEntries = useMemo(() => {
-    const base = loadStructuredRevenue()
-    const manual = loadManualRevenue().filter((entry) => String(entry?.origem || '').toLowerCase() === 'estruturadas')
-    return [...base, ...manual]
-  }, [])
+  const structuredEntries = useMemo(() => loadStructuredRevenue(), [])
   const bovespaEntries = useMemo(() => loadRevenueByType('Bovespa'), [])
   const bmfEntries = useMemo(() => loadRevenueByType('BMF'), [])
 
+  const isManualEntry = (entry) => {
+    if (!entry) return false
+    if (String(entry?.source || '').toLowerCase() == 'manual') return true
+    const id = String(entry?.id || '')
+    if (id.startsWith('mn-')) return true
+    return false
+  }
+
   const bovespaVariavel = useMemo(
-    () => bovespaEntries.filter((entry) => normalizeKey(entry?.tipoCorretagem) === 'variavel'),
+    () => bovespaEntries.filter((entry) => !isManualEntry(entry) && normalizeKey(entry?.tipoCorretagem) === 'variavel'),
     [bovespaEntries],
   )
   const bmfVariavel = useMemo(
-    () => bmfEntries.filter((entry) => normalizeKey(entry?.tipoCorretagem) === 'variavel'),
+    () => bmfEntries.filter((entry) => !isManualEntry(entry) && normalizeKey(entry?.tipoCorretagem) === 'variavel'),
     [bmfEntries],
   )
 
@@ -256,6 +260,8 @@ const Dashboard = () => {
           <div className="kpi-value">{formatNumber(uniqueEstruturadas.size)}</div>
         </div>
       </section>
+
+      <p className="muted">Apuracao considera apenas Variavel.</p>
 
       <section className="mini-grid">
         <div className="card mini-card">

@@ -52,6 +52,7 @@ const RevenueManual = () => {
       ativo: form.ativo || '',
       estrutura: form.origem === 'Estruturadas' ? (form.tipoEstrutura || '') : undefined,
       valor,
+      source: 'manual',
       status: 'ok',
     }
     const nextEntries = appendManualRevenue(next)
