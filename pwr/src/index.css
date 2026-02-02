@@ -781,18 +781,19 @@ button {
 }
 
 .chart.is-daily {
-  --chart-pad-top: 36px;
-  --chart-pad-bottom: 30px;
+  --chart-pad-top: 40px;
+  --chart-pad-bottom: 34px;
 }
 
 .chart-grid {
   position: absolute;
   inset: var(--chart-pad-top) var(--chart-pad-right) var(--chart-pad-bottom) var(--chart-pad-left);
   display: grid;
-  grid-template-columns: repeat(1, 1fr);
+  grid-template-columns: repeat(var(--chart-columns, 21), minmax(0, 1fr));
   align-items: flex-end;
   gap: 4px;
   padding: 0;
+  overflow: visible;
   z-index: 3;
 }
 
@@ -852,32 +853,18 @@ button {
   white-space: nowrap;
 }
 
-.chart-labels-top,
-.chart-labels-bottom {
+.chart-col {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 0;
+  height: 100%;
+}
+
+.chart-value-label,
+.chart-date-label {
   position: absolute;
-  left: var(--chart-pad-left);
-  right: var(--chart-pad-right);
-  display: grid;
-  gap: 4px;
-  justify-items: center;
-  pointer-events: none;
-  z-index: 5;
-}
-
-.chart-labels-top {
-  top: 6px;
-  height: calc(var(--chart-pad-top) - 10px);
-  align-items: end;
-}
-
-.chart-labels-bottom {
-  bottom: 4px;
-  height: calc(var(--chart-pad-bottom) - 8px);
-  align-items: start;
-}
-
-.chart-label-top,
-.chart-label-bottom {
   display: block;
   min-width: 0;
   max-width: 100%;
@@ -885,17 +872,61 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: center;
+  pointer-events: none;
 }
 
-.chart-label-top {
+.chart-value-label {
+  bottom: calc(var(--bar-height, 0%) + 6px);
   font-size: 0.68rem;
   font-family: var(--font-mono);
   color: rgba(255, 255, 255, 0.85);
 }
 
-.chart-label-bottom {
+.chart-date-label {
+  top: calc(100% + 6px);
   font-size: 0.65rem;
   color: var(--muted);
+}
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 7;
+  min-width: 180px;
+  max-width: 240px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--stroke);
+  background: rgba(12, 18, 26, 0.96);
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+}
+
+.chart-tooltip.is-flipped {
+  transform: translate(-50%, 0%);
+}
+
+.chart-tooltip-title {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.8rem;
+}
+
+.chart-tooltip-row strong {
+  font-family: var(--font-mono);
+}
+
+.chart-tooltip-row.total {
+  font-weight: 600;
+  margin-bottom: 4px;
 }
 
 .sparkline {
