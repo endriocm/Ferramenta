@@ -11,6 +11,7 @@ import { enrichRow } from '../services/tags'
 import { loadRevenueList, saveRevenueList } from '../services/revenueStore'
 import { buildMonthLabel, getMonthKey } from '../services/revenueStructured'
 import { useToast } from '../hooks/useToast'
+import { filterByApuracaoMonths } from '../services/apuracao'
 
 const aggregateByKey = (entries, keyFn) => {
   const map = new Map()
@@ -32,7 +33,7 @@ const buildMultiOptions = (values) => {
 
 const RevenueBmf = () => {
   const { notify } = useToast()
-  const { selectedBroker, tagsIndex } = useGlobalFilters()
+  const { selectedBroker, tagsIndex, apuracaoMonths } = useGlobalFilters()
   const [entries, setEntries] = useState(() => loadRevenueList('bmf'))
   const [filters, setFilters] = useState({ search: '', conta: [], assessor: [], broker: [] })
   const [tipoMode, setTipoMode] = useState('variavel')
@@ -52,9 +53,14 @@ const RevenueBmf = () => {
     return entries.filter((entry) => String(entry.tipoCorretagem || '').toLowerCase() === tipoMode)
   }, [entries, tipoMode])
 
+  const scopedEntries = useMemo(
+    () => filterByApuracaoMonths(baseEntries, apuracaoMonths, (entry) => entry.data || entry.dataEntrada),
+    [baseEntries, apuracaoMonths],
+  )
+
   const enrichedEntries = useMemo(
-    () => baseEntries.map((entry) => enrichRow(entry, tagsIndex)),
-    [baseEntries, tagsIndex],
+    () => scopedEntries.map((entry) => enrichRow(entry, tagsIndex)),
+    [scopedEntries, tagsIndex],
   )
 
   const contaOptions = useMemo(
@@ -92,11 +98,17 @@ const RevenueBmf = () => {
 
   useEffect(() => {
     setPage(1)
-  }, [filters.search, filters.conta, filters.assessor, filters.broker, tipoMode, granularity, selectedBroker, entries.length])
+  }, [filters.search, filters.conta, filters.assessor, filters.broker, tipoMode, granularity, selectedBroker, entries.length, apuracaoMonths])
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages)
   }, [page, totalPages])
+
+  useEffect(() => {
+    if (granularity === 'daily' && (apuracaoMonths.all || apuracaoMonths.months.length !== 1)) {
+      setGranularity('monthly')
+    }
+  }, [apuracaoMonths, granularity])
 
   const totalReceita = useMemo(() => filteredRows.reduce((sum, entry) => sum + (Number(entry.receita) || 0), 0), [filteredRows])
   const totalVolume = useMemo(() => filteredRows.reduce((sum, entry) => sum + Math.abs(Number(entry.volumeNegociado) || 0), 0), [filteredRows])

@@ -1,10 +1,11 @@
-ï»¿import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { formatCurrency, formatNumber } from '../utils/format'
 import { normalizeDateKey } from '../utils/dateKey'
 import { loadStructuredRevenue } from '../services/revenueStructured'
 import { loadManualRevenue, loadRevenueByType } from '../services/revenueStore'
 import { enrichRow } from '../services/tags'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
+import { filterByApuracaoMonths, formatMonthLabel } from '../services/apuracao'
 
 const Sparkline = ({ data, tone = 'currentColor' }) => {
   if (!data.length) return null
@@ -64,7 +65,7 @@ const collectUniqueClients = (entries) => {
 }
 
 const Dashboard = () => {
-  const { tagsIndex } = useGlobalFilters()
+  const { tagsIndex, selectedBroker, apuracaoMonths } = useGlobalFilters()
   const [granularity, setGranularity] = useState('monthly')
   const [originFilter, setOriginFilter] = useState('all')
 
@@ -85,9 +86,43 @@ const Dashboard = () => {
     [bmfEntries],
   )
 
+  const structuredScoped = useMemo(
+    () => filterByApuracaoMonths(structuredEntries, apuracaoMonths, (entry) => entry.dataEntrada || entry.data),
+    [structuredEntries, apuracaoMonths],
+  )
+  const bovespaScoped = useMemo(
+    () => filterByApuracaoMonths(bovespaVariavel, apuracaoMonths, (entry) => entry.data || entry.dataEntrada),
+    [bovespaVariavel, apuracaoMonths],
+  )
+  const bmfScoped = useMemo(
+    () => filterByApuracaoMonths(bmfVariavel, apuracaoMonths, (entry) => entry.data || entry.dataEntrada),
+    [bmfVariavel, apuracaoMonths],
+  )
+
   const structuredEnriched = useMemo(
-    () => structuredEntries.map((entry) => enrichRow(entry, tagsIndex)),
-    [structuredEntries, tagsIndex],
+    () => structuredScoped.map((entry) => enrichRow(entry, tagsIndex)),
+    [structuredScoped, tagsIndex],
+  )
+  const bovespaEnriched = useMemo(
+    () => bovespaScoped.map((entry) => enrichRow(entry, tagsIndex)),
+    [bovespaScoped, tagsIndex],
+  )
+  const bmfEnriched = useMemo(
+    () => bmfScoped.map((entry) => enrichRow(entry, tagsIndex)),
+    [bmfScoped, tagsIndex],
+  )
+
+  const structuredFiltered = useMemo(
+    () => (selectedBroker.length ? structuredEnriched.filter((entry) => selectedBroker.includes(String(entry.broker || '').trim())) : structuredEnriched),
+    [structuredEnriched, selectedBroker],
+  )
+  const bovespaFiltered = useMemo(
+    () => (selectedBroker.length ? bovespaEnriched.filter((entry) => selectedBroker.includes(String(entry.broker || '').trim())) : bovespaEnriched),
+    [bovespaEnriched, selectedBroker],
+  )
+  const bmfFiltered = useMemo(
+    () => (selectedBroker.length ? bmfEnriched.filter((entry) => selectedBroker.includes(String(entry.broker || '').trim())) : bmfEnriched),
+    [bmfEnriched, selectedBroker],
   )
 
   const keyFn = useMemo(() => {
@@ -95,9 +130,9 @@ const Dashboard = () => {
     return (entry) => String(getEntryDateKey(entry)).slice(0, 7)
   }, [granularity])
 
-  const structuredMap = useMemo(() => aggregateByKey(structuredEntries, keyFn), [structuredEntries, keyFn])
-  const bovespaMap = useMemo(() => aggregateByKey(bovespaVariavel, keyFn), [bovespaVariavel, keyFn])
-  const bmfMap = useMemo(() => aggregateByKey(bmfVariavel, keyFn), [bmfVariavel, keyFn])
+  const structuredMap = useMemo(() => aggregateByKey(structuredFiltered, keyFn), [structuredFiltered, keyFn])
+  const bovespaMap = useMemo(() => aggregateByKey(bovespaFiltered, keyFn), [bovespaFiltered, keyFn])
+  const bmfMap = useMemo(() => aggregateByKey(bmfFiltered, keyFn), [bmfFiltered, keyFn])
 
   const allKeys = useMemo(() => {
     const keys = new Set([...structuredMap.keys(), ...bovespaMap.keys(), ...bmfMap.keys()])
@@ -105,7 +140,7 @@ const Dashboard = () => {
   }, [structuredMap, bovespaMap, bmfMap])
 
   const windowedKeys = useMemo(() => {
-    const max = granularity === 'daily' ? 21 : 12
+    const max = granularity === 'daily' ? 31 : 24
     return allKeys.slice(-max)
   }, [allKeys, granularity])
 
@@ -139,13 +174,13 @@ const Dashboard = () => {
     return totalOverall
   }, [originFilter, totalOverall, totalsByOrigin])
 
-  const uniqueBovespa = useMemo(() => collectUniqueClients(bovespaVariavel), [bovespaVariavel])
-  const uniqueEstruturadas = useMemo(() => collectUniqueClients(structuredEntries), [structuredEntries])
+  const uniqueBovespa = useMemo(() => collectUniqueClients(bovespaFiltered), [bovespaFiltered])
+  const uniqueEstruturadas = useMemo(() => collectUniqueClients(structuredFiltered), [structuredFiltered])
 
   const uniqueByBroker = useMemo(() => {
     const map = new Map()
-    structuredEnriched.forEach((entry) => {
-      const broker = String(entry?.broker || '').trim() || 'â€”'
+    structuredFiltered.forEach((entry) => {
+      const broker = String(entry?.broker || '').trim() || '—'
       const code = String(entry?.codigoCliente || '').trim()
       if (!code) return
       if (!map.has(broker)) map.set(broker, new Set())
@@ -154,7 +189,7 @@ const Dashboard = () => {
     return Array.from(map.entries())
       .map(([broker, set]) => ({ broker, count: set.size }))
       .sort((a, b) => b.count - a.count)
-  }, [structuredEnriched])
+  }, [structuredFiltered])
 
   const maxBrokerCount = uniqueByBroker.reduce((max, row) => Math.max(max, row.count), 1)
 
@@ -163,6 +198,47 @@ const Dashboard = () => {
   const bovespaSeries = series.map((item) => item.bovespa)
   const bmfSeries = series.map((item) => item.bmf)
   const maxTotal = Math.max(...totalSeries, 1)
+
+  const brokerRevenueRank = useMemo(() => {
+    const map = new Map()
+    const allEntries = [...structuredFiltered, ...bovespaFiltered, ...bmfFiltered]
+    allEntries.forEach((entry) => {
+      const broker = String(entry?.broker || '').trim() || '—'
+      if (!map.has(broker)) {
+        map.set(broker, { receita: 0, assessores: new Set(), clientes: new Set() })
+      }
+      const record = map.get(broker)
+      record.receita += getEntryValue(entry)
+      const assessor = String(entry?.assessor || '').trim()
+      if (assessor) record.assessores.add(assessor)
+      const client = String(entry?.codigoCliente || entry?.cliente || entry?.conta || '').trim()
+      if (client) record.clientes.add(client)
+    })
+    return Array.from(map.entries())
+      .map(([broker, data]) => ({
+        broker,
+        receita: data.receita,
+        assessores: data.assessores.size,
+        clientes: data.clientes.size,
+      }))
+      .sort((a, b) => b.receita - a.receita)
+      .slice(0, 10)
+  }, [structuredFiltered, bovespaFiltered, bmfFiltered])
+
+  const dailyAllowed = !apuracaoMonths.all && apuracaoMonths.months.length === 1
+
+  useEffect(() => {
+    if (granularity === 'daily' && !dailyAllowed) setGranularity('monthly')
+  }, [dailyAllowed, granularity])
+
+  const formatLabel = (key) => {
+    if (!key) return ''
+    if (granularity === 'daily') {
+      const [, month, day] = String(key).split('-')
+      return `${day}/${month}`
+    }
+    return formatMonthLabel(String(key).slice(0, 7))
+  }
 
   return (
     <div className="dashboard">
@@ -215,6 +291,7 @@ const Dashboard = () => {
                 className={`page-number ${granularity === 'daily' ? 'active' : ''}`}
                 type="button"
                 onClick={() => setGranularity('daily')}
+                disabled={!dailyAllowed}
               >
                 Diario
               </button>
@@ -235,6 +312,11 @@ const Dashboard = () => {
             <div>
               <span className="muted">Total</span>
               <strong>{formatCurrency(totalOverall)}</strong>
+            </div>
+            <div className="chart-labels">
+              {windowedKeys.map((key) => (
+                <span key={key} className="muted">{formatLabel(key)}</span>
+              ))}
             </div>
           </div>
         </div>
@@ -313,6 +395,25 @@ const Dashboard = () => {
                     </div>
                     <div className="segment-bar">
                       <span style={{ width: `${(item.count / maxBrokerCount) * 100}%` }} className="cyan" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="segment-total">
+            <div>
+              <span className="muted">Rank Receita por Broker (todas origens)</span>
+              <div className="segment-list">
+                {brokerRevenueRank.map((item) => (
+                  <div key={item.broker} className="segment-row">
+                    <div className="segment-dot violet" />
+                    <div className="segment-info">
+                      <strong>{item.broker}</strong>
+                      <span>{formatCurrency(item.receita)} • {item.assessores} assessores • {item.clientes} clientes</span>
+                    </div>
+                    <div className="segment-bar">
+                      <span style={{ width: `${totalOverall ? (item.receita / totalOverall) * 100 : 0}%` }} className="violet" />
                     </div>
                   </div>
                 ))}

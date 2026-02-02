@@ -10,6 +10,7 @@ import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { enrichRow } from '../services/tags'
 import { appendManualRevenue, loadManualRevenue, removeManualRevenue } from '../services/revenueStore'
 import { loadStructuredRevenue } from '../services/revenueStructured'
+import { filterByApuracaoMonths } from '../services/apuracao'
 
 const buildMultiOptions = (values) => {
   const unique = Array.from(new Set(values.filter((value) => value != null && value !== '')))
@@ -21,7 +22,7 @@ const buildMultiOptions = (values) => {
 
 const RevenueManual = () => {
   const { notify } = useToast()
-  const { selectedBroker, tagsIndex } = useGlobalFilters()
+  const { selectedBroker, tagsIndex, apuracaoMonths } = useGlobalFilters()
   const [entries, setEntries] = useState(() => loadManualRevenue())
   const [form, setForm] = useState({
     data: '2026-01-26',
@@ -98,13 +99,14 @@ const RevenueManual = () => {
   )
 
   const rows = useMemo(() => {
-    return entries
+    const scoped = filterByApuracaoMonths(entries, apuracaoMonths, (entry) => entry.data || entry.dataEntrada)
+    return scoped
       .map((entry) => enrichRow(entry, tagsIndex))
       .filter((entry) => {
         if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
         return true
       })
-  }, [entries, selectedBroker, tagsIndex])
+  }, [entries, selectedBroker, tagsIndex, apuracaoMonths])
 
   return (
     <div className="page">

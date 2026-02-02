@@ -33,6 +33,7 @@ export const saveRevenueList = (type, entries) => {
   if (!key) return
   try {
     localStorage.setItem(key, JSON.stringify(entries || []))
+    window.dispatchEvent(new CustomEvent('pwr:receita-updated'))
   } catch {
     // noop
   }

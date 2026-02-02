@@ -5,7 +5,29 @@ import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 
 const Topbar = ({ title, breadcrumbs, onToggleSidebar, currentPath }) => {
   const actions = quickActions[currentPath] || []
-  const { selectedBroker, setSelectedBroker, brokerOptions, selectedAssessor, setSelectedAssessor, assessorOptions } = useGlobalFilters()
+  const {
+    selectedBroker,
+    setSelectedBroker,
+    brokerOptions,
+    selectedAssessor,
+    setSelectedAssessor,
+    assessorOptions,
+    apuracaoMonths,
+    setApuracaoMonths,
+    apuracaoOptions,
+  } = useGlobalFilters()
+
+  const APURACAO_ALL = '__ALL__'
+  const apuracaoValue = apuracaoMonths.all ? [APURACAO_ALL] : apuracaoMonths.months
+  const apuracaoItems = [{ value: APURACAO_ALL, label: 'Todos' }, ...apuracaoOptions]
+
+  const handleApuracaoChange = (values) => {
+    if (!values || !values.length || values.includes(APURACAO_ALL)) {
+      setApuracaoMonths({ all: true, months: [] })
+      return
+    }
+    setApuracaoMonths({ all: false, months: values })
+  }
 
   return (
     <header className="topbar">
@@ -26,6 +48,17 @@ const Topbar = ({ title, breadcrumbs, onToggleSidebar, currentPath }) => {
         </div>
       </div>
       <div className="topbar-actions">
+        {currentPath === '/' ? (
+          <MultiSelect
+            value={apuracaoValue}
+            options={apuracaoItems}
+            onChange={handleApuracaoChange}
+            placeholder="Mes de apuracao"
+            className="topbar-filter"
+            menuClassName="topbar-filter-menu"
+            searchable={false}
+          />
+        ) : null}
         <MultiSelect
           value={selectedBroker}
           options={brokerOptions}

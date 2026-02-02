@@ -96,36 +96,7 @@ export const buildEstruturadasDashboard = ({ entries = [], vencimentoIndex }) =>
 
     const qty = parseNumberSafe(entry.quantidade)
     const precoCompra = parseNumberSafe(entry.precoCompra)
-    let volume = 0
-
-    if (isOptionStructure(entry.estrutura)) {
-      exceptionsCount += 1
-      const keyWithQty = buildKey({
-        codigoCliente: entry.codigoCliente,
-        ativo: entry.ativo,
-        estrutura: entry.estrutura,
-        vencimento: entry.vencimento,
-        quantidade: qty,
-      })
-      const keyWithoutQty = buildKey({
-        codigoCliente: entry.codigoCliente,
-        ativo: entry.ativo,
-        estrutura: entry.estrutura,
-        vencimento: entry.vencimento,
-        quantidade: '',
-      })
-      const matched = index.get(keyWithQty) || index.get(keyWithoutQty)
-      const custoUnitario = parseNumberSafe(matched?.custoUnitario)
-      if (custoUnitario != null && qty != null) {
-        volume = custoUnitario * qty
-        exceptionsMatched += 1
-      } else {
-        exceptionsFallback += 1
-        volume = qty != null && precoCompra != null ? qty * precoCompra : 0
-      }
-    } else {
-      volume = qty != null && precoCompra != null ? qty * precoCompra : 0
-    }
+    const volume = qty != null && precoCompra != null ? qty * precoCompra : 0
 
     if ((qty == null || precoCompra == null) && volume === 0) {
       invalidRows.push(idx)
@@ -134,12 +105,16 @@ export const buildEstruturadasDashboard = ({ entries = [], vencimentoIndex }) =>
     const volumeAbs = Math.abs(volume)
     totalVolume += volumeAbs
     const estruturaLabel = entry.estrutura || '—'
-    const current = byEstrutura.get(estruturaLabel) || { receita: 0, volume: 0, count: 0 }
-    byEstrutura.set(estruturaLabel, {
-      receita: current.receita + (comissao || 0),
-      volume: current.volume + volumeAbs,
-      count: current.count + 1,
-    })
+    if (isOptionStructure(entry.estrutura)) {
+      exceptionsCount += 1
+    } else {
+      const current = byEstrutura.get(estruturaLabel) || { receita: 0, volume: 0, count: 0 }
+      byEstrutura.set(estruturaLabel, {
+        receita: current.receita + (comissao || 0),
+        volume: current.volume + volumeAbs,
+        count: current.count + 1,
+      })
+    }
   })
 
   const top5 = Array.from(byEstrutura.entries())

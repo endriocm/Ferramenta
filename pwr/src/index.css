@@ -804,6 +804,14 @@ button {
   justify-content: space-between;
 }
 
+.chart-labels {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 70%;
+}
+
 .segment-card {
   display: grid;
   gap: 16px;

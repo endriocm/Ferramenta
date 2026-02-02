@@ -10,6 +10,9 @@ import {
 import { getCurrentUserKey } from '../services/currentUser'
 import { buildTagIndex, loadTags } from '../services/tags'
 import { debugLog } from '../services/debug'
+import { loadRevenueList, loadManualRevenue } from '../services/revenueStore'
+import { loadStructuredRevenue } from '../services/revenueStructured'
+import { collectMonthsFromEntries, formatMonthLabel } from '../services/apuracao'
 
 const STORAGE_PREFIX = 'pwr.filters.'
 const BROADCAST_KEY = 'pwr.filters.broadcast'
@@ -32,6 +35,14 @@ const normalizeList = (value) => {
   return normalized ? [normalized] : []
 }
 
+const normalizeApuracao = (value) => {
+  if (!value) return { all: true, months: [] }
+  const all = value.all === true
+  const months = normalizeList(value.months)
+  if (all || !months.length) return { all: true, months: [] }
+  return { all: false, months }
+}
+
 const parseStored = (raw) => {
   if (!raw) return null
   try {
@@ -48,6 +59,8 @@ export const GlobalFilterProvider = ({ children }) => {
   const [selectedBroker, setSelectedBroker] = useState([])
   const [selectedAssessor, setSelectedAssessor] = useState([])
   const [clientCodeFilter, setClientCodeFilter] = useState([])
+  const [apuracaoMonths, setApuracaoMonths] = useState({ all: true, months: [] })
+  const [apuracaoOptions, setApuracaoOptions] = useState([])
   const [tagsPayload, setTagsPayload] = useState(null)
   const channelRef = useRef(null)
   const senderRef = useRef(Math.random().toString(36).slice(2))
@@ -64,6 +77,20 @@ export const GlobalFilterProvider = ({ children }) => {
     return base.map((item) => ({ value: item, label: item }))
   }, [tagsIndex])
 
+  const refreshApuracaoOptions = useCallback(() => {
+    const structured = loadStructuredRevenue()
+    const bovespa = loadRevenueList('bovespa')
+    const bmf = loadRevenueList('bmf')
+    const manual = loadManualRevenue()
+    const months = new Set()
+    collectMonthsFromEntries(structured, (entry) => entry.dataEntrada).forEach((key) => months.add(key))
+    collectMonthsFromEntries(bovespa, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
+    collectMonthsFromEntries(bmf, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
+    collectMonthsFromEntries(manual, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
+    const sorted = Array.from(months).sort()
+    setApuracaoOptions(sorted.map((key) => ({ value: key, label: formatMonthLabel(key) })))
+  }, [])
+
   const refreshTags = useCallback(async () => {
     if (!userKey) return
     const loaded = await loadTags(userKey)
@@ -72,7 +99,8 @@ export const GlobalFilterProvider = ({ children }) => {
 
   useEffect(() => {
     refreshTags()
-  }, [refreshTags])
+    refreshApuracaoOptions()
+  }, [refreshTags, refreshApuracaoOptions])
 
   const applyRemote = useCallback((payload) => {
     if (!payload) return
@@ -80,6 +108,7 @@ export const GlobalFilterProvider = ({ children }) => {
     setSelectedBroker(normalizeList(payload.broker))
     setSelectedAssessor(normalizeList(payload.assessor))
     setClientCodeFilter(normalizeList(payload.clientCode))
+    setApuracaoMonths(normalizeApuracao(payload.apuracao))
     setTimeout(() => {
       applyingRemoteRef.current = false
     }, 0)
@@ -92,6 +121,7 @@ export const GlobalFilterProvider = ({ children }) => {
       setSelectedBroker(normalizeList(stored.broker))
       setSelectedAssessor(normalizeList(stored.assessor))
       setClientCodeFilter(normalizeList(stored.clientCode))
+      setApuracaoMonths(normalizeApuracao(stored.apuracao))
     }
     loadedRef.current = true
   }, [userKey])
@@ -103,6 +133,7 @@ export const GlobalFilterProvider = ({ children }) => {
       broker: normalizeList(selectedBroker),
       assessor: normalizeList(selectedAssessor),
       clientCode: normalizeList(clientCodeFilter),
+      apuracao: normalizeApuracao(apuracaoMonths),
       updatedAt: Date.now(),
     }
     try {
@@ -125,7 +156,7 @@ export const GlobalFilterProvider = ({ children }) => {
       }
     }
     debugLog('filters.change', { broker: payload.broker, clientCode: payload.clientCode })
-  }, [selectedAssessor, selectedBroker, clientCodeFilter, userKey])
+  }, [selectedAssessor, selectedBroker, clientCodeFilter, apuracaoMonths, userKey])
 
   useEffect(() => {
     if (!userKey) return
@@ -175,6 +206,12 @@ export const GlobalFilterProvider = ({ children }) => {
     }
   }, [applyRemote, refreshTags, userKey])
 
+  useEffect(() => {
+    const handleReceitaUpdate = () => refreshApuracaoOptions()
+    window.addEventListener('pwr:receita-updated', handleReceitaUpdate)
+    return () => window.removeEventListener('pwr:receita-updated', handleReceitaUpdate)
+  }, [refreshApuracaoOptions])
+
   const value = useMemo(
     () => ({
       userKey,
@@ -184,12 +221,15 @@ export const GlobalFilterProvider = ({ children }) => {
       setSelectedAssessor,
       clientCodeFilter,
       setClientCodeFilter,
+      apuracaoMonths,
+      setApuracaoMonths,
+      apuracaoOptions,
       brokerOptions,
       assessorOptions,
       tagsIndex,
       refreshTags,
     }),
-    [userKey, selectedBroker, selectedAssessor, clientCodeFilter, brokerOptions, assessorOptions, tagsIndex, refreshTags],
+    [userKey, selectedBroker, selectedAssessor, clientCodeFilter, apuracaoMonths, apuracaoOptions, brokerOptions, assessorOptions, tagsIndex, refreshTags],
   )
 
   return (

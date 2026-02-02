@@ -14,6 +14,7 @@ export const loadStructuredRevenue = () => {
 export const saveStructuredRevenue = (entries) => {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(entries || []))
+    window.dispatchEvent(new CustomEvent('pwr:receita-updated'))
   } catch {
     // noop
   }
@@ -29,4 +30,3 @@ export const buildMonthLabel = (key) => {
 }
 
 export const getMonthKey = (dateKey) => String(dateKey || '').slice(0, 7)
-

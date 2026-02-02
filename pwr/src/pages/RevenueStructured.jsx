@@ -14,10 +14,11 @@ import TreeSelect from '../components/TreeSelect'
 import { getCurrentUserKey } from '../services/currentUser'
 import { loadLastImported } from '../services/vencimentoCache'
 import { buildEstruturadasDashboard, buildVencimentoIndex } from '../services/estruturadasDashboard'
+import { filterByApuracaoMonths } from '../services/apuracao'
 
 const RevenueStructured = () => {
   const { notify } = useToast()
-  const { selectedBroker, tagsIndex } = useGlobalFilters()
+  const { selectedBroker, tagsIndex, apuracaoMonths } = useGlobalFilters()
   const [userKey] = useState(() => getCurrentUserKey())
   const [filters, setFilters] = useState({ search: '', cliente: [], assessor: [], ativo: [], estrutura: [], broker: [] })
   const [entries, setEntries] = useState(() => loadStructuredRevenue())
@@ -97,9 +98,14 @@ const RevenueStructured = () => {
     return { tree, allValues: Array.from(allValues).sort() }
   }
 
+  const apuracaoEntries = useMemo(
+    () => filterByApuracaoMonths(entries, apuracaoMonths, (entry) => entry.dataEntrada),
+    [entries, apuracaoMonths],
+  )
+
   const allDays = useMemo(
-    () => Array.from(new Set(entries.map((entry) => normalizeDateKey(entry.dataEntrada)))).filter(Boolean).sort(),
-    [entries],
+    () => Array.from(new Set(apuracaoEntries.map((entry) => normalizeDateKey(entry.dataEntrada)))).filter(Boolean).sort(),
+    [apuracaoEntries],
   )
 
   const monthOptions = useMemo(() => {
@@ -128,14 +134,14 @@ const RevenueStructured = () => {
   const totalMes = useMemo(() => {
     if (!effectiveDays.length) return 0
     const set = new Set(effectiveDays)
-    return entries
+    return apuracaoEntries
       .filter((entry) => set.has(normalizeDateKey(entry.dataEntrada)))
       .reduce((sum, entry) => sum + (Number(entry.comissao) || 0), 0)
-  }, [effectiveDays, entries])
+  }, [effectiveDays, apuracaoEntries])
 
   const enrichedEntries = useMemo(
-    () => entries.map((entry) => enrichRow(entry, tagsIndex)),
-    [entries, tagsIndex],
+    () => apuracaoEntries.map((entry) => enrichRow(entry, tagsIndex)),
+    [apuracaoEntries, tagsIndex],
   )
 
   const brokerOptions = useMemo(
@@ -202,11 +208,15 @@ const RevenueStructured = () => {
 
   useEffect(() => {
     setPage(1)
-  }, [filters.search, filters.cliente, filters.assessor, filters.ativo, filters.estrutura, filters.broker, selectedDays, selectedBroker, entries.length])
+  }, [filters.search, filters.cliente, filters.assessor, filters.ativo, filters.estrutura, filters.broker, selectedDays, selectedBroker, apuracaoMonths, entries.length])
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages)
   }, [page, totalPages])
+
+  useEffect(() => {
+    setSelectedDays([])
+  }, [apuracaoMonths])
 
   const columns = useMemo(
     () => [
