@@ -19,7 +19,13 @@ const PageHeader = ({ title, subtitle, meta = [], actions = [] }) => {
       </div>
       <div className="page-actions">
         {actions.map((action) => (
-          <button key={action.label} className={`btn ${action.variant || 'btn-primary'}`} type="button">
+          <button
+            key={action.label}
+            className={`btn ${action.variant || 'btn-primary'}`}
+            type="button"
+            onClick={action.onClick}
+            disabled={action.disabled}
+          >
             {action.icon ? <Icon name={action.icon} size={16} /> : null}
             {action.label}
           </button>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 
 import { formatCurrency, formatNumber } from '../utils/format'
 
@@ -34,7 +34,7 @@ try {
 
   })
 
-} catch (error) {
+} catch {
 
   compactCurrencyFormatter = null
 
@@ -356,35 +356,40 @@ const Dashboard = () => {
 
   const bmfActive = includeBmf ? bmfFiltered : []
 
+  const dailyAllowed = !apuracaoMonths.all && apuracaoMonths.months.length === 1
+
+  const resolvedGranularity = dailyAllowed ? granularity : 'monthly'
+
+
   const keyFn = useMemo(() => {
 
-    if (granularity === 'daily') return (entry) => getEntryDateKey(entry)
+    if (resolvedGranularity === 'daily') return (entry) => getEntryDateKey(entry)
 
     return (entry) => String(getEntryDateKey(entry)).slice(0, 7)
 
-  }, [granularity])
+  }, [resolvedGranularity])
 
-  const structuredMap = useMemo(() => aggregateByKey(structuredActive, keyFn), [structuredActive, keyFn])
+  const structuredMapAll = useMemo(() => aggregateByKey(structuredFiltered, keyFn), [structuredFiltered, keyFn])
 
-  const bovespaMap = useMemo(() => aggregateByKey(bovespaActive, keyFn), [bovespaActive, keyFn])
+  const bovespaMapAll = useMemo(() => aggregateByKey(bovespaFiltered, keyFn), [bovespaFiltered, keyFn])
 
-  const bmfMap = useMemo(() => aggregateByKey(bmfActive, keyFn), [bmfActive, keyFn])
+  const bmfMapAll = useMemo(() => aggregateByKey(bmfFiltered, keyFn), [bmfFiltered, keyFn])
 
   const allKeys = useMemo(() => {
 
-    const keys = new Set([...structuredMap.keys(), ...bovespaMap.keys(), ...bmfMap.keys()])
+    const keys = new Set([...structuredMapAll.keys(), ...bovespaMapAll.keys(), ...bmfMapAll.keys()])
 
     return Array.from(keys).sort()
 
-  }, [structuredMap, bovespaMap, bmfMap])
+  }, [structuredMapAll, bovespaMapAll, bmfMapAll])
 
   const windowedKeys = useMemo(() => {
 
-    const max = granularity === 'daily' ? 31 : 24
+    const max = resolvedGranularity === 'daily' ? 31 : 24
 
     return allKeys.slice(-max)
 
-  }, [allKeys, granularity])
+  }, [allKeys, resolvedGranularity])
 
   const series = useMemo(() => {
 
@@ -392,17 +397,17 @@ const Dashboard = () => {
 
       key,
 
-      estruturadas: structuredMap.get(key) || 0,
+      estruturadas: structuredMapAll.get(key) || 0,
 
-      bovespa: bovespaMap.get(key) || 0,
+      bovespa: bovespaMapAll.get(key) || 0,
 
-      bmf: bmfMap.get(key) || 0,
+      bmf: bmfMapAll.get(key) || 0,
 
     }))
 
-  }, [windowedKeys, structuredMap, bovespaMap, bmfMap])
+  }, [windowedKeys, structuredMapAll, bovespaMapAll, bmfMapAll])
 
-  const totalsByOrigin = useMemo(() => {
+  const totalsByOriginAll = useMemo(() => {
 
     return series.reduce(
 
@@ -424,19 +429,21 @@ const Dashboard = () => {
 
   }, [series])
 
+  const totalsByOrigin = useMemo(() => {
+
+    if (originFilter === 'bovespa') return { estruturadas: 0, bovespa: totalsByOriginAll.bovespa, bmf: 0 }
+
+    if (originFilter === 'bmf') return { estruturadas: 0, bovespa: 0, bmf: totalsByOriginAll.bmf }
+
+    if (originFilter === 'estruturadas') return { estruturadas: totalsByOriginAll.estruturadas, bovespa: 0, bmf: 0 }
+
+    return totalsByOriginAll
+
+  }, [originFilter, totalsByOriginAll])
+
   const totalOverall = totalsByOrigin.estruturadas + totalsByOrigin.bovespa + totalsByOrigin.bmf
 
-  const visibleTotals = useMemo(() => {
-
-    if (originFilter === 'bovespa') return totalsByOrigin.bovespa
-
-    if (originFilter === 'bmf') return totalsByOrigin.bmf
-
-    if (originFilter === 'estruturadas') return totalsByOrigin.estruturadas
-
-    return totalOverall
-
-  }, [originFilter, totalOverall, totalsByOrigin])
+  const visibleTotals = totalOverall
 
   const uniqueBovespa = useMemo(() => collectUniqueClients(bovespaActive), [bovespaActive])
 
@@ -448,7 +455,7 @@ const Dashboard = () => {
 
     structuredActive.forEach((entry) => {
 
-      const broker = String(entry?.broker || '').trim() || '—'
+      const broker = String(entry?.broker || '').trim() || 'â€”'
 
       const code = String(entry?.codigoCliente || '').trim()
 
@@ -478,23 +485,35 @@ const Dashboard = () => {
 
   const bmfSeries = series.map((item) => item.bmf)
 
-  const chartScale = buildChartScale([...totalSeries, ...estrutSeries, ...bovespaSeries, ...bmfSeries], 5)
+  const barSeries = useMemo(() => {
 
-  const totalScaled = normalizeSeries(totalSeries, chartScale)
+    if (originFilter === 'bovespa') return bovespaSeries
+
+    if (originFilter === 'bmf') return bmfSeries
+
+    if (originFilter === 'estruturadas') return estrutSeries
+
+    return totalSeries
+
+  }, [originFilter, totalSeries, bovespaSeries, bmfSeries, estrutSeries])
+
+  const chartScale = buildChartScale([...barSeries, ...estrutSeries], 5)
+
+  const barScaled = normalizeSeries(barSeries, chartScale)
 
   const estrutScaled = normalizeSeries(estrutSeries, chartScale)
 
-  const bovespaScaled = normalizeSeries(bovespaSeries, chartScale)
-
-  const bmfScaled = normalizeSeries(bmfSeries, chartScale)
-
-  const chartTicks = totalSeries.length
+  const chartTicks = barSeries.length
 
     ? chartScale.ticks.map((tick) => ({ ...tick, label: formatCurrency(tick.value) }))
 
     : []
 
-  const hasChartData = totalSeries.length > 0
+  const hasChartData = barSeries.length > 0
+
+  const estruturaLineTone = originFilter === 'estruturadas'
+    ? 'rgba(255,180,84,0.45)'
+    : 'rgba(255,180,84,0.85)'
 
   const brokerRevenueRank = useMemo(
 
@@ -506,7 +525,7 @@ const Dashboard = () => {
 
       allEntries.forEach((entry) => {
 
-        const broker = String(entry?.broker || '').trim() || '—'
+        const broker = String(entry?.broker || '').trim() || 'â€”'
 
         if (!map.has(broker)) {
 
@@ -578,45 +597,12 @@ const Dashboard = () => {
 
   const maxAssessorValue = assessorRank.reduce((max, item) => Math.max(max, item.value), 1)
 
-  const dailyAllowed = !apuracaoMonths.all && apuracaoMonths.months.length === 1
-
-  useEffect(() => {
-
-    if (granularity === 'daily' && !dailyAllowed) setGranularity('monthly')
-
-  }, [dailyAllowed, granularity])
-
-  useEffect(() => {
-
-    if (activeIndex !== null && activeIndex >= totalSeries.length) setActiveIndex(null)
-
-  }, [activeIndex, totalSeries.length])
-
-  useEffect(() => {
-
-    if (granularity !== 'daily' && tooltip.open) {
-
-      setTooltip({ open: false, index: null, x: 0, y: 0, flip: false })
-
-    }
-
-  }, [granularity, tooltip.open])
-
-  useEffect(() => {
-
-    if (tooltip.index !== null && tooltip.index >= totalSeries.length) {
-
-      setTooltip({ open: false, index: null, x: 0, y: 0, flip: false })
-
-    }
-
-  }, [tooltip.index, totalSeries.length])
 
   const formatLabel = (key) => {
 
     if (!key) return ''
 
-    if (granularity === 'daily') {
+    if (resolvedGranularity === 'daily') {
 
       const [, month, day] = String(key).split('-')
 
@@ -628,17 +614,17 @@ const Dashboard = () => {
 
   }
 
-  const isDaily = granularity === 'daily'
+  const isDaily = resolvedGranularity === 'daily'
 
-  const gridColumns = Math.max(totalSeries.length, 1)
+  const gridColumns = Math.max(barSeries.length, 1)
 
   const chartGridStyle = { '--chart-columns': gridColumns }
 
-  const showCompactValues = isDaily && totalSeries.length >= 16
+  const showCompactValues = barSeries.length >= 16
 
   const dailyLabelStep = isDaily
 
-    ? (totalSeries.length >= 26 ? 3 : totalSeries.length >= 16 ? 2 : 1)
+    ? (barSeries.length >= 26 ? 3 : barSeries.length >= 16 ? 2 : 1)
 
     : 1
 
@@ -648,7 +634,7 @@ const Dashboard = () => {
 
     if (dailyLabelStep === 1) return formatLabel(key)
 
-    if (index === 0 || index === totalSeries.length - 1 || index % dailyLabelStep === 0) {
+    if (index === 0 || index === barSeries.length - 1 || index % dailyLabelStep === 0) {
 
       return formatLabel(key)
 
@@ -658,11 +644,19 @@ const Dashboard = () => {
 
   }
 
+  const handleGranularityChange = (next) => {
+
+    setGranularity(next)
+
+    setTooltip({ open: false, index: null, x: 0, y: 0, flip: false })
+
+    setActiveIndex(null)
+
+  }
+
   const handleBarEnter = (index, event) => {
 
     setActiveIndex(index)
-
-    if (granularity !== 'daily') return
 
     const target = event?.currentTarget
 
@@ -700,29 +694,15 @@ const Dashboard = () => {
 
   }
 
-  const defaultIndex = hasChartData ? totalSeries.length - 1 : null
+  const safeTooltipIndex = tooltip.index !== null && tooltip.index < barSeries.length ? tooltip.index : null
 
-  const selectedIndex = activeIndex ?? defaultIndex
+  const tooltipOpen = tooltip.open && safeTooltipIndex !== null
 
-  const selectedValue = selectedIndex !== null ? totalSeries[selectedIndex] : null
+  const tooltipData = safeTooltipIndex !== null ? series[safeTooltipIndex] : null
 
-  const selectedLabel = selectedIndex !== null ? formatLabel(windowedKeys[selectedIndex]) : ''
+  const tooltipTotal = safeTooltipIndex !== null ? totalSeries[safeTooltipIndex] : 0
 
-  const previousValue = selectedIndex !== null && selectedIndex > 0 ? totalSeries[selectedIndex - 1] : null
-
-  const deltaValue = previousValue !== null && selectedValue !== null ? selectedValue - previousValue : null
-
-  const deltaLabel = deltaValue !== null
-
-    ? `${deltaValue >= 0 ? '+' : '-'}${formatCurrency(Math.abs(deltaValue))}`
-
-    : ''
-
-  const tooltipData = tooltip.index !== null ? series[tooltip.index] : null
-
-  const tooltipTotal = tooltip.index !== null ? totalSeries[tooltip.index] : 0
-
-  const tooltipLabel = tooltip.index !== null ? formatLabel(windowedKeys[tooltip.index]) : ''
+  const tooltipLabel = safeTooltipIndex !== null ? formatLabel(windowedKeys[safeTooltipIndex]) : ''
 
   return (
 
@@ -804,11 +784,11 @@ const Dashboard = () => {
 
               <button
 
-                className={`page-number ${granularity === 'monthly' ? 'active' : ''}`}
+                className={`page-number ${resolvedGranularity === 'monthly' ? 'active' : ''}`}
 
                 type="button"
 
-                onClick={() => setGranularity('monthly')}
+                onClick={() => handleGranularityChange('monthly')}
 
               >
 
@@ -818,11 +798,11 @@ const Dashboard = () => {
 
               <button
 
-                className={`page-number ${granularity === 'daily' ? 'active' : ''}`}
+                className={`page-number ${resolvedGranularity === 'daily' ? 'active' : ''}`}
 
                 type="button"
 
-                onClick={() => setGranularity('daily')}
+                onClick={() => handleGranularityChange('daily')}
 
                 disabled={!dailyAllowed}
 
@@ -836,7 +816,7 @@ const Dashboard = () => {
 
           </div>
 
-                    <div className={`chart ${isDaily ? 'is-daily' : ''}`} ref={chartRef}>
+          <div className={`chart flow-chart ${isDaily ? 'is-daily' : ''}`} ref={chartRef}>
 
             {chartTicks.length ? (
 
@@ -874,47 +854,33 @@ const Dashboard = () => {
 
               <>
 
-                <Sparkline data={totalScaled} tone="rgba(255,255,255,0.6)" />
-
-                <Sparkline data={bovespaScaled} tone="rgba(40,242,230,0.85)" />
-
-                <Sparkline data={bmfScaled} tone="rgba(166,107,255,0.85)" />
-
-                {!isDaily || originFilter !== 'estruturadas' ? (
-
-                  <Sparkline data={estrutScaled} tone="rgba(255,180,84,0.85)" />
-
-                ) : null}
+                <Sparkline data={estrutScaled} tone={estruturaLineTone} />
 
                 <div className="chart-grid" style={chartGridStyle}>
 
-                  {totalSeries.map((value, index) => {
+                  {barSeries.map((value, index) => {
 
                     const key = windowedKeys[index] || `${value}-${index}`
 
                     const isActive = activeIndex === index
 
-                    const height = totalScaled[index] || 0
+                    const height = barScaled[index] || 0
 
                     const dayData = series[index] || { bovespa: 0, bmf: 0, estruturadas: 0 }
 
-                    const columnStyle = isDaily ? { '--bar-height': `${height}%` } : undefined
+                    const columnStyle = { '--bar-height': `${height}%` }
 
                     const valueLabel = showCompactValues ? formatCurrencyCompact(value) : formatCurrency(value)
 
                     const dateLabel = formatDailyLabel(windowedKeys[index], index)
 
-                    const ariaLabel = isDaily
-
-                      ? `${formatLabel(windowedKeys[index])} - Receita ${formatCurrency(value)}; bovespa ${formatCurrency(dayData.bovespa)}; BMF ${formatCurrency(dayData.bmf)}; Estrutura ${formatCurrency(dayData.estruturadas)}`
-
-                      : `${formatLabel(windowedKeys[index])}: ${formatCurrency(value)}`
+                    const ariaLabel = `${formatLabel(windowedKeys[index])} - Valor ${formatCurrency(value)}; bovespa ${formatCurrency(dayData.bovespa)}; BMF ${formatCurrency(dayData.bmf)}; Estrutura ${formatCurrency(dayData.estruturadas)}`
 
                     return (
 
-                      <div key={key} className={`chart-col ${isDaily ? 'is-daily' : ''}`} style={columnStyle}>
+                      <div key={key} className="chart-col" style={columnStyle}>
 
-                        {isDaily ? <span className="chart-value-label">{valueLabel}</span> : null}
+                        <span className="chart-value-label">{valueLabel}</span>
 
                         <button
 
@@ -936,7 +902,7 @@ const Dashboard = () => {
 
                         />
 
-                        {isDaily ? <span className="chart-date-label">{dateLabel}</span> : null}
+                        <span className="chart-date-label">{dateLabel}</span>
 
                       </div>
 
@@ -946,7 +912,7 @@ const Dashboard = () => {
 
                 </div>
 
-                {isDaily && tooltip.open && tooltip.index !== null ? (
+                {tooltipOpen ? (
 
                   <div className={`chart-tooltip ${tooltip.flip ? 'is-flipped' : ''}`} style={{ left: tooltip.x, top: tooltip.y }}>
 
@@ -1007,52 +973,6 @@ const Dashboard = () => {
               <strong>{formatCurrency(totalOverall)}</strong>
 
             </div>
-
-            {!isDaily ? (
-
-              <div className="chart-labels">
-
-                {windowedKeys.map((key) => (
-
-                  <span key={key} className="muted">{formatLabel(key)}</span>
-
-                ))}
-
-              </div>
-
-            ) : null}
-
-          </div>
-
-          <div className="chart-selection">
-
-            {hasChartData ? (
-
-              <>
-
-                <span className="chart-selection-label">Valor selecionado:</span>
-
-                <strong>{formatCurrency(selectedValue)}</strong>
-
-                <span className="chart-selection-meta">- {selectedLabel || 'Periodo indisponivel'}</span>
-
-                {deltaValue !== null ? (
-
-                  <span className={`chart-selection-delta ${deltaValue >= 0 ? 'text-positive' : 'text-negative'}`}>
-
-                    Delta vs anterior: {deltaLabel}
-
-                  </span>
-
-                ) : null}
-
-              </>
-
-            ) : (
-
-              <span className="muted">Sem dados para o periodo.</span>
-
-            )}
 
           </div>
 
@@ -1282,7 +1202,7 @@ const Dashboard = () => {
 
                       <strong>{item.broker}</strong>
 
-                      <span>{formatCurrency(item.receita)} • {item.assessores} assessores • {item.clientes} clientes</span>
+                      <span>{formatCurrency(item.receita)} â€¢ {item.assessores} assessores â€¢ {item.clientes} clientes</span>
 
                     </div>
 

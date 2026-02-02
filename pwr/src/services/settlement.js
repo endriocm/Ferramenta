@@ -58,6 +58,15 @@ export const computeBarrierStatus = (operation, market, override) => {
       ...leg,
       direction: resolveBarrierDirection(leg.barreiraTipo, leg.barreiraValor, operation.spotInicial),
     }))
+  const hasBarriers = barriers.length > 0 && operation?.hasBarrier !== false
+  if (!hasBarriers) {
+    return {
+      high: null,
+      low: null,
+      source: { high: 'none', low: 'none' },
+      list: [],
+    }
+  }
 
   const highBarriers = barriers.filter((item) => item.direction === 'high')
   const lowBarriers = barriers.filter((item) => item.direction === 'low')

@@ -12,6 +12,7 @@ import { vencimentos } from '../data/vencimento'
 import { formatCurrency, formatDate, formatNumber } from '../utils/format'
 import { normalizeDateKey } from '../utils/dateKey'
 import { fetchYahooMarketData, normalizeYahooSymbol } from '../services/marketData'
+import { exportXlsx } from '../services/exportXlsx'
 import { buildDividendKey, clearDividendsCache, fetchDividend, fetchDividendsBatch } from '../services/dividends'
 import { computeBarrierStatus, computeResult, getEffectiveLegs } from '../services/settlement'
 import { clearOverride, loadOverrides, saveOverrides, updateOverride } from '../services/overrides'
@@ -87,6 +88,100 @@ const toArrayBuffer = (data) => {
 const spotCache = new Map()
 const SPOT_CONCURRENCY = 8
 const PAGE_SIZE = 15
+const EXPORT_COLUMNS = [
+  'ASSESSOR',
+  'BROKER',
+  'CLIENTE',
+  'DATA DE REGISTRO',
+  'ATIVO',
+  'ESTRUTURA',
+  'VALOR DE COMPRA',
+  'DATA DE VENCIMENTO',
+  'QUANTIDADE',
+  'CUSTO UNITÁRIO',
+  'CALL COMPRADA',
+  'CALL VENDIDA',
+  'PUT COMPRADA',
+  'PUT COMPRADA 2',
+  'PUT VENDIDA',
+  'BARREIRA KI',
+  'BARREIRA KO',
+  'SPOT',
+  'GANHO / PREJUÍZO',
+  'FINANCEIRO FINAL',
+  'VENDA DO ATIVO A MERCADO',
+  'LUCRO %',
+  'DÉBITO DIVIDENDOS',
+  'GANHOS NAS OPÇÕES',
+  'GANHO NA PUT',
+  'GANHO NA CALL',
+  'CUPOM',
+  'PAGOU',
+]
+
+const toOptionalNumber = (value) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const resolveStrikeValue = (leg) => {
+  const raw = leg?.strikeAjustado ?? leg?.strikeAdjusted ?? leg?.strike ?? leg?.precoStrike
+  return toOptionalNumber(raw)
+}
+
+const pickOptionStrikes = (legs) => {
+  const callsLong = []
+  const callsShort = []
+  const putsLong = []
+  const putsShort = []
+  ;(legs || []).forEach((leg) => {
+    const tipo = String(leg?.tipo || '').toUpperCase()
+    if (tipo !== 'CALL' && tipo !== 'PUT') return
+    const strike = resolveStrikeValue(leg)
+    if (strike == null) return
+    const isShort = String(leg?.side || '').toLowerCase() === 'short' || Number(leg?.quantidade || 0) < 0
+    if (tipo === 'CALL') {
+      if (isShort) callsShort.push(strike)
+      else callsLong.push(strike)
+    }
+    if (tipo === 'PUT') {
+      if (isShort) putsShort.push(strike)
+      else putsLong.push(strike)
+    }
+  })
+  return {
+    callComprada: callsLong[0] ?? null,
+    callVendida: callsShort[0] ?? null,
+    putComprada: putsLong[0] ?? null,
+    putComprada2: putsLong[1] ?? null,
+    putVendida: putsShort[0] ?? null,
+  }
+}
+
+const resolveBarrierLevels = (legs, hasBarrier = true) => {
+  if (!hasBarrier) return { ki: null, ko: null }
+  let ki = null
+  let ko = null
+  ;(legs || []).forEach((leg) => {
+    if (leg?.barreiraValor == null) return
+    const type = String(leg?.barreiraTipo || '').toUpperCase()
+    const value = toOptionalNumber(leg.barreiraValor)
+    if (value == null) return
+    const isKi = type.includes('KI') || type.includes('IN') || type.endsWith('I')
+    const isKo = type.includes('KO') || type.includes('OUT') || type.endsWith('O')
+    if (isKi && ki == null) ki = value
+    if (isKo && ko == null) ko = value
+  })
+  return { ki, ko }
+}
+
+const buildSpotKey = (row) => {
+  const symbol = normalizeYahooSymbol(row?.ativo)
+  const startDate = normalizeDateKey(row?.dataRegistro)
+  const endDate = normalizeDateKey(row?.vencimento)
+  if (!symbol || !startDate || !endDate) return null
+  return `${symbol}:${startDate}:${endDate}`
+}
 
 const mapWithConcurrency = async (items, limit, mapper) => {
   const results = new Array(items.length)
@@ -370,6 +465,7 @@ const Vencimento = () => {
   const [isParsing, setIsParsing] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
   const [isRefreshingAll, setIsRefreshingAll] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const fileInputRef = useRef(null)
   const broadcastRef = useRef(null)
@@ -767,7 +863,7 @@ const Vencimento = () => {
           setDividendAdjustments(next)
           setDividendStatus({ loading: false, error: '' })
         }
-      } catch (error) {
+      } catch {
         if (active) {
           setDividendAdjustments(new Map())
           setDividendStatus({ loading: false, error: 'Falha ao recalcular proventos.' })
@@ -845,82 +941,87 @@ const Vencimento = () => {
     })
   }, [reportDate])
 
+  const buildRow = useCallback((operation) => {
+    const market = marketMap[operation.id]
+    const dividendInfo = dividendAdjustments.get(operation.id)
+    const override = overrides[operation.id] || { high: 'auto', low: 'auto', manualCouponBRL: null, manualCouponPct: null, qtyBonus: 0, bonusDate: '', bonusNote: '' }
+    const qtyBase = parseQuantity(operation.qtyBase ?? operation.quantidade ?? 0)
+    const qtyAtualRaw = operation.qtyAtual ?? operation.quantidadeAtual
+    const qtyAtualSource = parseQuantity(qtyAtualRaw)
+    const hasQtyAtualSource = qtyAtualRaw != null && qtyAtualSource > 0
+    const overrideBonus = parseQuantity(override.qtyBonus ?? 0)
+    const hasOverrideBonus = overrideBonus > 0
+    const qtyBonus = hasOverrideBonus
+      ? overrideBonus
+      : hasQtyAtualSource
+        ? Math.max(0, qtyAtualSource - qtyBase)
+        : 0
+    const qtyAtual = hasOverrideBonus
+      ? Math.max(0, qtyBase + qtyBonus)
+      : hasQtyAtualSource
+        ? qtyAtualSource
+        : Math.max(0, qtyBase + qtyBonus)
+    const spotBase = resolveSpotBase(operation, market)
+    const adjustedLegs = applyDividendAdjustments(operation.pernas, dividendInfo?.total)
+    const operationWithSpot = spotBase != null
+      ? { ...operation, spotInicial: spotBase, qtyBase, qtyBonus, qtyAtual, pernas: adjustedLegs }
+      : { ...operation, qtyBase, qtyBonus, qtyAtual, pernas: adjustedLegs }
+    const barrierStatus = computeBarrierStatus(operationWithSpot, market, override)
+    const manualCouponBRL = override?.manualCouponBRL != null && Number.isFinite(Number(override.manualCouponBRL))
+      ? Number(override.manualCouponBRL)
+      : null
+    const legacyCouponLabel = override?.manualCouponPct || null
+    const cupomResolved = manualCouponBRL != null
+      ? formatCurrency(manualCouponBRL)
+      : (legacyCouponLabel || operation.cupom || 'N/A')
+    const result = computeResult(operationWithSpot, market, barrierStatus, override)
+    const effectiveLegs = result.effectiveLegs || getEffectiveLegs(operationWithSpot)
+    return {
+      ...operation,
+      qtyBase,
+      qtyBonus,
+      qtyAtual,
+      market,
+      spotBase,
+      override,
+      manualCouponBRL,
+      legacyCouponLabel,
+      cupomResolved,
+      barrierStatus,
+      result,
+      effectiveLegs,
+      dividendAdjustment: dividendInfo?.total || 0,
+      dividendSource: dividendInfo?.source || null,
+      status: getStatus(operation.vencimento),
+    }
+  }, [applyDividendAdjustments, dividendAdjustments, marketMap, overrides])
+
+  const mappedRows = useMemo(
+    () => enrichedOperations.map((operation) => buildRow(operation)),
+    [enrichedOperations, buildRow],
+  )
+
   const rows = useMemo(() => {
     const vencimentoSet = new Set(filters.vencimentos)
-    return enrichedOperations
-      .map((operation) => {
-        const market = marketMap[operation.id]
-        const dividendInfo = dividendAdjustments.get(operation.id)
-        const override = overrides[operation.id] || { high: 'auto', low: 'auto', manualCouponBRL: null, manualCouponPct: null, qtyBonus: 0, bonusDate: '', bonusNote: '' }
-        const qtyBase = parseQuantity(operation.qtyBase ?? operation.quantidade ?? 0)
-        const qtyAtualRaw = operation.qtyAtual ?? operation.quantidadeAtual
-        const qtyAtualSource = parseQuantity(qtyAtualRaw)
-        const hasQtyAtualSource = qtyAtualRaw != null && qtyAtualSource > 0
-        const overrideBonus = parseQuantity(override.qtyBonus ?? 0)
-        const hasOverrideBonus = overrideBonus > 0
-        const qtyBonus = hasOverrideBonus
-          ? overrideBonus
-          : hasQtyAtualSource
-            ? Math.max(0, qtyAtualSource - qtyBase)
-            : 0
-        const qtyAtual = hasOverrideBonus
-          ? Math.max(0, qtyBase + qtyBonus)
-          : hasQtyAtualSource
-            ? qtyAtualSource
-            : Math.max(0, qtyBase + qtyBonus)
-        const spotBase = resolveSpotBase(operation, market)
-        const adjustedLegs = applyDividendAdjustments(operation.pernas, dividendInfo?.total)
-        const operationWithSpot = spotBase != null
-          ? { ...operation, spotInicial: spotBase, qtyBase, qtyBonus, qtyAtual, pernas: adjustedLegs }
-          : { ...operation, qtyBase, qtyBonus, qtyAtual, pernas: adjustedLegs }
-        const barrierStatus = computeBarrierStatus(operationWithSpot, market, override)
-        const manualCouponBRL = override?.manualCouponBRL != null && Number.isFinite(Number(override.manualCouponBRL))
-          ? Number(override.manualCouponBRL)
-          : null
-        const legacyCouponLabel = override?.manualCouponPct || null
-        const cupomResolved = manualCouponBRL != null
-          ? formatCurrency(manualCouponBRL)
-          : (legacyCouponLabel || operation.cupom || 'N/A')
-        const result = computeResult(operationWithSpot, market, barrierStatus, override)
-        const effectiveLegs = result.effectiveLegs || getEffectiveLegs(operationWithSpot)
-        return {
-          ...operation,
-          qtyBase,
-          qtyBonus,
-          qtyAtual,
-          market,
-          spotBase,
-          override,
-          manualCouponBRL,
-          legacyCouponLabel,
-          cupomResolved,
-          barrierStatus,
-          result,
-          effectiveLegs,
-          dividendAdjustment: dividendInfo?.total || 0,
-          dividendSource: dividendInfo?.source || null,
-          status: getStatus(operation.vencimento),
-        }
-      })
-      .filter((entry) => {
-        const query = filters.search.toLowerCase()
-        const searchBase = `${entry.codigoCliente || ''} ${entry.cliente || ''} ${entry.nomeCliente || ''} ${entry.ativo || ''} ${entry.estrutura || ''} ${entry.assessor || ''} ${entry.broker || ''}`.toLowerCase()
-        if (query && !searchBase.includes(query)) return false
-        if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
-        if (selectedAssessor.length && !selectedAssessor.includes(String(entry.assessor || '').trim())) return false
-        if (filters.broker.length && !filters.broker.includes(String(entry.broker || '').trim())) return false
-        if (filters.assessores?.length && !filters.assessores.includes(entry.assessor)) return false
-        if (clientCodeFilter.length) {
-          const clienteMatch = String(entry.codigoCliente || entry.cliente || '').trim()
-          if (!clientCodeFilter.includes(clienteMatch)) return false
-        }
-        if (filters.estruturas?.length && !filters.estruturas.includes(entry.estrutura)) return false
-        if (filters.ativos?.length && !filters.ativos.includes(entry.ativo)) return false
-        if (vencimentoSet.size && !vencimentoSet.has(normalizeDateKey(entry.vencimento))) return false
-        if (filters.status && entry.status.key !== filters.status) return false
-        return true
-      })
-  }, [applyDividendAdjustments, clientCodeFilter, dividendAdjustments, enrichedOperations, filters, marketMap, overrides, reportDate, selectedBroker, selectedAssessor])
+    return mappedRows.filter((entry) => {
+      const query = filters.search.toLowerCase()
+      const searchBase = `${entry.codigoCliente || ''} ${entry.cliente || ''} ${entry.nomeCliente || ''} ${entry.ativo || ''} ${entry.estrutura || ''} ${entry.assessor || ''} ${entry.broker || ''}`.toLowerCase()
+      if (query && !searchBase.includes(query)) return false
+      if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
+      if (selectedAssessor.length && !selectedAssessor.includes(String(entry.assessor || '').trim())) return false
+      if (filters.broker.length && !filters.broker.includes(String(entry.broker || '').trim())) return false
+      if (filters.assessores?.length && !filters.assessores.includes(entry.assessor)) return false
+      if (clientCodeFilter.length) {
+        const clienteMatch = String(entry.codigoCliente || entry.cliente || '').trim()
+        if (!clientCodeFilter.includes(clienteMatch)) return false
+      }
+      if (filters.estruturas?.length && !filters.estruturas.includes(entry.estrutura)) return false
+      if (filters.ativos?.length && !filters.ativos.includes(entry.ativo)) return false
+      if (vencimentoSet.size && !vencimentoSet.has(normalizeDateKey(entry.vencimento))) return false
+      if (filters.status && entry.status.key !== filters.status) return false
+      return true
+    })
+  }, [clientCodeFilter, filters, mappedRows, selectedBroker, selectedAssessor])
 
   const pageCount = useMemo(() => Math.max(1, Math.ceil(rows.length / PAGE_SIZE)), [rows.length])
   const paginationItems = useMemo(() => buildPagination(currentPage, pageCount), [currentPage, pageCount])
@@ -1012,6 +1113,113 @@ const Vencimento = () => {
     setOverrideDraft({ ...current, manualCouponBRL: current.manualCouponBRL ?? '' })
     setSelectedOverride(row)
   }, [overrides])
+
+  const fetchSpotMapForExport = useCallback(async (rowsToExport) => {
+    const pending = new Map()
+    rowsToExport.forEach((row) => {
+      const spot = resolveSpotBase(row, row.market)
+      if (spot != null) return
+      const symbol = normalizeYahooSymbol(row?.ativo)
+      const startDate = normalizeDateKey(row?.dataRegistro)
+      const endDate = normalizeDateKey(row?.vencimento)
+      if (!symbol || !startDate || !endDate) return
+      const key = `${symbol}:${startDate}:${endDate}`
+      if (!pending.has(key)) {
+        pending.set(key, { key, symbol, startDate, endDate })
+      }
+    })
+    if (!pending.size) return new Map()
+    const results = await mapWithConcurrency(
+      Array.from(pending.values()),
+      SPOT_CONCURRENCY,
+      async (request) => {
+        try {
+          const market = await fetchYahooMarketData({
+            symbol: request.symbol,
+            startDate: request.startDate,
+            endDate: request.endDate,
+          })
+          return [request.key, toOptionalNumber(market?.close)]
+        } catch {
+          return [request.key, null]
+        }
+      },
+    )
+    return new Map(results.filter(([, value]) => value != null))
+  }, [])
+
+  const handleExportXlsx = useCallback(async () => {
+    if (isExporting) return
+    if (!mappedRows.length) {
+      notify('Nenhuma estrutura para exportar.', 'warning')
+      return
+    }
+    setIsExporting(true)
+    try {
+      const spotMap = await fetchSpotMapForExport(mappedRows)
+      const rowsToExport = mappedRows.map((row) => {
+        const legs = row.effectiveLegs || row.pernas || []
+        const { callComprada, callVendida, putComprada, putComprada2, putVendida } = pickOptionStrikes(legs)
+        const { ki, ko } = resolveBarrierLevels(row.pernas || legs, Boolean(row?.barrierStatus?.list?.length))
+        const spotKey = buildSpotKey(row)
+        const spotValue = toOptionalNumber(resolveSpotBase(row, row.market) ?? (spotKey ? spotMap.get(spotKey) : null))
+        const valorCompra = row.result?.valorEntradaIncomplete
+          ? null
+          : toOptionalNumber(row.result?.valorEntrada ?? row.result?.pagou ?? row.result?.custoTotal)
+        const lucroPercent = toOptionalNumber(row.result?.percent)
+        const lucroPercentValue = lucroPercent != null ? lucroPercent * 100 : null
+        const gainsOpcoes = row.result?.optionsSuppressed ? null : toOptionalNumber(row.result?.ganhosOpcoes)
+        const ganhoPut = row.result?.optionsSuppressed ? null : toOptionalNumber(row.result?.ganhoPut)
+        const ganhoCall = row.result?.optionsSuppressed ? null : toOptionalNumber(row.result?.ganhoCall)
+        return [
+          row.assessor || '',
+          row.broker || '',
+          row.nomeCliente || row.cliente || row.codigoCliente || '',
+          normalizeDateKey(row.dataRegistro) || '',
+          row.ativo || '',
+          row.estrutura || '',
+          valorCompra ?? '',
+          normalizeDateKey(row.vencimento) || '',
+          toOptionalNumber(row.qtyBase ?? row.quantidade) ?? '',
+          toOptionalNumber(row.custoUnitario) ?? '',
+          callComprada ?? '',
+          callVendida ?? '',
+          putComprada ?? '',
+          putComprada2 ?? '',
+          putVendida ?? '',
+          ki ?? '',
+          ko ?? '',
+          spotValue ?? '',
+          toOptionalNumber(row.result?.ganho) ?? '',
+          toOptionalNumber(row.result?.financeiroFinal) ?? '',
+          toOptionalNumber(row.result?.vendaAtivo) ?? '',
+          lucroPercentValue ?? '',
+          toOptionalNumber(row.result?.dividends) ?? '',
+          gainsOpcoes ?? '',
+          ganhoPut ?? '',
+          ganhoCall ?? '',
+          toOptionalNumber(row.result?.cupomTotal) ?? '',
+          toOptionalNumber(row.result?.pagou) ?? '',
+        ]
+      })
+      const fileDate = new Date().toISOString().slice(0, 10)
+      const result = await exportXlsx({
+        fileName: `estruturas_export_${fileDate}.xlsx`,
+        sheetName: 'Estruturas',
+        columns: EXPORT_COLUMNS,
+        rows: rowsToExport,
+      })
+      if (!result) {
+        notify('Exportacao cancelada.', 'warning')
+        return
+      }
+      notify('Exportacao concluida.', 'success')
+    } catch {
+      notify('Falha ao exportar o XLSX.', 'warning')
+    } finally {
+      setIsExporting(false)
+    }
+  }, [fetchSpotMapForExport, isExporting, mappedRows, notify])
 
   const columns = useMemo(
     () => [
@@ -1405,7 +1613,10 @@ const Vencimento = () => {
           { label: 'Alertas', value: totals.alertas },
           { label: 'Criticos', value: totals.criticos },
         ]}
-        actions={[{ label: 'Gerar relatorio', icon: 'doc' }, { label: 'Exportar', icon: 'download', variant: 'btn-secondary' }]}
+        actions={[
+          { label: 'Gerar relatorio', icon: 'doc' },
+          { label: isExporting ? 'Exportando...' : 'Exportar', icon: 'download', variant: 'btn-secondary', onClick: handleExportXlsx, disabled: isExporting },
+        ]}
       />
 
       <section className="panel">
@@ -1592,7 +1803,6 @@ const Vencimento = () => {
           rows={visibleRows}
           columns={columns}
           emptyMessage="Nenhuma estrutura encontrada."
-          onRowClick={handleReportClick}
         />
         <div className="table-footer">
           <div className="table-pagination">

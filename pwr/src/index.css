@@ -780,9 +780,14 @@ button {
   --chart-pad-left: 52px;
 }
 
-.chart.is-daily {
-  --chart-pad-top: 40px;
-  --chart-pad-bottom: 34px;
+.chart.flow-chart {
+  --chart-pad-top: 34px;
+  --chart-pad-bottom: 30px;
+}
+
+.chart.flow-chart.is-daily {
+  --chart-pad-top: 42px;
+  --chart-pad-bottom: 38px;
 }
 
 .chart-grid {
@@ -953,36 +958,6 @@ button {
   flex-wrap: wrap;
 }
 
-.chart-labels {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  max-width: 70%;
-}
-
-.chart-selection {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  border-top: 1px solid var(--stroke);
-  padding-top: 12px;
-  font-size: 0.85rem;
-}
-
-.chart-selection-label,
-.chart-selection-meta {
-  color: var(--muted);
-}
-
-.chart-selection strong {
-  font-family: var(--font-mono);
-}
-
-.chart-selection-delta {
-  font-size: 0.8rem;
-}
 
 .assessor-rank {
   display: grid;

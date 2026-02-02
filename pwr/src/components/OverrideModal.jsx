@@ -13,17 +13,17 @@ const OverrideModal = ({ open, onClose, value, onChange, onApply, onReset, qtyBa
         <label>
           Barreira de alta
           <select className="input" value={value.high} onChange={(event) => onChange({ ...value, high: event.target.value })}>
-            <option value="auto">Automatico</option>
-            <option value="hit">Forcar bateu</option>
-            <option value="nohit">Forcar nao bateu</option>
+            <option value="auto">Automático</option>
+            <option value="hit">Bateu</option>
+            <option value="nohit">Não bateu</option>
           </select>
         </label>
         <label>
           Barreira de baixa
           <select className="input" value={value.low} onChange={(event) => onChange({ ...value, low: event.target.value })}>
-            <option value="auto">Automatico</option>
-            <option value="hit">Forcar bateu</option>
-            <option value="nohit">Forcar nao bateu</option>
+            <option value="auto">Automático</option>
+            <option value="hit">Bateu</option>
+            <option value="nohit">Não bateu</option>
           </select>
         </label>
         <label>

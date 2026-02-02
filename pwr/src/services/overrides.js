@@ -35,13 +35,20 @@ const normalizeOverride = (override) => {
     bonusNote: '',
   }
   const merged = { ...base, ...(override || {}) }
+  const normalizeBarrierValue = (value) => {
+    const raw = String(value || '').trim().toLowerCase()
+    if (!raw || raw === 'auto') return 'auto'
+    if (raw === 'force_hit' || raw === 'forcar_bateu' || raw === 'hit') return 'hit'
+    if (raw === 'force_miss' || raw === 'forcar_nao_bateu' || raw === 'nohit' || raw === 'miss') return 'nohit'
+    return value
+  }
   const manualCouponBRL = parseNumber(merged.manualCouponBRL ?? merged.manualCouponBrl)
   const legacyRaw = merged.manualCouponPct ?? merged.cupomManual ?? merged.cupomManualPct
   const legacy = legacyRaw != null && String(legacyRaw).trim() !== '' ? String(legacyRaw).trim() : null
 
   return {
-    high: merged.high || 'auto',
-    low: merged.low || 'auto',
+    high: normalizeBarrierValue(merged.high),
+    low: normalizeBarrierValue(merged.low),
     manualCouponBRL: manualCouponBRL != null ? manualCouponBRL : null,
     manualCouponPct: legacy,
     qtyBonus: Math.max(0, parseNumber(merged.qtyBonus) || 0),
