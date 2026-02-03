@@ -17,7 +17,7 @@ import { buildDividendKey, clearDividendsCache, fetchDividend, fetchDividendsBat
 import { computeBarrierStatus, computeResult, getEffectiveLegs } from '../services/settlement'
 import { clearOverride, loadOverrides, saveOverrides, updateOverride } from '../services/overrides'
 import { parseWorkbook, parseWorkbookBuffer } from '../services/excel'
-import { exportReportPdf } from '../services/pdf'
+import { exportReportPdf, exportVencimentosReportPdf } from '../services/pdf'
 import { getCurrentUserKey } from '../services/currentUser'
 import { enrichRow } from '../services/tags'
 import { clearLink, ensurePermission, isValidElectronPath, loadLink, saveLink } from '../services/vencimentoLink'
@@ -1221,6 +1221,62 @@ const Vencimento = () => {
     }
   }, [fetchSpotMapForExport, isExporting, mappedRows, notify])
 
+  const handleGenerateReport = useCallback(() => {
+    if (!visibleRows.length) {
+      notify('Nenhuma linha para gerar o relatorio.', 'warning')
+      return
+    }
+
+    const filterItems = []
+    if (selectedBroker.length) filterItems.push({ label: 'Broker global', value: selectedBroker.join(', ') })
+    if (selectedAssessor.length) filterItems.push({ label: 'Assessor global', value: selectedAssessor.join(', ') })
+    if (clientCodeFilter.length) filterItems.push({ label: 'Clientes', value: clientCodeFilter.join(', ') })
+    if (filters.search) filterItems.push({ label: 'Busca', value: filters.search })
+    if (filters.broker.length) filterItems.push({ label: 'Broker', value: filters.broker.join(', ') })
+    if (filters.assessores.length) filterItems.push({ label: 'Assessor', value: filters.assessores.join(', ') })
+    if (filters.estruturas.length) filterItems.push({ label: 'Estruturas', value: filters.estruturas.join(', ') })
+    if (filters.ativos.length) filterItems.push({ label: 'Ativos', value: filters.ativos.join(', ') })
+    if (filters.vencimentos.length) {
+      const label = filters.vencimentos.map((key) => formatDate(key)).join(', ')
+      filterItems.push({ label: 'Vencimentos', value: label })
+    }
+    if (filters.status) filterItems.push({ label: 'Status', value: filters.status })
+    filterItems.push({ label: 'Pagina', value: `${currentPage} / ${pageCount}` })
+
+    const totalFinanceiro = visibleRows.reduce((sum, row) => sum + (Number(row.result?.financeiroFinal) || 0), 0)
+    const totalGanho = visibleRows.reduce((sum, row) => sum + (Number(row.result?.ganho) || 0), 0)
+
+    const summaryItems = [
+      { label: 'Operacoes na pagina', value: formatNumber(visibleRows.length) },
+      { label: 'Financeiro final (soma)', value: formatCurrency(totalFinanceiro) },
+      { label: 'Ganho/Prejuizo (soma)', value: formatCurrency(totalGanho) },
+    ]
+
+    const columns = ['Cliente', 'Assessor', 'Broker', 'Ativo', 'Estrutura', 'Vencimento', 'Resultado']
+    const rows = visibleRows.map((row) => [
+      row.nomeCliente || row.cliente || row.codigoCliente || '—',
+      row.assessor || '—',
+      row.broker || '—',
+      row.ativo || '—',
+      row.estrutura || '—',
+      formatDate(row.vencimento),
+      formatCurrency(row.result?.financeiroFinal ?? 0),
+    ])
+
+    const generatedAt = new Date().toLocaleString('pt-BR')
+    exportVencimentosReportPdf(
+      {
+        title: 'Relatorio de Vencimentos',
+        generatedAt,
+        filters: filterItems,
+        summary: summaryItems,
+        columns,
+        rows,
+      },
+      `vencimentos_pagina_${currentPage}`,
+    )
+  }, [clientCodeFilter, currentPage, filters, notify, pageCount, selectedAssessor, selectedBroker, visibleRows])
+
   const columns = useMemo(
     () => [
       {
@@ -1614,7 +1670,7 @@ const Vencimento = () => {
           { label: 'Criticos', value: totals.criticos },
         ]}
         actions={[
-          { label: 'Gerar relatorio', icon: 'doc' },
+          { label: 'Gerar relatorio', icon: 'doc', onClick: handleGenerateReport, disabled: !visibleRows.length },
           { label: isExporting ? 'Exportando...' : 'Exportar', icon: 'download', variant: 'btn-secondary', onClick: handleExportXlsx, disabled: isExporting },
         ]}
       />

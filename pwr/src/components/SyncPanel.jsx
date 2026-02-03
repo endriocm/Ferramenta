@@ -14,6 +14,8 @@ const SyncPanel = ({
   helper = 'Escolha a fonte e acompanhe o processamento.',
   onSync,
   onFileSelected,
+  selectedFile: selectedFileProp,
+  onSelectedFileChange,
   result,
   running: runningProp,
   steps = DEFAULT_STEPS,
@@ -22,7 +24,9 @@ const SyncPanel = ({
 }) => {
   const [stage, setStage] = useState(0)
   const [runningInternal, setRunningInternal] = useState(false)
-  const [selectedFile, setSelectedFile] = useState(null)
+  const [selectedFileInternal, setSelectedFileInternal] = useState(null)
+  const selectedFile = selectedFileProp !== undefined ? selectedFileProp : selectedFileInternal
+  const setSelectedFile = onSelectedFileChange || setSelectedFileInternal
   const inputIdRef = useRef(`sync-${Math.random().toString(36).slice(2)}`)
   const isControlled = typeof runningProp === 'boolean'
   const running = isControlled ? runningProp : runningInternal
@@ -61,7 +65,12 @@ const SyncPanel = ({
     }
   }, [running, steps.length])
 
-  const canSync = Boolean(onSync) && (directory || Boolean(selectedFile))
+  const canSync = Boolean(onSync) && Boolean(selectedFile)
+
+  const selectedFileLabel = selectedFile?.name
+    || selectedFile?.fileName
+    || selectedFile?.file?.name
+    || ''
 
   return (
     <section className="panel sync-panel">
@@ -79,11 +88,20 @@ const SyncPanel = ({
             id={inputIdRef.current}
             type="file"
             accept={accept}
-            onChange={(event) => {
+            onChange={async (event) => {
               const fileList = Array.from(event.target.files || [])
-              const file = fileList[0] || null
-              setSelectedFile(file)
-              onFileSelected?.(file)
+              const payload = directory ? fileList : fileList[0] || null
+              let next = payload
+              if (onFileSelected) {
+                const result = await onFileSelected(payload)
+                if (result !== undefined) {
+                  next = result
+                }
+              }
+              if (Array.isArray(next)) {
+                next = next[0] || null
+              }
+              setSelectedFile(next)
             }}
             multiple={directory}
             webkitdirectory={directory ? 'true' : undefined}
@@ -98,7 +116,7 @@ const SyncPanel = ({
       </div>
 
       {selectedFile ? (
-        <div className="muted">Arquivo selecionado: {selectedFile.name}</div>
+        <div className="muted">Arquivo selecionado: {selectedFileLabel}</div>
       ) : null}
 
       <div className="steps">

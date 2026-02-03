@@ -3,6 +3,7 @@ import PageHeader from '../components/PageHeader'
 import SyncPanel from '../components/SyncPanel'
 import DataTable from '../components/DataTable'
 import Icon from '../components/Icons'
+import Modal from '../components/Modal'
 import { formatCurrency, formatDate, formatNumber } from '../utils/format'
 import { normalizeDateKey } from '../utils/dateKey'
 import { useToast } from '../hooks/useToast'
@@ -16,6 +17,20 @@ import { loadLastImported } from '../services/vencimentoCache'
 import { buildEstruturadasDashboard, buildVencimentoIndex } from '../services/estruturadasDashboard'
 import { filterByApuracaoMonths } from '../services/apuracao'
 
+const normalizeFileName = (name) => String(name || '')
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+
+const filterSpreadsheetCandidates = (files) => {
+  return (Array.isArray(files) ? files : [])
+    .filter((file) => file && file.name)
+    .filter((file) => {
+      const lower = file.name.toLowerCase()
+      return (lower.endsWith('.xlsx') || lower.endsWith('.xls')) && !file.name.startsWith('~$')
+    })
+}
+
 const RevenueStructured = () => {
   const { notify } = useToast()
   const { selectedBroker, tagsIndex, apuracaoMonths } = useGlobalFilters()
@@ -25,6 +40,9 @@ const RevenueStructured = () => {
   const [selectedDays, setSelectedDays] = useState([])
   const [syncing, setSyncing] = useState(false)
   const [syncResult, setSyncResult] = useState(null)
+  const [selectedFile, setSelectedFile] = useState(null)
+  const [fileCandidates, setFileCandidates] = useState([])
+  const [isPickerOpen, setIsPickerOpen] = useState(false)
   const [lastSyncAt, setLastSyncAt] = useState(() => {
     try {
       return localStorage.getItem('pwr.receita.estruturadas.lastSyncAt') || ''
@@ -233,8 +251,43 @@ const RevenueStructured = () => {
     [],
   )
 
+  const handleFolderSelection = useCallback((files) => {
+    const candidates = filterSpreadsheetCandidates(files)
+    if (!candidates.length) {
+      setSelectedFile(null)
+      notify('Nenhuma planilha .xlsx encontrada na pasta.', 'warning')
+      return null
+    }
+    const hintMatches = candidates.filter((file) => normalizeFileName(file.name).includes('estrutur'))
+    if (hintMatches.length === 1) {
+      setSelectedFile(hintMatches[0])
+      return hintMatches[0]
+    }
+    if (candidates.length === 1) {
+      setSelectedFile(candidates[0])
+      return candidates[0]
+    }
+    const options = hintMatches.length ? hintMatches : candidates
+    setSelectedFile(null)
+    setFileCandidates(options)
+    setIsPickerOpen(true)
+    return null
+  }, [notify])
+
+  const handlePickCandidate = useCallback((file) => {
+    if (!file) return
+    setSelectedFile(file)
+    setFileCandidates([])
+    setIsPickerOpen(false)
+  }, [])
+
+  const handleClosePicker = useCallback(() => {
+    setIsPickerOpen(false)
+  }, [])
+
   const handleSync = useCallback(async (file) => {
     if (syncing) return
+    const targetFile = file || selectedFile
     const attemptId = `${Date.now()}-${Math.random()}`
     toastLockRef.current = attemptId
     const notifyOnce = (message, tone) => {
@@ -242,11 +295,11 @@ const RevenueStructured = () => {
       toastLockRef.current = null
       notify(message, tone)
     }
-    if (!file) {
-      notifyOnce('Selecione o arquivo Operacoes.', 'warning')
+    if (!targetFile) {
+      notifyOnce('Selecione a pasta com a planilha Operacoes.', 'warning')
       return
     }
-    const name = file.name.toLowerCase()
+    const name = targetFile.name.toLowerCase()
     if (!name.endsWith('.xlsx') && !name.endsWith('.xls')) {
       notifyOnce('Formato invalido. Use .xlsx.', 'warning')
       return
@@ -255,10 +308,10 @@ const RevenueStructured = () => {
     setSyncResult(null)
     try {
       if (debugEnabled) {
-        console.info('[receita-estruturadas] sync:start', { name: file.name, size: file.size })
+        console.info('[receita-estruturadas] sync:start', { name: targetFile.name, size: targetFile.size })
       }
       const formData = new FormData()
-      formData.append('file', file)
+      formData.append('file', targetFile)
       const response = await fetch('/api/receitas/estruturadas/import', {
         method: 'POST',
         body: formData,
@@ -331,7 +384,7 @@ const RevenueStructured = () => {
     } finally {
       setSyncing(false)
     }
-  }, [debugEnabled, notify, resolvedPeriodKey, syncing])
+  }, [debugEnabled, notify, resolvedPeriodKey, selectedFile, syncing])
 
   return (
     <div className="page">
@@ -349,11 +402,39 @@ const RevenueStructured = () => {
 
       <SyncPanel
         label="Sincronizacao Estruturadas"
-        helper="Selecione o arquivo Operacoes para validar e consolidar."
+        helper="Selecione a pasta com a planilha Operacoes para validar e consolidar."
         onSync={handleSync}
         running={syncing}
         result={syncResult}
+        directory
+        selectedFile={selectedFile}
+        onSelectedFileChange={setSelectedFile}
+        onFileSelected={handleFolderSelection}
       />
+
+      <Modal
+        open={isPickerOpen}
+        onClose={handleClosePicker}
+        title="Escolher arquivo"
+        subtitle="Encontramos mais de um arquivo valido na pasta."
+      >
+        <div className="file-picker-list">
+          {fileCandidates.map((file) => (
+            <button
+              key={`${file.name}-${file.lastModified}`}
+              className="file-picker-item"
+              type="button"
+              onClick={() => handlePickCandidate(file)}
+            >
+              <div>
+                <strong>{file.name}</strong>
+                {file.webkitRelativePath ? <div className="muted">{file.webkitRelativePath}</div> : null}
+              </div>
+              <span className="muted">{new Date(file.lastModified || Date.now()).toLocaleDateString('pt-BR')}</span>
+            </button>
+          ))}
+        </div>
+      </Modal>
 
       <section className="panel">
         <div className="panel-head">

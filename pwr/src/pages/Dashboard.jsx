@@ -106,58 +106,6 @@ const normalizeSeries = (values, scale) =>
 
   })
 
-const Sparkline = ({ data, tone = 'currentColor' }) => {
-
-  if (!data.length) return null
-
-  const pointCount = data.length
-
-  const span = Math.max(pointCount - 1, 1)
-
-  let points = ''
-
-  if (pointCount === 1) {
-
-    const safeValue = Number.isFinite(data[0]) ? data[0] : 0
-
-    const y = 100 - clamp(safeValue, 0, 100)
-
-    points = `0,${y} 100,${y}`
-
-  } else {
-
-    points = data
-
-      .map((value, index) => {
-
-        const safeValue = Number.isFinite(value) ? value : 0
-
-        const clampedValue = clamp(safeValue, 0, 100)
-
-        const x = (index / span) * 100
-
-        const y = 100 - clampedValue
-
-        return `${x},${y}`
-
-      })
-
-      .join(' ')
-
-  }
-
-  return (
-
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="sparkline">
-
-      <polyline points={points} fill="none" stroke={tone} strokeWidth="2" />
-
-    </svg>
-
-  )
-
-}
-
 const getEntryDateKey = (entry) => {
 
   const key = normalizeDateKey(entry?.dataEntrada || entry?.data || entry?.vencimento)
@@ -224,7 +172,7 @@ const collectUniqueClients = (entries) => {
 
 const Dashboard = () => {
 
-  const { tagsIndex, selectedBroker, apuracaoMonths } = useGlobalFilters()
+  const { tagsIndex, selectedBroker, selectedAssessor, apuracaoMonths } = useGlobalFilters()
 
   const [granularity, setGranularity] = useState('monthly')
 
@@ -320,29 +268,43 @@ const Dashboard = () => {
 
   )
 
-  const structuredFiltered = useMemo(
+  const normalizedAssessorFilter = useMemo(() => {
+    const values = selectedAssessor.map(normalizeKey).filter(Boolean)
+    return values.length ? new Set(values) : null
+  }, [selectedAssessor])
 
-    () => (selectedBroker.length ? structuredEnriched.filter((entry) => selectedBroker.includes(String(entry.broker || '').trim())) : structuredEnriched),
+  const structuredFiltered = useMemo(() => {
+    return structuredEnriched.filter((entry) => {
+      if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
+      if (normalizedAssessorFilter?.size) {
+        const assessorKey = normalizeKey(entry?.assessor)
+        if (!normalizedAssessorFilter.has(assessorKey)) return false
+      }
+      return true
+    })
+  }, [structuredEnriched, selectedBroker, normalizedAssessorFilter])
 
-    [structuredEnriched, selectedBroker],
+  const bovespaFiltered = useMemo(() => {
+    return bovespaEnriched.filter((entry) => {
+      if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
+      if (normalizedAssessorFilter?.size) {
+        const assessorKey = normalizeKey(entry?.assessor)
+        if (!normalizedAssessorFilter.has(assessorKey)) return false
+      }
+      return true
+    })
+  }, [bovespaEnriched, selectedBroker, normalizedAssessorFilter])
 
-  )
-
-  const bovespaFiltered = useMemo(
-
-    () => (selectedBroker.length ? bovespaEnriched.filter((entry) => selectedBroker.includes(String(entry.broker || '').trim())) : bovespaEnriched),
-
-    [bovespaEnriched, selectedBroker],
-
-  )
-
-  const bmfFiltered = useMemo(
-
-    () => (selectedBroker.length ? bmfEnriched.filter((entry) => selectedBroker.includes(String(entry.broker || '').trim())) : bmfEnriched),
-
-    [bmfEnriched, selectedBroker],
-
-  )
+  const bmfFiltered = useMemo(() => {
+    return bmfEnriched.filter((entry) => {
+      if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
+      if (normalizedAssessorFilter?.size) {
+        const assessorKey = normalizeKey(entry?.assessor)
+        if (!normalizedAssessorFilter.has(assessorKey)) return false
+      }
+      return true
+    })
+  }, [bmfEnriched, selectedBroker, normalizedAssessorFilter])
 
   const includeStructured = originFilter === 'all' || originFilter === 'estruturadas'
 
@@ -497,11 +459,9 @@ const Dashboard = () => {
 
   }, [originFilter, totalSeries, bovespaSeries, bmfSeries, estrutSeries])
 
-  const chartScale = buildChartScale([...barSeries, ...estrutSeries], 5)
+  const chartScale = buildChartScale(barSeries, 5)
 
   const barScaled = normalizeSeries(barSeries, chartScale)
-
-  const estrutScaled = normalizeSeries(estrutSeries, chartScale)
 
   const chartTicks = barSeries.length
 
@@ -510,10 +470,6 @@ const Dashboard = () => {
     : []
 
   const hasChartData = barSeries.length > 0
-
-  const estruturaLineTone = originFilter === 'estruturadas'
-    ? 'rgba(255,180,84,0.45)'
-    : 'rgba(255,180,84,0.85)'
 
   const brokerRevenueRank = useMemo(
 
@@ -854,8 +810,6 @@ const Dashboard = () => {
 
               <>
 
-                <Sparkline data={estrutScaled} tone={estruturaLineTone} />
-
                 <div className="chart-grid" style={chartGridStyle}>
 
                   {barSeries.map((value, index) => {
@@ -918,15 +872,15 @@ const Dashboard = () => {
 
                     <div className="chart-tooltip-title">{tooltipLabel || 'Periodo indisponivel'}</div>
 
-                    <div className="chart-tooltip-row total">
+                    <div className="chart-tooltip-row chart-tooltip-row--total">
 
-                      <span>Receita</span>
+                      <span>Total</span>
 
                       <strong>{formatCurrency(tooltipTotal)}</strong>
 
                     </div>
 
-                    <div className="chart-tooltip-row">
+                    <div className="chart-tooltip-row chart-tooltip-row--bovespa">
 
                       <span>Bovespa</span>
 
@@ -934,7 +888,7 @@ const Dashboard = () => {
 
                     </div>
 
-                    <div className="chart-tooltip-row">
+                    <div className="chart-tooltip-row chart-tooltip-row--bmf">
 
                       <span>BMF</span>
 
@@ -942,7 +896,7 @@ const Dashboard = () => {
 
                     </div>
 
-                    <div className="chart-tooltip-row">
+                    <div className="chart-tooltip-row chart-tooltip-row--estrutura">
 
                       <span>Estrutura</span>
 

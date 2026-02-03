@@ -91,7 +91,7 @@ const Topbar = ({ title, breadcrumbs, onToggleSidebar, currentPath }) => {
           <span className="avatar">EA</span>
           <div>
             <div className="user-name">Endrio Admin</div>
-            <div className="user-role">Mesa Principal</div>
+            <div className="user-role">Acesso administrativo</div>
           </div>
         </div>
       </div>

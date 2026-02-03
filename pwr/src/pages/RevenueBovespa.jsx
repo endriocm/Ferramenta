@@ -3,7 +3,8 @@ import PageHeader from '../components/PageHeader'
 import SyncPanel from '../components/SyncPanel'
 import DataTable from '../components/DataTable'
 import Icon from '../components/Icons'
-import { formatCurrency, formatDate, formatNumber } from '../utils/format'
+import Modal from '../components/Modal'
+import { formatCurrency, formatNumber } from '../utils/format'
 import { normalizeDateKey } from '../utils/dateKey'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { enrichRow } from '../services/tags'
@@ -31,6 +32,20 @@ const buildMultiOptions = (values) => {
   return unique.map((value) => ({ value, label: value }))
 }
 
+const normalizeFileName = (name) => String(name || '')
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+
+const filterSpreadsheetCandidates = (files) => {
+  return (Array.isArray(files) ? files : [])
+    .filter((file) => file && file.name)
+    .filter((file) => {
+      const lower = file.name.toLowerCase()
+      return (lower.endsWith('.xlsx') || lower.endsWith('.xls')) && !file.name.startsWith('~$')
+    })
+}
+
 const RevenueBovespa = () => {
   const { notify } = useToast()
   const { selectedBroker, tagsIndex, apuracaoMonths } = useGlobalFilters()
@@ -40,6 +55,9 @@ const RevenueBovespa = () => {
   const [granularity, setGranularity] = useState('monthly')
   const [syncing, setSyncing] = useState(false)
   const [syncResult, setSyncResult] = useState(null)
+  const [selectedFile, setSelectedFile] = useState(null)
+  const [fileCandidates, setFileCandidates] = useState([])
+  const [isPickerOpen, setIsPickerOpen] = useState(false)
   const [lastSyncAt, setLastSyncAt] = useState(() => {
     try {
       return localStorage.getItem('pwr.receita.bovespa.lastSyncAt') || ''
@@ -144,8 +162,43 @@ const RevenueBovespa = () => {
     [],
   )
 
+  const handleFolderSelection = useCallback((files) => {
+    const candidates = filterSpreadsheetCandidates(files)
+    if (!candidates.length) {
+      setSelectedFile(null)
+      notify('Nenhuma planilha .xlsx encontrada na pasta.', 'warning')
+      return null
+    }
+    const hintMatches = candidates.filter((file) => normalizeFileName(file.name).includes('bovespa'))
+    if (hintMatches.length === 1) {
+      setSelectedFile(hintMatches[0])
+      return hintMatches[0]
+    }
+    if (candidates.length === 1) {
+      setSelectedFile(candidates[0])
+      return candidates[0]
+    }
+    const options = hintMatches.length ? hintMatches : candidates
+    setSelectedFile(null)
+    setFileCandidates(options)
+    setIsPickerOpen(true)
+    return null
+  }, [notify])
+
+  const handlePickCandidate = useCallback((file) => {
+    if (!file) return
+    setSelectedFile(file)
+    setFileCandidates([])
+    setIsPickerOpen(false)
+  }, [])
+
+  const handleClosePicker = useCallback(() => {
+    setIsPickerOpen(false)
+  }, [])
+
   const handleSync = useCallback(async (file) => {
     if (syncing) return
+    const targetFile = file || selectedFile
     const attemptId = `${Date.now()}-${Math.random()}`
     toastLockRef.current = attemptId
     const notifyOnce = (message, tone) => {
@@ -153,11 +206,11 @@ const RevenueBovespa = () => {
       toastLockRef.current = null
       notify(message, tone)
     }
-    if (!file) {
-      notifyOnce('Selecione o arquivo Export.', 'warning')
+    if (!targetFile) {
+      notifyOnce('Selecione a pasta com o arquivo Export.', 'warning')
       return
     }
-    const name = file.name.toLowerCase()
+    const name = targetFile.name.toLowerCase()
     if (!name.endsWith('.xlsx') && !name.endsWith('.xls')) {
       notifyOnce('Formato invalido. Use .xlsx.', 'warning')
       return
@@ -166,7 +219,7 @@ const RevenueBovespa = () => {
     setSyncResult(null)
     try {
       const formData = new FormData()
-      formData.append('file', file)
+      formData.append('file', targetFile)
       const response = await fetch(`/api/receitas/bovespa/import?tipo=${encodeURIComponent(tipoMode)}`, {
         method: 'POST',
         body: formData,
@@ -211,7 +264,7 @@ const RevenueBovespa = () => {
     } finally {
       setSyncing(false)
     }
-  }, [notify, syncing, tipoMode])
+  }, [notify, selectedFile, syncing, tipoMode])
 
   return (
     <div className="page">
@@ -228,11 +281,39 @@ const RevenueBovespa = () => {
 
       <SyncPanel
         label="Importacao Bovespa"
-        helper="Valide arquivos estruturados e consolide o resultado."
+        helper="Selecione a pasta com o arquivo Export para consolidar."
         onSync={handleSync}
         running={syncing}
         result={syncResult}
+        directory
+        selectedFile={selectedFile}
+        onSelectedFileChange={setSelectedFile}
+        onFileSelected={handleFolderSelection}
       />
+
+      <Modal
+        open={isPickerOpen}
+        onClose={handleClosePicker}
+        title="Escolher arquivo"
+        subtitle="Encontramos mais de um arquivo valido na pasta."
+      >
+        <div className="file-picker-list">
+          {fileCandidates.map((file) => (
+            <button
+              key={`${file.name}-${file.lastModified}`}
+              className="file-picker-item"
+              type="button"
+              onClick={() => handlePickCandidate(file)}
+            >
+              <div>
+                <strong>{file.name}</strong>
+                {file.webkitRelativePath ? <div className="muted">{file.webkitRelativePath}</div> : null}
+              </div>
+              <span className="muted">{new Date(file.lastModified || Date.now()).toLocaleDateString('pt-BR')}</span>
+            </button>
+          ))}
+        </div>
+      </Modal>
 
       <section className="panel">
         <div className="panel-head">
@@ -288,7 +369,7 @@ const RevenueBovespa = () => {
           <div className="chart-footer">
             {seriesKeys.map(([key]) => {
               if (granularity === 'daily') {
-                const [year, month, day] = key.split('-')
+                const [, month, day] = key.split('-')
                 return <span key={key} className="muted">{day}/{month}</span>
               }
               const [year, month] = key.split('-')

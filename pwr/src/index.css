@@ -17,6 +17,7 @@
   --cyan: #28f2e6;
   --violet: #a66bff;
   --amber: #ffb454;
+  --blue: #4da3ff;
   --green: #34f5a4;
   --red: #ff4d6d;
 
@@ -929,9 +930,22 @@ button {
   font-family: var(--font-mono);
 }
 
-.chart-tooltip-row.total {
+.chart-tooltip-row--total {
+  color: var(--violet);
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.chart-tooltip-row--bovespa {
+  color: var(--green);
+}
+
+.chart-tooltip-row--bmf {
+  color: var(--blue);
+}
+
+.chart-tooltip-row--estrutura {
+  color: var(--amber);
 }
 
 .sparkline {
@@ -1506,6 +1520,34 @@ button {
 
 .modal-content {
   margin-top: 16px;
+}
+
+.file-picker-list {
+  display: grid;
+  gap: 8px;
+}
+
+.file-picker-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--stroke);
+  background: rgba(255, 255, 255, 0.03);
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-picker-item:hover {
+  border-color: rgba(40, 242, 230, 0.4);
+  box-shadow: var(--glow-cyan);
+}
+
+.file-picker-item > div {
+  min-width: 0;
 }
 
 .tabs {

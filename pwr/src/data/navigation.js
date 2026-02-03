@@ -31,9 +31,7 @@ export const routeTitles = navigation
   }, {})
 
 export const quickActions = {
-  '/': [
-    { label: 'Atualizar painel', icon: 'spark' },
-  ],
+  '/': [],
   '/receita/estruturadas': [
     { label: 'Sincronizar', icon: 'sync' },
     { label: 'Exportar', icon: 'download' },
