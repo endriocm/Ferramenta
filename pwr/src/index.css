@@ -285,6 +285,23 @@ button {
   font-size: 0.75rem;
 }
 
+.desktop-field {
+  display: grid;
+  gap: 6px;
+}
+
+.desktop-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.desktop-input {
+  font-size: 0.78rem;
+  padding: 8px 10px;
+}
+
 .topbar {
   display: flex;
   align-items: center;

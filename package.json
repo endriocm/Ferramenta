@@ -5,6 +5,9 @@
   "main": "electron/main.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "clean": "node scripts/clean.js",
+    "clean:all": "node scripts/clean.js --all",
+    "verify:clean": "node scripts/verify-clean.js",
     "dev": "serve .",
     "dev:api": "node server/index.js",
     "dev:ui": "cd pwr && npm run dev",
@@ -42,7 +45,11 @@
     "files": [
       "electron/**",
       "pwr/dist/**",
-      "package.json"
+      "package.json",
+      "!**/.env*",
+      "!**/*.log",
+      "!**/__archive__/**",
+      "!**/legacy/**"
     ],
     "asar": true,
     "win": {

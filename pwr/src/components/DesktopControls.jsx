@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { getAppConfig, isDesktop, selectWorkDir } from '../services/nativeStorage'
+import { getAppConfig, isDesktop, selectWorkDir, setAppConfig } from '../services/nativeStorage'
 
 const defaultConfig = { workDir: '', updateBaseUrl: '', license: { enabled: false }, auth: { enabled: false } }
 
 const DesktopControls = () => {
   const [config, setConfig] = useState(defaultConfig)
   const [updateState, setUpdateState] = useState({ status: 'idle', message: '', progress: 0 })
+  const [updateUrl, setUpdateUrl] = useState('')
+  const [urlMessage, setUrlMessage] = useState('')
 
   useEffect(() => {
     if (!isDesktop()) return undefined
@@ -14,7 +16,10 @@ const DesktopControls = () => {
     const load = async () => {
       try {
         const nextConfig = await getAppConfig()
-        if (active && nextConfig) setConfig(nextConfig)
+        if (active && nextConfig) {
+          setConfig(nextConfig)
+          setUpdateUrl(nextConfig.updateBaseUrl || '')
+        }
       } catch {
         // noop
       }
@@ -95,6 +100,23 @@ const DesktopControls = () => {
     }
   }
 
+  const handleSaveUpdateUrl = async () => {
+    const raw = String(updateUrl || '').trim()
+    const normalized = raw && !raw.endsWith('/') ? `${raw}/` : raw
+    try {
+      const next = await setAppConfig({ updateBaseUrl: normalized })
+      if (next) {
+        setConfig(next)
+        setUpdateUrl(next.updateBaseUrl || normalized)
+        setUrlMessage('URL salva.')
+        return
+      }
+      setUrlMessage('Falha ao salvar URL.')
+    } catch {
+      setUrlMessage('Falha ao salvar URL.')
+    }
+  }
+
   if (!isDesktop()) return null
 
   return (
@@ -128,6 +150,21 @@ const DesktopControls = () => {
           {isBusy && !canDownload && !canInstall ? (
             <span className="muted">Processando...</span>
           ) : null}
+        </div>
+        <div className="desktop-field">
+          <div className="desktop-label">URL de atualizacao</div>
+          <input
+            className="input desktop-input"
+            value={updateUrl}
+            onChange={(event) => setUpdateUrl(event.target.value)}
+            placeholder="https://.../updates/win/"
+          />
+        </div>
+        <div className="desktop-actions">
+          <button className="btn btn-secondary btn-compact" type="button" onClick={handleSaveUpdateUrl} disabled={isBusy}>
+            Salvar URL
+          </button>
+          {urlMessage ? <span className="muted">{urlMessage}</span> : null}
         </div>
       </div>
       <div className="desktop-section">
