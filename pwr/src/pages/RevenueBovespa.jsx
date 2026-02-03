@@ -14,6 +14,7 @@ import { useToast } from '../hooks/useToast'
 import MultiSelect from '../components/MultiSelect'
 import { filterByApuracaoMonths } from '../services/apuracao'
 import { exportXlsx } from '../services/exportXlsx'
+import { parseBovespaReceitasFile } from '../services/revenueImport'
 
 const aggregateByKey = (entries, keyFn) => {
   const map = new Map()
@@ -248,33 +249,21 @@ const handleFolderSelection = useCallback((files) => {
     setSyncing(true)
     setSyncResult(null)
     try {
-      const formData = new FormData()
-      formData.append('file', targetFile)
-      const response = await fetch(`/api/receitas/bovespa/import?tipo=${encodeURIComponent(tipoMode)}`, {
-        method: 'POST',
-        body: formData,
-      })
-      const contentType = response.headers.get('content-type') || ''
-      const isJson = contentType.includes('application/json')
-      const payload = isJson ? await response.json().catch(() => ({})) : null
-      if (!response.ok || payload?.ok === false) {
-        const missing = payload?.error?.details?.missing?.length
-          ? ` Colunas faltando: ${payload.error.details.missing.join(', ')}`
+      const result = await parseBovespaReceitasFile(targetFile, { mercado: 'bov', fatorReceita: 0.9335 * 0.8285 })
+      if (!result.ok) {
+        const missing = result.error?.details?.missing?.length
+          ? ` Colunas faltando: ${result.error.details.missing.join(', ')}`
           : ''
-        const message = response.status === 404
-          ? 'Endpoint de importacao nao existe no ambiente atual.'
-          : payload?.error?.message
-            ? `${payload.error.message}${missing}`
-            : isJson
-              ? `Falha ao importar (status ${response.status}).`
-              : `Resposta nao JSON (status ${response.status}).`
+        const message = result.error?.message
+          ? `${result.error.message}${missing}`
+          : 'Falha ao importar a planilha.'
         notifyOnce(message, 'warning')
         return
       }
-      const nextEntries = Array.isArray(payload.entries) ? payload.entries : []
+      const nextEntries = Array.isArray(result.entries) ? result.entries : []
       setEntries(nextEntries)
       saveRevenueList('bovespa', nextEntries)
-      const stats = payload.summary || payload.stats || {}
+      const stats = result.summary || {}
       setSyncResult({
         importados: stats.rowsValid ?? nextEntries.length,
         duplicados: 0,
@@ -294,7 +283,7 @@ const handleFolderSelection = useCallback((files) => {
     } finally {
       setSyncing(false)
     }
-  }, [notify, selectedFile, syncing, tipoMode])
+  }, [notify, selectedFile, syncing])
 
   return (
     <div className="page">

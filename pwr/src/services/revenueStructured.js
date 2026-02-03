@@ -1,3 +1,5 @@
+import { persistLocalStorage } from './nativeStorage'
+
 const STORAGE_KEY = 'pwr.receita.estruturadas'
 
 export const loadStructuredRevenue = () => {
@@ -18,6 +20,7 @@ export const saveStructuredRevenue = (entries) => {
   } catch {
     // noop
   }
+  void persistLocalStorage(STORAGE_KEY, entries || [])
 }
 
 export const buildMonthLabel = (key) => {

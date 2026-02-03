@@ -1,4 +1,4 @@
-﻿const XLSX_URL = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'
+﻿import { loadXlsx } from './xlsxLoader'
 
 const normalizeKey = (value) => String(value || '')
   .toLowerCase()
@@ -326,7 +326,7 @@ const parseBuffer = (buffer, XLSX) => {
 }
 
 export const parseWorkbookBuffer = async (buffer) => {
-  const XLSX = await import(/* @vite-ignore */ XLSX_URL)
+  const XLSX = await loadXlsx()
   return parseBuffer(buffer, XLSX)
 }
 

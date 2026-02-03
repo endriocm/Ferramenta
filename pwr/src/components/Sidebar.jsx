@@ -1,4 +1,5 @@
 ﻿import Icon from './Icons'
+import DesktopControls from './DesktopControls'
 import { navigation } from '../data/navigation'
 
 const Sidebar = ({ currentPath, onNavigate, isOpen, onClose }) => {
@@ -46,6 +47,7 @@ const Sidebar = ({ currentPath, onNavigate, isOpen, onClose }) => {
           <span className="dot pulse" />
           Operacao sincronizada
         </div>
+        <DesktopControls />
       </div>
       {isOpen ? <button className="sidebar-overlay" onClick={onClose} aria-label="Fechar menu" /> : null}
     </aside>

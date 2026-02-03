@@ -11,6 +11,7 @@ import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { enrichRow } from '../services/tags'
 import { buildMonthLabel, getMonthKey, loadStructuredRevenue, saveStructuredRevenue } from '../services/revenueStructured'
 import { exportXlsx } from '../services/exportXlsx'
+import { parseStructuredReceitasFile } from '../services/revenueImport'
 import MultiSelect from '../components/MultiSelect'
 import TreeSelect from '../components/TreeSelect'
 import { getCurrentUserKey } from '../services/currentUser'
@@ -340,39 +341,22 @@ const handleFolderSelection = useCallback((files) => {
       if (debugEnabled) {
         console.info('[receita-estruturadas] sync:start', { name: targetFile.name, size: targetFile.size })
       }
-      const formData = new FormData()
-      formData.append('file', targetFile)
-      const response = await fetch('/api/receitas/estruturadas/import', {
-        method: 'POST',
-        body: formData,
-      })
-      const contentType = response.headers.get('content-type') || ''
-      const isJson = contentType.includes('application/json')
-      const payload = isJson ? await response.json().catch(() => ({})) : null
-      const responseText = !isJson ? await response.text().catch(() => '') : ''
-      if (!response.ok || payload?.ok === false) {
-        const missing = payload?.error?.details?.missing?.length
-          ? ` Colunas faltando: ${payload.error.details.missing.join(', ')}`
-          : payload?.missingColumns?.length
-            ? ` Colunas faltando: ${payload.missingColumns.join(', ')}`
-            : ''
-        const message = response.status === 404
-          ? 'Endpoint de importacao nao existe no ambiente atual.'
-          : payload?.error?.message
-            ? `${payload.error.message}${missing}`
-            : payload?.error
-              ? `${payload.error}${missing}`
-              : isJson
-                ? `Falha ao importar (status ${response.status}).`
-                : `Resposta nao JSON (status ${response.status}).`
+      const result = await parseStructuredReceitasFile(targetFile)
+      if (!result.ok) {
+        const missing = result.error?.details?.missing?.length
+          ? ` Colunas faltando: ${result.error.details.missing.join(', ')}`
+          : ''
+        const message = result.error?.message
+          ? `${result.error.message}${missing}`
+          : 'Falha ao importar a planilha.'
         notifyOnce(message, 'warning')
-        if (debugEnabled) console.error('[receita-estruturadas] sync:error', { status: response.status, payload, responseText })
+        if (debugEnabled) console.error('[receita-estruturadas] sync:error', { payload: result })
         return
       }
-      const nextEntries = Array.isArray(payload.entries) ? payload.entries : []
+      const nextEntries = Array.isArray(result.entries) ? result.entries : []
       setEntries(nextEntries)
       saveStructuredRevenue(nextEntries)
-      const stats = payload.summary || payload.stats || {}
+      const stats = result.summary || {}
       const monthFromStats = stats.months?.[stats.months.length - 1] || ''
       if (monthFromStats) {
         const nextDays = nextEntries

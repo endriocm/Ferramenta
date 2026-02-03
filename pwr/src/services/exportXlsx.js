@@ -1,4 +1,4 @@
-const XLSX_URL = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'
+import { loadXlsx } from './xlsxLoader'
 
 const isUnsafeFormula = (value) => /^[=+\-@]/.test(value)
 
@@ -18,7 +18,7 @@ export const exportXlsx = async ({
   columns = [],
   rows = [],
 }) => {
-  const XLSX = await import(/* @vite-ignore */ XLSX_URL)
+  const XLSX = await loadXlsx()
   const data = normalizeRows([columns, ...rows])
   const worksheet = XLSX.utils.aoa_to_sheet(data)
   const workbook = XLSX.utils.book_new()

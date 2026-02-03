@@ -1,3 +1,5 @@
+import { persistLocalStorage } from './nativeStorage'
+
 const STORAGE_KEYS = {
   bovespa: 'pwr.receita.bovespa',
   bmf: 'pwr.receita.bmf',
@@ -37,6 +39,7 @@ export const saveRevenueList = (type, entries) => {
   } catch {
     // noop
   }
+  void persistLocalStorage(key, entries || [])
 }
 
 export const loadManualRevenue = () => loadRevenueList('manual')

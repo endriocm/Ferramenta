@@ -1,20 +1,43 @@
-﻿const CACHE_TTL = 5 * 60 * 1000
+import { fetchWithRetry } from './network'
+import { persistLocalStorage, hydrateLocalStorage } from './nativeStorage'
+
+const CACHE_TTL = 5 * 60 * 1000
 const marketCache = new Map()
+let persistentLoaded = false
+let persistentCache = {}
 
 const cacheKey = (symbol, start, end) => `${symbol}:${start}:${end}`
 
-const getCached = (key) => {
+const getCached = async (key, { allowStale = false } = {}) => {
   const item = marketCache.get(key)
-  if (!item) return null
-  if (Date.now() - item.timestamp > CACHE_TTL) {
-    marketCache.delete(key)
-    return null
+  if (item) {
+    if (Date.now() - item.timestamp > CACHE_TTL) {
+      marketCache.delete(key)
+    } else {
+      return { ...item.data, cached: true }
+    }
   }
-  return item.data
+
+  if (!persistentLoaded) {
+    try {
+      const data = await hydrateLocalStorage(['pwr.market.cache'])
+      if (data['pwr.market.cache']) persistentCache = data['pwr.market.cache']
+    } catch {
+      // noop
+    }
+    persistentLoaded = true
+  }
+
+  const persisted = persistentCache[key]
+  if (!persisted) return null
+  if (!allowStale && Date.now() - persisted.timestamp > CACHE_TTL) return null
+  return { ...persisted.data, cached: true, stale: allowStale }
 }
 
 const setCached = (key, data) => {
   marketCache.set(key, { data, timestamp: Date.now() })
+  persistentCache[key] = { data, timestamp: Date.now() }
+  void persistLocalStorage('pwr.market.cache', persistentCache)
   return data
 }
 
@@ -53,7 +76,7 @@ const fetchYahooViaApi = async ({ symbol, startDate, endDate, start, end }) => {
   if (start != null) params.set('start', String(start))
   if (end != null) params.set('end', String(end))
 
-  const response = await fetch(`/api/quotes?${params.toString()}`)
+  const response = await fetchWithRetry(`/api/quotes?${params.toString()}`, {}, { retries: 2, backoffMs: 500, timeoutMs: 8000 })
   if (!response.ok) {
     throw await parseApiError(response)
   }
@@ -65,15 +88,21 @@ export const fetchYahooMarketData = async ({ symbol, startDate, endDate }) => {
   const start = Math.floor(new Date(startDate).getTime() / 1000)
   const end = Math.floor(new Date(endDate).getTime() / 1000) + 86400
   const key = cacheKey(normalized, start, end)
-  const cached = getCached(key)
+  const cached = await getCached(key)
   if (cached) return { ...cached, cached: true }
 
-  const data = await fetchYahooViaApi({
-    symbol: normalized,
-    startDate,
-    endDate,
-    start,
-    end,
-  })
-  return setCached(key, { ...data, cached: false })
+  try {
+    const data = await fetchYahooViaApi({
+      symbol: normalized,
+      startDate,
+      endDate,
+      start,
+      end,
+    })
+    return setCached(key, { ...data, cached: false })
+  } catch (error) {
+    const stale = await getCached(key, { allowStale: true })
+    if (stale) return { ...stale, cached: true, offline: true }
+    throw error
+  }
 }

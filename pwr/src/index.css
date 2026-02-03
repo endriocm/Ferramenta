@@ -242,6 +242,49 @@ button {
   animation: pulse 1.6s infinite ease-in-out;
 }
 
+.desktop-controls {
+  margin-top: 12px;
+  display: grid;
+  gap: 12px;
+}
+
+.desktop-section {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--stroke);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.desktop-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+
+.desktop-meta {
+  font-size: 0.74rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.desktop-meta.desktop-path {
+  word-break: break-all;
+}
+
+.desktop-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-compact {
+  padding: 6px 10px;
+  font-size: 0.75rem;
+}
+
 .topbar {
   display: flex;
   align-items: center;

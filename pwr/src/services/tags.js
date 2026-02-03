@@ -1,7 +1,7 @@
 import { debugLog } from './debug'
+import { loadXlsx } from './xlsxLoader'
 
 const TAGS_VERSION = 1
-const XLSX_URL = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'
 const TAGS_DB_NAME = 'pwr-tags'
 const TAGS_STORE = 'tags'
 const TAGS_DB_VERSION = 1
@@ -153,7 +153,7 @@ const deletePayload = async (userKey) => {
 export const parseTagsXlsx = async (input) => {
   const buffer = await toArrayBuffer(input)
   if (!buffer) throw new Error('buffer-invalid')
-  const XLSX = await import(/* @vite-ignore */ XLSX_URL)
+  const XLSX = await loadXlsx()
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
   const sheetName = workbook.SheetNames?.find((name) => normalizeKey(name) === 'planilha1') || workbook.SheetNames?.[0]
   if (!sheetName) throw new Error('sheet-missing')
