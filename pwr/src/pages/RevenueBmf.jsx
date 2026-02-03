@@ -13,6 +13,7 @@ import { loadRevenueList, saveRevenueList } from '../services/revenueStore'
 import { buildMonthLabel, getMonthKey } from '../services/revenueStructured'
 import { useToast } from '../hooks/useToast'
 import { filterByApuracaoMonths } from '../services/apuracao'
+import { exportXlsx } from '../services/exportXlsx'
 
 const aggregateByKey = (entries, keyFn) => {
   const map = new Map()
@@ -162,7 +163,36 @@ const RevenueBmf = () => {
     [],
   )
 
-  const handleFolderSelection = useCallback((files) => {
+  
+  const resolveCellValue = (row, column) => {
+    if (typeof column?.exportValue === 'function') return column.exportValue(row)
+    if (typeof column?.render === 'function') {
+      const rendered = column.render(row)
+      if (typeof rendered === 'string' || typeof rendered === 'number') return rendered
+    }
+    const raw = row?.[column?.key]
+    return raw == null ? '' : raw
+  }
+
+  const handleExportTable = useCallback(async () => {
+    if (!pagedRows.length) {
+      notify('Nenhuma linha para exportar.', 'warning')
+      return
+    }
+    const headers = columns.map((column) => column.label || column.key || '')
+    const rowsToExport = pagedRows.map((row) => columns.map((column) => resolveCellValue(row, column)))
+    const periodLabel = resolvedPeriodKey ? resolvedPeriodKey : 'periodo'
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+    const safePeriod = String(periodLabel).replace(/[^0-9a-zA-Z_-]/g, '')
+    await exportXlsx({
+      fileName: `receita_bmf_${safePeriod}_${timestamp}.xlsx`,
+      sheetName: 'BMF',
+      columns: headers,
+      rows: rowsToExport,
+    })
+  }, [columns, notify, pagedRows, resolvedPeriodKey])
+
+const handleFolderSelection = useCallback((files) => {
     const candidates = filterSpreadsheetCandidates(files)
     if (!candidates.length) {
       setSelectedFile(null)
@@ -276,7 +306,7 @@ const RevenueBmf = () => {
           { label: 'Ultima sync', value: lastSyncAt || '?' },
           { label: 'Total do mes', value: formatCurrency(totalReceita) },
         ]}
-        actions={[{ label: 'Importar', icon: 'upload' }, { label: 'Exportar', icon: 'download', variant: 'btn-secondary' }]}
+        actions={[{ label: 'Exportar', icon: 'download', variant: 'btn-secondary', onClick: handleExportTable }]}
       />
 
       <SyncPanel

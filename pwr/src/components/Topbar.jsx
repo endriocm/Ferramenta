@@ -75,18 +75,16 @@ const Topbar = ({ title, breadcrumbs, onToggleSidebar, currentPath }) => {
           className="topbar-filter"
           menuClassName="topbar-filter-menu"
         />
-        <div className="search-pill">
-          <Icon name="search" size={16} />
-          <input type="search" placeholder="Buscar no painel" aria-label="Buscar" />
-        </div>
-        <div className="action-group">
-          {actions.map((action) => (
-            <button key={action.label} className="btn btn-secondary" type="button">
-              <Icon name={action.icon} size={16} />
-              {action.label}
-            </button>
-          ))}
-        </div>
+        {actions.length ? (
+          <div className="action-group">
+            {actions.map((action) => (
+              <button key={action.label} className="btn btn-secondary" type="button">
+                <Icon name={action.icon} size={16} />
+                {action.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="user-chip" role="button" tabIndex={0}>
           <span className="avatar">EA</span>
           <div>

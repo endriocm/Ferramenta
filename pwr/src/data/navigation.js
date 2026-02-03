@@ -32,19 +32,6 @@ export const routeTitles = navigation
 
 export const quickActions = {
   '/': [],
-  '/receita/estruturadas': [
-    { label: 'Sincronizar', icon: 'sync' },
-    { label: 'Exportar', icon: 'download' },
-  ],
-  '/receita/bovespa': [
-    { label: 'Importar arquivo', icon: 'upload' },
-  ],
-  '/receita/bmf': [
-    { label: 'Importar arquivo', icon: 'upload' },
-  ],
-  '/receita/manual': [
-    { label: 'Novo lancamento', icon: 'plus' },
-  ],
   '/vencimento': [
     { label: 'Gerar relatorio', icon: 'doc' },
   ],

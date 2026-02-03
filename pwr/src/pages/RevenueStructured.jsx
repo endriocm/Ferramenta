@@ -10,6 +10,7 @@ import { useToast } from '../hooks/useToast'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { enrichRow } from '../services/tags'
 import { buildMonthLabel, getMonthKey, loadStructuredRevenue, saveStructuredRevenue } from '../services/revenueStructured'
+import { exportXlsx } from '../services/exportXlsx'
 import MultiSelect from '../components/MultiSelect'
 import TreeSelect from '../components/TreeSelect'
 import { getCurrentUserKey } from '../services/currentUser'
@@ -251,7 +252,36 @@ const RevenueStructured = () => {
     [],
   )
 
-  const handleFolderSelection = useCallback((files) => {
+  
+  const resolveCellValue = (row, column) => {
+    if (typeof column?.exportValue === 'function') return column.exportValue(row)
+    if (typeof column?.render === 'function') {
+      const rendered = column.render(row)
+      if (typeof rendered === 'string' || typeof rendered === 'number') return rendered
+    }
+    const raw = row?.[column?.key]
+    return raw == null ? '' : raw
+  }
+
+  const handleExportTable = useCallback(async () => {
+    if (!pagedRows.length) {
+      notify('Nenhuma linha para exportar.', 'warning')
+      return
+    }
+    const headers = columns.map((column) => column.label || column.key || '')
+    const rowsToExport = pagedRows.map((row) => columns.map((column) => resolveCellValue(row, column)))
+    const periodLabel = resolvedPeriodKey && resolvedPeriodKey !== 'multi' ? resolvedPeriodKey : 'periodo'
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+    const safePeriod = String(periodLabel).replace(/[^0-9a-zA-Z_-]/g, '')
+    await exportXlsx({
+      fileName: `receita_estruturadas_${safePeriod}_${timestamp}.xlsx`,
+      sheetName: 'Estruturadas',
+      columns: headers,
+      rows: rowsToExport,
+    })
+  }, [columns, notify, pagedRows, resolvedPeriodKey])
+
+const handleFolderSelection = useCallback((files) => {
     const candidates = filterSpreadsheetCandidates(files)
     if (!candidates.length) {
       setSelectedFile(null)
@@ -397,7 +427,7 @@ const RevenueStructured = () => {
           { label: 'Total do mes', value: formatCurrency(totalMes) },
           { label: 'Ultima sync', value: lastSyncAt || '?' },
         ]}
-        actions={[{ label: 'Exportar resumo', icon: 'download', variant: 'btn-secondary' }]}
+        actions={[{ label: 'Exportar resumo', icon: 'download', variant: 'btn-secondary', onClick: handleExportTable }]}
       />
 
       <SyncPanel
