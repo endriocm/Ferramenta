@@ -246,7 +246,7 @@ export default function AccessGate({ onAccessGranted, children }) {
               onClick={handlePayAnnual}
               disabled={payLoading}
             >
-              {payLoading ? "Abrindo checkout..." : "Pagar anual (1x ou 12x)"}
+              {payLoading ? "Abrindo checkout..." : "Pagar anual (12x de R$ 1.000,00)"}
             </button>
           </div>
 

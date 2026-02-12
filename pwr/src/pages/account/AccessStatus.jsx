@@ -92,7 +92,9 @@ const AccessStatus = () => {
     }
   };
 
-  const actionLabel = isValid ? "Renovar / Estender por +12 meses" : "Comprar acesso anual (1x ou 12x)";
+  const actionLabel = isValid
+    ? "Renovar / Estender por +12 meses (R$ 12.000,00)"
+    : "Comprar acesso anual (12x de R$ 1.000,00)";
 
   return (
     <div className="page">

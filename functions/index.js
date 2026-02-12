@@ -10,6 +10,7 @@ const MP_WEBHOOK_SECRET_TEST = defineSecret("MP_WEBHOOK_SECRET_TEST");
 const MP_WEBHOOK_SECRET_PROD = defineSecret("MP_WEBHOOK_SECRET_PROD");
 const ANNUAL_PRICE_BRL = defineString("ANNUAL_PRICE_BRL");
 const APP_BASE_URL = defineString("APP_BASE_URL");
+const MIN_ANNUAL_PRICE_BRL = 12000;
 
 admin.initializeApp();
 setGlobalOptions({ region: "us-central1" });
@@ -28,19 +29,40 @@ const validateEnv = () => {
     throw new HttpsError("failed-precondition", "APP_BASE_URL deve come?ar com http:// ou https://");
   }
 
-  const price = Number(priceRaw);
-  if (!Number.isFinite(price) || price <= 0) {
+  const configuredPrice = Number(priceRaw);
+  if (!Number.isFinite(configuredPrice) || configuredPrice <= 0) {
     throw new HttpsError("failed-precondition", "ANNUAL_PRICE_BRL invalido.");
   }
 
+  const price = configuredPrice < MIN_ANNUAL_PRICE_BRL ? MIN_ANNUAL_PRICE_BRL : configuredPrice;
+  if (price !== configuredPrice) {
+    logger.warn("[checkout] annual price adjusted to minimum", {
+      configuredPrice,
+      adjustedPrice: price,
+      minimum: MIN_ANNUAL_PRICE_BRL,
+    });
+  }
   return { price, appBase };
+};
+
+const formatBrl = (value) =>
+  new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+
+const buildAnnualPlanTitle = (annualPrice) => {
+  const monthlyEquivalent = annualPrice / 12;
+  return `PWR - Acesso anual (${formatBrl(monthlyEquivalent)}/mes | ${formatBrl(annualPrice)}/ano)`;
 };
 
 const mpCreatePreference = async ({ uid, email, price, appBase }) => {
   const payload = {
     items: [
       {
-        title: "PWR - Acesso anual (12 meses)",
+        title: buildAnnualPlanTitle(price),
         quantity: 1,
         unit_price: price,
       },
