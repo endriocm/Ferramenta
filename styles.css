@@ -134,14 +134,49 @@ a {
 }
 
 .site-nav a {
+  position: relative;
+  padding: 4px 2px;
   font-size: 0.9rem;
   color: var(--text-1);
   text-decoration: none;
-  transition: color 0.2s ease;
+  transition: color 0.2s ease, text-shadow 0.2s ease;
+}
+
+.site-nav a::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -7px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(56, 213, 255, 0.05), rgba(56, 213, 255, 0.6), rgba(56, 213, 255, 0.05));
+  opacity: 0;
+  transform: scaleX(0.4);
+  transform-origin: center;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
 .site-nav a:hover {
   color: var(--text-0);
+}
+
+.site-nav a:hover::after {
+  opacity: 0.56;
+  transform: scaleX(1);
+}
+
+.site-nav a.is-active,
+.site-nav a[aria-current="location"] {
+  color: #7be9ff;
+  text-shadow: 0 0 10px rgba(56, 213, 255, 0.7), 0 0 22px rgba(56, 213, 255, 0.35);
+}
+
+.site-nav a.is-active::after,
+.site-nav a[aria-current="location"]::after {
+  opacity: 1;
+  transform: scaleX(1);
+  box-shadow: 0 0 12px rgba(56, 213, 255, 0.6);
 }
 
 .btn {

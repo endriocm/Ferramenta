@@ -54,6 +54,74 @@ const setupReveal = () => {
   nodes.forEach((node) => observer.observe(node))
 }
 
+const setupActiveNav = () => {
+  const navLinks = Array.from(document.querySelectorAll('.site-nav a[href^="#"]'))
+  if (!navLinks.length) return
+
+  const sectionPairs = navLinks
+    .map((link) => {
+      const href = link.getAttribute('href') || ''
+      const id = href.startsWith('#') ? href.slice(1) : ''
+      const section = id ? document.getElementById(id) : null
+      return section ? { id, section, link } : null
+    })
+    .filter(Boolean)
+
+  if (!sectionPairs.length) return
+
+  const setActiveById = (id) => {
+    sectionPairs.forEach(({ id: sectionId, link }) => {
+      const isActive = sectionId === id
+      link.classList.toggle('is-active', isActive)
+      if (isActive) {
+        link.setAttribute('aria-current', 'location')
+      } else {
+        link.removeAttribute('aria-current')
+      }
+    })
+  }
+
+  let ticking = false
+  const updateActiveOnScroll = () => {
+    ticking = false
+    const headerHeight = document.querySelector('.site-header')?.offsetHeight || 72
+    const referenceY = window.scrollY + headerHeight + 30
+
+    let activeId = sectionPairs[0].id
+    for (const { id, section } of sectionPairs) {
+      if (section.offsetTop <= referenceY) {
+        activeId = id
+      } else {
+        break
+      }
+    }
+
+    setActiveById(activeId)
+  }
+
+  const queueUpdate = () => {
+    if (ticking) return
+    ticking = true
+    window.requestAnimationFrame(updateActiveOnScroll)
+  }
+
+  window.addEventListener('scroll', queueUpdate, { passive: true })
+  window.addEventListener('resize', queueUpdate)
+
+  navLinks.forEach((link) => {
+    link.addEventListener('click', () => {
+      const href = link.getAttribute('href') || ''
+      if (!href.startsWith('#')) return
+      const id = href.slice(1)
+      if (!id) return
+      setActiveById(id)
+    })
+  })
+
+  queueUpdate()
+}
+
 setDownloadLinks()
 setupReveal()
+setupActiveNav()
 void setLatestVersionLabel()
