@@ -25,3 +25,13 @@ legacy/
 *.msi
 *.dmg
 *.zip
+
+.vercel
+.env*.local
+
+# Local env files
+.env.local
+pwr/.env.local
+
+# Firebase Functions secrets
+functions/.secret.local

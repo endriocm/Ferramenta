@@ -1,7 +1,8 @@
 import { debugLog } from './debug'
 import { loadXlsx } from './xlsxLoader'
+import { normalizeAssessorName } from '../utils/assessor'
 
-const TAGS_VERSION = 1
+const TAGS_VERSION = 2
 const TAGS_DB_NAME = 'pwr-tags'
 const TAGS_STORE = 'tags'
 const TAGS_DB_VERSION = 1
@@ -24,6 +25,35 @@ const normalizeLabel = (value, fallback) => {
   const raw = normalizeValue(value)
   if (!raw || raw === '0') return fallback
   return raw
+}
+
+const normalizeTeamLabel = (value) => {
+  const raw = normalizeValue(value)
+  if (!raw || raw === '0') return ''
+  return raw.replace(/\s+/g, ' ')
+}
+
+export const normalizeUnitLabel = (value) => {
+  const raw = normalizeValue(value)
+  if (!raw || raw === '0') return ''
+  const compact = normalizeKey(raw)
+  if (!compact) return ''
+  if (compact.includes('porto')) return 'Porto'
+  if (compact.includes('balneario')) return 'Balneario'
+  return raw.replace(/\s+/g, ' ')
+}
+
+export const normalizeSeniorityLabel = (value) => {
+  const raw = normalizeValue(value)
+  if (!raw || raw === '0') return ''
+  const compact = normalizeKey(raw)
+  if (!compact) return ''
+  if (compact.includes('senior')) return 'Senior'
+  if (compact.includes('pleno')) return 'Pleno'
+  if (compact.includes('junior') && compact.includes('acad')) return 'Junior Acad'
+  if (compact === 'jr' || compact.startsWith('jr') || compact.includes('junior')) return 'Junior'
+  if (compact.includes('acad') || compact.includes('estagi')) return 'Acad'
+  return raw.replace(/\s+/g, ' ')
 }
 
 const toArrayBuffer = async (input) => {
@@ -52,6 +82,9 @@ const CLIENTE_KEYS = ['cliente', 'codcliente', 'codigocliente', 'codigo', 'codig
 const ASSESSOR_KEYS = ['assessor', 'consultor', 'assessorresponsavel']
 const BROKER_KEYS = ['broker', 'corretora', 'canaldeorigem', 'canal', 'origem']
 const NOME_CLIENTE_KEYS = ['nomecliente', 'nomedocliente', 'razaosocial', 'clientenome']
+const TIME_KEYS = ['time', 'equipe', 'team']
+const UNIT_KEYS = ['unidade', 'unit', 'filial', 'escritorio', 'base']
+const SENIORITY_KEYS = ['senioridade', 'seniority', 'nivel', 'niveldecarreira']
 
 const isHeaderRow = (cliente, assessor, broker, nomeCliente) => {
   const header = [cliente, assessor, broker, nomeCliente]
@@ -70,6 +103,41 @@ const looksLikeCode = (value) => {
   const raw = normalizeValue(value)
   if (!raw) return false
   return /^\d+$/.test(raw)
+}
+
+const normalizeTagRow = (row, index = 0) => {
+  if (!row || typeof row !== 'object') return null
+  const cliente = normalizeValue(row.cliente)
+  const nomeCliente = normalizeValue(row.nomeCliente)
+  const key = normalizeTagKey(row.id || cliente || nomeCliente || `row-${index}`)
+  if (!key) return null
+  return {
+    id: key,
+    cliente,
+    assessor: normalizeAssessorName(normalizeLabel(row.assessor, 'Sem assessor'), 'Sem assessor'),
+    broker: normalizeLabel(row.broker, 'Sem broker'),
+    nomeCliente,
+    time: normalizeTeamLabel(row.time),
+    unit: normalizeUnitLabel(row.unit || row.unidade),
+    seniority: normalizeSeniorityLabel(row.seniority || row.senioridade),
+  }
+}
+
+const normalizePayload = (payload) => {
+  if (!payload || typeof payload !== 'object') return null
+  const normalizedRows = Array.isArray(payload.rows)
+    ? payload.rows
+      .map((row, index) => normalizeTagRow(row, index))
+      .filter(Boolean)
+    : []
+  return {
+    version: Number(payload.version) || TAGS_VERSION,
+    importedAt: payload.importedAt || Date.now(),
+    rows: normalizedRows,
+    stats: payload.stats || null,
+    source: payload.source || 'unknown',
+    sheetName: payload.sheetName || null,
+  }
 }
 
 const openTagsDb = () => new Promise((resolve, reject) => {
@@ -174,9 +242,17 @@ export const parseTagsXlsx = async (input) => {
     const fallbackRow = rawRows[rowOffset + index] || []
 
     const cliente = normalizeValue(getValue(normalizedRow, CLIENTE_KEYS, fallbackRow[0]))
-    const assessor = normalizeLabel(getValue(normalizedRow, ASSESSOR_KEYS, fallbackRow[1]), 'Sem assessor')
+    const assessor = normalizeAssessorName(
+      normalizeLabel(getValue(normalizedRow, ASSESSOR_KEYS, fallbackRow[1]), 'Sem assessor'),
+      'Sem assessor',
+    )
     const broker = normalizeLabel(getValue(normalizedRow, BROKER_KEYS, fallbackRow[2]), 'Sem broker')
     const nomeCliente = normalizeValue(getValue(normalizedRow, NOME_CLIENTE_KEYS, fallbackRow[3]))
+    const time = normalizeTeamLabel(getValue(normalizedRow, TIME_KEYS, fallbackRow[4]))
+    const unitFallback = fallbackRow.length > 6 ? fallbackRow[5] : null
+    const seniorityFallback = fallbackRow[6] != null && fallbackRow[6] !== '' ? fallbackRow[6] : fallbackRow[5]
+    const unit = normalizeUnitLabel(getValue(normalizedRow, UNIT_KEYS, unitFallback))
+    const seniority = normalizeSeniorityLabel(getValue(normalizedRow, SENIORITY_KEYS, seniorityFallback))
 
     if (isHeaderRow(cliente, assessor, broker, nomeCliente)) return
     if (!cliente && !nomeCliente) {
@@ -202,6 +278,9 @@ export const parseTagsXlsx = async (input) => {
       assessor,
       broker,
       nomeCliente: nomeCliente || '',
+      time,
+      unit,
+      seniority,
     })
   })
 
@@ -221,14 +300,8 @@ export const parseTagsXlsx = async (input) => {
 
 export const saveTags = async (userKey, payload) => {
   if (!userKey || !payload) return null
-  const stored = {
-    version: payload.version || TAGS_VERSION,
-    importedAt: payload.importedAt || Date.now(),
-    rows: payload.rows || [],
-    stats: payload.stats || null,
-    source: payload.source || 'unknown',
-    sheetName: payload.sheetName || null,
-  }
+  const stored = normalizePayload(payload)
+  if (!stored) return null
   const ok = await writePayload(userKey, stored)
   if (!ok) return null
   memoryCache.set(userKey, stored)
@@ -240,8 +313,9 @@ export const loadTags = async (userKey) => {
   if (!userKey) return null
   if (memoryCache.has(userKey)) return memoryCache.get(userKey)
   const payload = await readPayload(userKey)
-  if (payload) memoryCache.set(userKey, payload)
-  return payload
+  const normalized = normalizePayload(payload)
+  if (normalized) memoryCache.set(userKey, normalized)
+  return normalized
 }
 
 export const clearTags = async (userKey) => {
@@ -256,10 +330,16 @@ export const buildTagIndex = (payload) => {
   const byNome = new Map()
   const brokers = new Set()
   const assessors = new Set()
+  const teams = new Set()
+  const units = new Set()
+  const seniorities = new Set()
 
   rows.forEach((row) => {
     if (row?.broker) brokers.add(row.broker)
     if (row?.assessor) assessors.add(row.assessor)
+    if (row?.time) teams.add(row.time)
+    if (row?.unit) units.add(row.unit)
+    if (row?.seniority) seniorities.add(row.seniority)
     const clienteKey = normalizeTagKey(row?.cliente)
     if (clienteKey && !byCliente.has(clienteKey)) byCliente.set(clienteKey, row)
     const nomeKey = normalizeTagKey(row?.nomeCliente)
@@ -272,20 +352,34 @@ export const buildTagIndex = (payload) => {
     byNome,
     brokers: Array.from(brokers).sort((a, b) => a.localeCompare(b, 'pt-BR')),
     assessors: Array.from(assessors).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+    teams: Array.from(teams).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+    units: Array.from(units).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+    seniorities: Array.from(seniorities).sort((a, b) => a.localeCompare(b, 'pt-BR')),
   }
 }
 
 export const enrichRow = (row, tagIndex) => {
-  if (!row || !tagIndex) return row
-  const rawCode = row.codigoCliente || row.clienteCodigo || row.codCliente || row.cliente
-  const codeKey = normalizeTagKey(rawCode)
-  const nameKey = normalizeTagKey(row.nomeCliente || row.cliente)
-  const tag = (codeKey && tagIndex.byCliente?.get(codeKey)) || (nameKey && tagIndex.byNome?.get(nameKey))
-  if (!tag) return row
+  if (!row) return row
 
-  const next = { ...row }
-  if (tag.assessor) next.assessor = tag.assessor
+  const baseAssessor = normalizeAssessorName(row.assessor)
+  const baseRow = baseAssessor && baseAssessor !== String(row.assessor || '').trim()
+    ? { ...row, assessor: baseAssessor }
+    : row
+
+  if (!tagIndex) return baseRow
+
+  const rawCode = baseRow.codigoCliente || baseRow.clienteCodigo || baseRow.codCliente || baseRow.cliente
+  const codeKey = normalizeTagKey(rawCode)
+  const nameKey = normalizeTagKey(baseRow.nomeCliente || baseRow.cliente)
+  const tag = (codeKey && tagIndex.byCliente?.get(codeKey)) || (nameKey && tagIndex.byNome?.get(nameKey))
+  if (!tag) return baseRow
+
+  const next = { ...baseRow }
+  if (tag.assessor) next.assessor = normalizeAssessorName(tag.assessor, 'Sem assessor')
   if (tag.broker) next.broker = tag.broker
+  if (tag.time) next.time = tag.time
+  if (tag.unit) next.unit = tag.unit
+  if (tag.seniority) next.seniority = tag.seniority
   if (tag.nomeCliente) next.nomeCliente = tag.nomeCliente
   if (tag.cliente && !next.codigoCliente) next.codigoCliente = tag.cliente
 

@@ -13,6 +13,7 @@ import { debugLog } from '../services/debug'
 import { loadRevenueList, loadManualRevenue } from '../services/revenueStore'
 import { loadStructuredRevenue } from '../services/revenueStructured'
 import { collectMonthsFromEntries, formatMonthLabel } from '../services/apuracao'
+import { normalizeAssessorName } from '../utils/assessor'
 
 const STORAGE_PREFIX = 'pwr.filters.'
 const BROADCAST_KEY = 'pwr.filters.broadcast'
@@ -34,6 +35,10 @@ const normalizeList = (value) => {
   const normalized = normalizeValue(value)
   return normalized ? [normalized] : []
 }
+
+const normalizeAssessorList = (value) => normalizeList(value)
+  .map((item) => normalizeAssessorName(item))
+  .filter(Boolean)
 
 const normalizeApuracao = (value) => {
   if (!value) return { all: true, months: [] }
@@ -106,7 +111,7 @@ export const GlobalFilterProvider = ({ children }) => {
     if (!payload) return
     applyingRemoteRef.current = true
     setSelectedBroker(normalizeList(payload.broker))
-    setSelectedAssessor(normalizeList(payload.assessor))
+    setSelectedAssessor(normalizeAssessorList(payload.assessor))
     setClientCodeFilter(normalizeList(payload.clientCode))
     setApuracaoMonths(normalizeApuracao(payload.apuracao))
     setTimeout(() => {
@@ -119,7 +124,7 @@ export const GlobalFilterProvider = ({ children }) => {
     const stored = parseStored(localStorage.getItem(buildKey(userKey)))
     if (stored) {
       setSelectedBroker(normalizeList(stored.broker))
-      setSelectedAssessor(normalizeList(stored.assessor))
+      setSelectedAssessor(normalizeAssessorList(stored.assessor))
       setClientCodeFilter(normalizeList(stored.clientCode))
       setApuracaoMonths(normalizeApuracao(stored.apuracao))
     }
@@ -131,7 +136,7 @@ export const GlobalFilterProvider = ({ children }) => {
     const payload = {
       version: STORAGE_VERSION,
       broker: normalizeList(selectedBroker),
-      assessor: normalizeList(selectedAssessor),
+      assessor: normalizeAssessorList(selectedAssessor),
       clientCode: normalizeList(clientCodeFilter),
       apuracao: normalizeApuracao(apuracaoMonths),
       updatedAt: Date.now(),

@@ -5,11 +5,13 @@ import DataTable from '../components/DataTable'
 import Icon from '../components/Icons'
 import Modal from '../components/Modal'
 import { formatCurrency, formatDate, formatNumber } from '../utils/format'
-import { normalizeDateKey } from '../utils/dateKey'
+import { buildDateTree, buildMonthLabel, getMonthKey, normalizeDateKey } from '../lib/periodTree'
+import { reprocessRejected } from '../lib/reprocessRejected'
+import { getTagIndex } from '../lib/tagsStore'
 import { useToast } from '../hooks/useToast'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { enrichRow } from '../services/tags'
-import { buildMonthLabel, getMonthKey, loadStructuredRevenue, saveStructuredRevenue } from '../services/revenueStructured'
+import { loadStructuredRevenue, saveStructuredRevenue } from '../services/revenueStructured'
 import { exportXlsx } from '../services/exportXlsx'
 import { parseStructuredReceitasFile } from '../services/revenueImport'
 import MultiSelect from '../components/MultiSelect'
@@ -39,9 +41,14 @@ const RevenueStructured = () => {
   const [userKey] = useState(() => getCurrentUserKey())
   const [filters, setFilters] = useState({ search: '', cliente: [], assessor: [], ativo: [], estrutura: [], broker: [] })
   const [entries, setEntries] = useState(() => loadStructuredRevenue())
-  const [selectedDays, setSelectedDays] = useState([])
+  const [dateFilterEnabled, setDateFilterEnabled] = useState(false)
+  const [dateFilterSelection, setDateFilterSelection] = useState([])
+  const [dateFilterApplied, setDateFilterApplied] = useState([])
   const [syncing, setSyncing] = useState(false)
   const [syncResult, setSyncResult] = useState(null)
+  const [syncProgress, setSyncProgress] = useState({ processed: 0, total: 0, progress: 0 })
+  const [reprocessRunning, setReprocessRunning] = useState(false)
+  const [reprocessProgress, setReprocessProgress] = useState({ processed: 0, total: 0, progress: 0 })
   const [selectedFile, setSelectedFile] = useState(null)
   const [fileCandidates, setFileCandidates] = useState([])
   const [isPickerOpen, setIsPickerOpen] = useState(false)
@@ -54,6 +61,8 @@ const RevenueStructured = () => {
   })
   const [showWarnings, setShowWarnings] = useState(true)
   const toastLockRef = useRef(null)
+  const abortRef = useRef(null)
+  const reprocessAbortRef = useRef(null)
   const debugEnabled = useMemo(() => {
     try {
       return localStorage.getItem('pwr.debug.receita') === '1'
@@ -70,89 +79,40 @@ const RevenueStructured = () => {
     return unique.map((value) => ({ value, label: value }))
   }
 
-  const buildDateTree = (items) => {
-    const years = new Map()
-    const allValues = new Set()
-    items.forEach((item) => {
-      const key = normalizeDateKey(item?.dataEntrada)
-      if (!key) return
-      allValues.add(key)
-      const [year, month] = key.split('-')
-      if (!years.has(year)) years.set(year, new Map())
-      const monthMap = years.get(year)
-      if (!monthMap.has(month)) monthMap.set(month, new Set())
-      monthMap.get(month).add(key)
-    })
 
-    const tree = Array.from(years.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([year, monthMap]) => {
-        const months = Array.from(monthMap.entries())
-          .sort((a, b) => a[0].localeCompare(b[0]))
-          .map(([month, daySet]) => {
-            const days = Array.from(daySet).sort()
-            const children = days.map((key) => ({
-              key,
-              label: key.split('-')[2],
-              value: key,
-              values: [key],
-            }))
-            return {
-              key: `${year}-${month}`,
-              label: buildMonthLabel(`${year}-${month}`),
-              children,
-              values: days,
-              count: days.length,
-            }
-          })
-        const values = months.flatMap((month) => month.values)
-        return {
-          key: year,
-          label: year,
-          children: months,
-          values,
-          count: values.length,
-        }
-      })
-
-    return { tree, allValues: Array.from(allValues).sort() }
-  }
-
+  const baseEntries = entries
   const apuracaoEntries = useMemo(
-    () => filterByApuracaoMonths(entries, apuracaoMonths, (entry) => entry.dataEntrada),
-    [entries, apuracaoMonths],
+    () => filterByApuracaoMonths(baseEntries, apuracaoMonths, (entry) => entry.dataEntrada),
+    [baseEntries, apuracaoMonths],
   )
-
-  const allDays = useMemo(
-    () => Array.from(new Set(apuracaoEntries.map((entry) => normalizeDateKey(entry.dataEntrada)))).filter(Boolean).sort(),
-    [apuracaoEntries],
-  )
-
-  const monthOptions = useMemo(() => {
-    const keys = Array.from(new Set(allDays.map((key) => getMonthKey(key))))
-      .filter(Boolean)
-      .sort()
-    return keys.map((key) => ({ value: key, label: buildMonthLabel(key) }))
-  }, [allDays])
 
   const resolvedPeriodKey = useMemo(() => {
-    if (selectedDays.length) {
-      const months = Array.from(new Set(selectedDays.map((key) => getMonthKey(key))))
-      return months.length === 1 ? months[0] : 'multi'
-    }
-    const sorted = monthOptions.map((item) => item.value).sort()
-    return sorted[sorted.length - 1] || ''
-  }, [monthOptions, selectedDays])
+    if (!dateFilterEnabled || !dateFilterApplied.length) return ''
+    const months = Array.from(new Set(dateFilterApplied.map((key) => getMonthKey(key))))
+    return months.length === 1 ? months[0] : 'multi'
+  }, [dateFilterApplied, dateFilterEnabled])
 
-  const defaultMonthDays = useMemo(() => {
-    if (!resolvedPeriodKey || resolvedPeriodKey === 'multi') return []
-    return allDays.filter((key) => getMonthKey(key) === resolvedPeriodKey)
-  }, [allDays, resolvedPeriodKey])
+  const selectionDiffersFromApplied = useMemo(() => {
+    if (!dateFilterEnabled) return false
+    const a = dateFilterSelection || []
+    const b = dateFilterApplied || []
+    if (a.length !== b.length) return true
+    const setB = new Set(b)
+    return a.some((val) => !setB.has(val))
+  }, [dateFilterApplied, dateFilterEnabled, dateFilterSelection])
 
-  const effectiveDays = selectedDays.length ? selectedDays : defaultMonthDays
+  const periodLabel = useMemo(() => {
+    if (!dateFilterEnabled || !resolvedPeriodKey) return 'Todos'
+    if (resolvedPeriodKey === 'multi') return 'Varios periodos'
+    return buildMonthLabel(resolvedPeriodKey)
+  }, [dateFilterEnabled, resolvedPeriodKey])
+
+  const effectiveDays = dateFilterEnabled ? dateFilterApplied : []
 
   const totalMes = useMemo(() => {
-    if (!effectiveDays.length) return 0
+    if (!effectiveDays.length) {
+      return apuracaoEntries.reduce((sum, entry) => sum + (Number(entry.comissao) || 0), 0)
+    }
     const set = new Set(effectiveDays)
     return apuracaoEntries
       .filter((entry) => set.has(normalizeDateKey(entry.dataEntrada)))
@@ -185,13 +145,50 @@ const RevenueStructured = () => {
     [enrichedEntries],
   )
 
-  const periodTree = useMemo(() => buildDateTree(enrichedEntries), [enrichedEntries])
+  const periodTree = useMemo(
+    () => buildDateTree(enrichedEntries, (entry) => entry?.dataEntrada),
+    [enrichedEntries],
+  )
+
+  const handleDateFilterToggle = useCallback((event) => {
+    const enabled = event.target.checked
+    setDateFilterEnabled(enabled)
+    if (!enabled) {
+      setDateFilterApplied([])
+      return
+    }
+    if (dateFilterSelection.length) {
+      setDateFilterApplied(dateFilterSelection)
+    }
+  }, [dateFilterSelection])
+
+  const handleDateFilterApply = useCallback((next) => {
+    setDateFilterSelection(next)
+    if (dateFilterEnabled) {
+      setDateFilterApplied(next)
+    }
+  }, [dateFilterEnabled])
 
   const vencimentoCache = useMemo(() => loadLastImported(userKey), [userKey])
   const vencimentoIndex = useMemo(
     () => buildVencimentoIndex(vencimentoCache?.rows || []),
     [vencimentoCache],
   )
+
+  const periodEntries = useMemo(() => {
+    if (!effectiveDays.length) return apuracaoEntries
+    const daySet = new Set(effectiveDays)
+    return apuracaoEntries.filter((entry) => daySet.has(normalizeDateKey(entry.dataEntrada)))
+  }, [apuracaoEntries, effectiveDays])
+
+  const baseTotal = apuracaoEntries.length
+  const periodTotal = periodEntries.length
+  const hasApplied = dateFilterEnabled && dateFilterApplied.length > 0
+  const filterLabel = useMemo(() => {
+    if (!dateFilterEnabled) return 'OFF'
+    if (hasApplied) return `ON — ${periodLabel}`
+    return 'ON (sem selecao aplicada)'
+  }, [dateFilterEnabled, hasApplied, periodLabel])
 
   const rows = useMemo(() => {
     const daySet = new Set(effectiveDays)
@@ -228,14 +225,15 @@ const RevenueStructured = () => {
 
   useEffect(() => {
     setPage(1)
-  }, [filters.search, filters.cliente, filters.assessor, filters.ativo, filters.estrutura, filters.broker, selectedDays, selectedBroker, apuracaoMonths, entries.length])
+  }, [filters.search, filters.cliente, filters.assessor, filters.ativo, filters.estrutura, filters.broker, dateFilterApplied, dateFilterEnabled, selectedBroker, apuracaoMonths, entries.length])
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages)
   }, [page, totalPages])
 
   useEffect(() => {
-    setSelectedDays([])
+    setDateFilterSelection([])
+    setDateFilterApplied([])
   }, [apuracaoMonths])
 
   const columns = useMemo(
@@ -316,6 +314,102 @@ const handleFolderSelection = useCallback((files) => {
     setIsPickerOpen(false)
   }, [])
 
+  const handleCancelSync = useCallback(() => {
+    if (abortRef.current) abortRef.current.abort()
+  }, [])
+
+  const handleCancelReprocess = useCallback(() => {
+    if (reprocessAbortRef.current) reprocessAbortRef.current.abort()
+  }, [])
+
+  const handleReprocessRejected = useCallback(async () => {
+    if (reprocessRunning || syncing) return
+    const rejectedItems = syncResult?.details?.rejected || []
+    if (!rejectedItems.length) {
+      notify('Sem rejeitados para reprocessar.', 'warning')
+      return
+    }
+    setReprocessRunning(true)
+    setReprocessProgress({ processed: 0, total: rejectedItems.length, progress: 0 })
+    const controller = new AbortController()
+    reprocessAbortRef.current = controller
+    try {
+      const tagIndex = await getTagIndex()
+      const result = await reprocessRejected({
+        rejectedItems,
+        baseEntries: entries,
+        moduleLabel: 'Estruturadas',
+        tagIndex,
+        signal: controller.signal,
+        onProgress: ({ processed, total, progress }) => {
+          setReprocessProgress({ processed, total, progress })
+        },
+      })
+      const recoveredEntries = result.recoveredEntries || []
+      const rejectedStill = result.rejectedStill || []
+      const duplicatesCount = result.duplicatesCount || 0
+      const processedCount = result.processedCount || 0
+      const nextEntries = recoveredEntries.length ? [...entries, ...recoveredEntries] : entries
+      if (recoveredEntries.length) {
+        setEntries(nextEntries)
+        saveStructuredRevenue(nextEntries)
+      }
+
+      const prevResult = syncResult || {}
+      const prevExtra = Array.isArray(prevResult.extra)
+        ? prevResult.extra.filter((item) => ![
+          'Reprocessados',
+          'Recuperados',
+          'Ainda rejeitados',
+          'Duplicados no reprocess',
+        ].includes(item.label))
+        : []
+      const recoveredSample = recoveredEntries.slice(0, 200).map((entry) => ({
+        id: entry.id,
+        data: entry.dataEntrada || entry.data || '',
+        codigoCliente: entry.codigoCliente || '',
+        estrutura: entry.estrutura || '',
+        ativo: entry.ativo || '',
+        comissao: entry.comissao ?? '',
+      }))
+      const prevRecovered = Array.isArray(prevResult.details?.reprocessedRecovered)
+        ? prevResult.details.reprocessedRecovered
+        : []
+      const mergedRecovered = [...prevRecovered, ...recoveredSample].slice(0, 500)
+
+      setSyncResult({
+        ...prevResult,
+        importados: nextEntries.length,
+        duplicados: (prevResult.duplicados || 0) + duplicatesCount,
+        rejeitados: rejectedStill.length,
+        details: {
+          ...(prevResult.details || {}),
+          rejected: rejectedStill,
+          reprocessCanceled: Boolean(result.canceled),
+          reprocessedRecovered: mergedRecovered,
+        },
+        extra: [
+          ...prevExtra,
+          { label: 'Reprocessados', value: processedCount },
+          { label: 'Recuperados', value: recoveredEntries.length },
+          { label: 'Ainda rejeitados', value: rejectedStill.length },
+          { label: 'Duplicados no reprocess', value: duplicatesCount },
+        ],
+      })
+
+      if (result.canceled) {
+        notify('Reprocessamento cancelado.', 'warning')
+      } else {
+        notify(`Reprocessamento concluido. ${recoveredEntries.length} recuperados.`, 'success')
+      }
+    } catch (error) {
+      notify(error?.message ? `Falha ao reprocessar: ${error.message}` : 'Falha ao reprocessar.', 'warning')
+    } finally {
+      setReprocessRunning(false)
+      reprocessAbortRef.current = null
+    }
+  }, [entries, notify, reprocessRunning, syncResult, syncing])
+
   const handleSync = useCallback(async (file) => {
     if (syncing) return
     const targetFile = file || selectedFile
@@ -337,12 +431,49 @@ const handleFolderSelection = useCallback((files) => {
     }
     setSyncing(true)
     setSyncResult(null)
+    setSyncProgress({ processed: 0, total: 0, progress: 0 })
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
       if (debugEnabled) {
         console.info('[receita-estruturadas] sync:start', { name: targetFile.name, size: targetFile.size })
       }
-      const result = await parseStructuredReceitasFile(targetFile)
+      const tagIndex = await getTagIndex()
+      const result = await parseStructuredReceitasFile(targetFile, {
+        signal: controller.signal,
+        tagIndex,
+        onProgress: ({ processed, rawRows, progress }) => {
+          setSyncProgress({ processed, total: rawRows || 0, progress: progress || 0 })
+        },
+      })
       if (!result.ok) {
+        if (result.error?.code === 'CANCELLED') {
+          const stats = result.summary?.stats || {}
+          const integrity = stats.integrity || {}
+          const warnings = stats.warnings || []
+          const details = stats.details || {}
+          setSyncResult({
+            moduleLabel: 'Estruturadas',
+            importados: stats.savedRows ?? 0,
+            duplicados: stats.duplicatedRows ?? 0,
+            rejeitados: stats.rejectedRows ?? 0,
+            avisos: warnings.length,
+            warnings,
+            details,
+            extra: [
+              { label: 'Linhas no Excel', value: integrity.estimatedDataRows ?? 0 },
+              { label: 'Linhas lidas (raw)', value: integrity.rawRows ?? stats.rawRows ?? 0 },
+              { label: 'Processadas', value: integrity.processedRows ?? stats.processedRows ?? 0 },
+              { label: 'Salvas', value: integrity.savedRows ?? stats.savedRows ?? 0 },
+              { label: 'Divergencia', value: integrity.mismatch ?? 0 },
+              { label: 'Enriquecidas (Tags)', value: stats.enrichedRows ?? 0 },
+              { label: 'Auto-corrigidas', value: stats.autoFixedRows ?? 0 },
+            ],
+          })
+          notifyOnce('Importacao cancelada.', 'warning')
+          if (debugEnabled) console.error('[receita-estruturadas] sync:cancelled')
+          return
+        }
         const missing = result.error?.details?.missing?.length
           ? ` Colunas faltando: ${result.error.details.missing.join(', ')}`
           : ''
@@ -357,22 +488,46 @@ const handleFolderSelection = useCallback((files) => {
       setEntries(nextEntries)
       saveStructuredRevenue(nextEntries)
       const stats = result.summary || {}
+      const finalStats = stats.stats || {}
       const monthFromStats = stats.months?.[stats.months.length - 1] || ''
       if (monthFromStats) {
         const nextDays = nextEntries
           .map((entry) => normalizeDateKey(entry.dataEntrada))
           .filter((key) => key && getMonthKey(key) === monthFromStats)
-        setSelectedDays(Array.from(new Set(nextDays)))
+        const uniqueDays = Array.from(new Set(nextDays))
+        setDateFilterSelection(uniqueDays)
+        if (dateFilterEnabled) {
+          setDateFilterApplied(uniqueDays)
+        }
       }
       const periodKeyResolved = monthFromStats || resolvedPeriodKey
       const periodEntries = periodKeyResolved
         ? nextEntries.filter((entry) => getMonthKey(entry.dataEntrada) === periodKeyResolved)
         : nextEntries
+      const rawRows = finalStats.rawRows ?? stats.rowsRead ?? 0
+      const validRows = finalStats.validRows ?? stats.rowsValid ?? nextEntries.length
+      const savedRows = finalStats.savedRows ?? nextEntries.length
+      const integrity = finalStats.integrity || {}
+      const warnings = finalStats.warnings || []
+      const details = finalStats.details || {}
+      console.log('[IMPORT][Estruturadas] rawRows=', rawRows, 'validRows=', validRows, 'savedRows=', savedRows)
       setSyncResult({
-        importados: periodEntries.length,
-        duplicados: 0,
-        rejeitados: stats.rowsSkipped ?? 0,
-        avisos: 0,
+        moduleLabel: 'Estruturadas',
+        importados: savedRows,
+        duplicados: finalStats.duplicatedRows ?? 0,
+        rejeitados: finalStats.rejectedRows ?? stats.rowsSkipped ?? 0,
+        avisos: warnings.length,
+        warnings,
+        details,
+        extra: [
+          { label: 'Linhas no Excel', value: integrity.estimatedDataRows ?? 0 },
+          { label: 'Linhas lidas (raw)', value: integrity.rawRows ?? rawRows },
+          { label: 'Processadas', value: integrity.processedRows ?? finalStats.processedRows ?? 0 },
+          { label: 'Salvas', value: integrity.savedRows ?? savedRows },
+          { label: 'Divergencia', value: integrity.mismatch ?? 0 },
+          { label: 'Enriquecidas (Tags)', value: finalStats.enrichedRows ?? 0 },
+          { label: 'Auto-corrigidas', value: finalStats.autoFixedRows ?? 0 },
+        ],
       })
       const now = new Date().toISOString().slice(0, 16).replace('T', ' ')
       setLastSyncAt(now)
@@ -381,7 +536,7 @@ const handleFolderSelection = useCallback((files) => {
       } catch {
         // noop
       }
-      notifyOnce(`Importacao concluida. ${periodEntries.length} linhas validas.`, 'success')
+      notifyOnce(`Importacao concluida. ${savedRows} linhas validas.`, 'success')
       if (debugEnabled) {
         console.info('[receita-estruturadas] sync:success', {
           rowsRead: stats.rowsRead,
@@ -397,8 +552,9 @@ const handleFolderSelection = useCallback((files) => {
       if (debugEnabled) console.error('[receita-estruturadas] sync:exception', error)
     } finally {
       setSyncing(false)
+      abortRef.current = null
     }
-  }, [debugEnabled, notify, resolvedPeriodKey, selectedFile, syncing])
+  }, [dateFilterEnabled, debugEnabled, notify, resolvedPeriodKey, selectedFile, syncing])
 
   return (
     <div className="page">
@@ -406,8 +562,10 @@ const handleFolderSelection = useCallback((files) => {
         title="Receita Estruturadas"
         subtitle="Controle completo da importacao por pasta e consolidacao mensal."
         meta={[
-          { label: 'Periodo selecionado', value: resolvedPeriodKey === 'multi' ? 'Varios periodos' : (resolvedPeriodKey ? buildMonthLabel(resolvedPeriodKey) : '?') },
-          { label: 'Entradas', value: rows.length },
+          { label: 'Periodo selecionado', value: periodLabel },
+          { label: 'Filtro', value: filterLabel },
+          { label: 'Entradas do periodo', value: periodTotal },
+          { label: 'Base total', value: baseTotal },
           { label: 'Total do mes', value: formatCurrency(totalMes) },
           { label: 'Ultima sync', value: lastSyncAt || '?' },
         ]}
@@ -418,8 +576,15 @@ const handleFolderSelection = useCallback((files) => {
         label="Sincronizacao Estruturadas"
         helper="Selecione a pasta com a planilha Operacoes para validar e consolidar."
         onSync={handleSync}
+        onCancel={handleCancelSync}
+        onReprocessRejected={handleReprocessRejected}
+        reprocessRunning={reprocessRunning}
+        reprocessProgress={reprocessProgress.total ? { processed: reprocessProgress.processed, total: reprocessProgress.total } : null}
+        onCancelReprocess={handleCancelReprocess}
         running={syncing}
         result={syncResult}
+        progress={syncProgress.progress}
+        progressInfo={syncProgress.total ? { processed: syncProgress.processed, total: syncProgress.total } : null}
         directory
         selectedFile={selectedFile}
         onSelectedFileChange={setSelectedFile}
@@ -530,7 +695,8 @@ const handleFolderSelection = useCallback((files) => {
               type="button"
               onClick={() => {
                 setFilters({ search: '', cliente: [], assessor: [], ativo: [], estrutura: [], broker: [] })
-                setSelectedDays([])
+                setDateFilterSelection([])
+                setDateFilterApplied([])
                 notify('Filtros limpos com sucesso.', 'success')
               }}
             >
@@ -569,14 +735,29 @@ const handleFolderSelection = useCallback((files) => {
             onChange={(value) => setFilters((prev) => ({ ...prev, estrutura: value }))}
             placeholder="Estrutura"
           />
+          <label className={`filter-toggle ${dateFilterEnabled ? 'active' : ''}`}>
+            <input
+              type="checkbox"
+              checked={dateFilterEnabled}
+              onChange={handleDateFilterToggle}
+            />
+            <span>Filtrar periodo</span>
+          </label>
           <TreeSelect
-            value={selectedDays}
+            value={dateFilterSelection}
             tree={periodTree.tree}
             allValues={periodTree.allValues}
-            onChange={setSelectedDays}
-            placeholder="Periodo"
+            onChange={handleDateFilterApply}
+            onDraftChange={setDateFilterSelection}
+            onCancel={() => {
+              if (dateFilterEnabled) setDateFilterSelection(dateFilterApplied)
+            }}
+            placeholder={dateFilterEnabled ? 'Periodo' : 'Periodo (desativado)'}
             searchable={false}
           />
+          {selectionDiffersFromApplied && dateFilterEnabled ? (
+            <div className="filter-hint">Selecao pendente (clique Aplicar)</div>
+          ) : null}
         </div>
         <DataTable rows={pagedRows} columns={columns} emptyMessage="Sem entradas estruturadas." />
         <div className="table-footer">

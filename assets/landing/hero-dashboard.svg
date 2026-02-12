@@ -1,0 +1,49 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1322"/>
+      <stop offset="1" stop-color="#0A0F1A"/>
+    </linearGradient>
+    <linearGradient id="card" x1="120" y1="90" x2="1080" y2="690" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#152239"/>
+      <stop offset="1" stop-color="#101A2D"/>
+    </linearGradient>
+    <linearGradient id="lineA" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#F1C40F"/>
+      <stop offset="1" stop-color="#D4AF37"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="760" rx="24" fill="url(#bg)"/>
+  <rect x="64" y="54" width="1072" height="652" rx="22" fill="url(#card)" stroke="#334764"/>
+  <rect x="64" y="54" width="1072" height="72" rx="22" fill="#19253B" stroke="#2E405C"/>
+  <circle cx="103" cy="90" r="8" fill="#2CE0A7"/>
+  <circle cx="132" cy="90" r="8" fill="#EAC43A"/>
+  <circle cx="161" cy="90" r="8" fill="#FF6E86"/>
+  <rect x="214" y="77" width="340" height="26" rx="13" fill="#23334E"/>
+  <text x="235" y="95" fill="#9AB0D1" font-family="Arial, sans-serif" font-size="12">Ferramenta - Painel operacional</text>
+
+  <rect x="98" y="158" width="286" height="248" rx="16" fill="#101B2D" stroke="#2F4464"/>
+  <rect x="122" y="190" width="240" height="16" rx="8" fill="#293E5E"/>
+  <rect x="122" y="224" width="186" height="12" rx="6" fill="#22344F"/>
+  <rect x="122" y="248" width="218" height="12" rx="6" fill="#22344F"/>
+  <rect x="122" y="272" width="202" height="12" rx="6" fill="#22344F"/>
+  <rect x="122" y="312" width="114" height="68" rx="10" fill="#15263F"/>
+  <rect x="248" y="312" width="114" height="68" rx="10" fill="#15263F"/>
+
+  <rect x="412" y="158" width="690" height="248" rx="16" fill="#101B2D" stroke="#2F4464"/>
+  <path d="M448 350L548 314L642 298L736 254L840 284L938 224L1058 186" stroke="url(#lineA)" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="548" cy="314" r="7" fill="#F1C40F"/>
+  <circle cx="736" cy="254" r="7" fill="#F1C40F"/>
+  <circle cx="938" cy="224" r="7" fill="#F1C40F"/>
+  <text x="448" y="194" fill="#9AB0D1" font-family="Arial, sans-serif" font-size="12">Vencimentos e cenarios</text>
+
+  <rect x="98" y="436" width="1004" height="230" rx="16" fill="#101B2D" stroke="#2F4464"/>
+  <rect x="122" y="468" width="960" height="34" rx="8" fill="#20314C"/>
+  <rect x="122" y="518" width="960" height="28" rx="8" fill="#1A293F"/>
+  <rect x="122" y="556" width="960" height="28" rx="8" fill="#1A293F"/>
+  <rect x="122" y="594" width="960" height="28" rx="8" fill="#1A293F"/>
+  <circle cx="142" cy="532" r="5" fill="#2CE0A7"/>
+  <circle cx="142" cy="570" r="5" fill="#2CE0A7"/>
+  <circle cx="142" cy="608" r="5" fill="#FF6E86"/>
+</svg>

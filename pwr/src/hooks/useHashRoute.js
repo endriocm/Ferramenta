@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react'
+﻿import { useCallback, useEffect, useMemo, useState } from 'react'
 
 const normalize = (value) => {
   if (!value) return '/'
@@ -15,11 +15,12 @@ export const useHashRoute = (fallback = '/') => {
     return () => window.removeEventListener('hashchange', handleChange)
   }, [fallback])
 
-  const navigate = (next) => {
+  const navigate = useCallback((next) => {
     const target = normalize(next)
     if (target === path) return
     window.location.hash = target
-  }
+  }, [path])
 
-  return useMemo(() => ({ path, navigate }), [path])
+  return useMemo(() => ({ path, navigate }), [path, navigate])
 }
+

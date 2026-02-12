@@ -1,35 +1,56 @@
 import { persistLocalStorage } from './nativeStorage'
+import { buildMonthLabel, getMonthKey } from '../lib/periodTree'
+import { normalizeAssessorName } from '../utils/assessor'
 
 const STORAGE_KEY = 'pwr.receita.estruturadas'
+let rawCache = null
+let entriesCache = []
+
+const normalizeStructuredEntry = (entry) => {
+  if (!entry || typeof entry !== 'object') return entry
+  const current = String(entry.assessor || '').trim()
+  const normalized = normalizeAssessorName(current)
+  if (normalized === current) return entry
+  return {
+    ...entry,
+    assessor: normalized,
+  }
+}
+
+const normalizeStructuredEntries = (entries) => {
+  if (!Array.isArray(entries)) return []
+  return entries.map((entry) => normalizeStructuredEntry(entry))
+}
 
 export const loadStructuredRevenue = () => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []
+    if (rawCache === raw) return entriesCache
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    const entries = normalizeStructuredEntries(Array.isArray(parsed) ? parsed : [])
+    rawCache = raw
+    entriesCache = entries
+    return entries
   } catch {
+    rawCache = null
+    entriesCache = []
     return []
   }
 }
 
 export const saveStructuredRevenue = (entries) => {
+  const normalizedEntries = normalizeStructuredEntries(entries || [])
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries || []))
+    const raw = JSON.stringify(normalizedEntries)
+    localStorage.setItem(STORAGE_KEY, raw)
+    rawCache = raw
+    entriesCache = normalizedEntries
     window.dispatchEvent(new CustomEvent('pwr:receita-updated'))
   } catch {
     // noop
   }
-  void persistLocalStorage(STORAGE_KEY, entries || [])
+  void persistLocalStorage(STORAGE_KEY, normalizedEntries)
 }
 
-export const buildMonthLabel = (key) => {
-  if (!key) return ''
-  const [year, month] = String(key).split('-').map(Number)
-  if (!year || !month) return key
-  const date = new Date(year, month - 1, 1)
-  const label = date.toLocaleDateString('pt-BR', { month: 'short', year: 'numeric' })
-  return label.charAt(0).toUpperCase() + label.slice(1)
-}
-
-export const getMonthKey = (dateKey) => String(dateKey || '').slice(0, 7)
+export { buildMonthLabel, getMonthKey }

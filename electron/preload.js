@@ -8,6 +8,10 @@ const on = (channel, handler) => {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  app: {
+    getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  },
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   resolveFolder: (folderPath) => ipcRenderer.invoke('resolve-folder', folderPath),
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
@@ -24,9 +28,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   updates: {
     getStatus: () => ipcRenderer.invoke('updates:getStatus'),
+    getUrls: () => ipcRenderer.invoke('updates:getUrls'),
     check: () => ipcRenderer.invoke('updates:check'),
     download: () => ipcRenderer.invoke('updates:download'),
     install: () => ipcRenderer.invoke('updates:install'),
+    setUrl: (url) => ipcRenderer.invoke('updates:setUrl', url),
+    resetUrl: () => ipcRenderer.invoke('updates:resetUrl'),
     onStatus: (handler) => on('updates:status', handler),
+    onProgress: (handler) => on('update:download-progress', handler),
+    onState: (handler) => on('update:state', handler),
   },
+})
+contextBridge.exposeInMainWorld('pwr', {
+  openExternal: (url) => ipcRenderer.invoke('pwr:openExternal', url),
 })

@@ -24,6 +24,34 @@ const formatOptionalCurrency = (value) => {
   return formatCurrency(value)
 }
 
+const hasStructureParamOverride = (override) => {
+  if (!override || typeof override !== 'object') return false
+  if (
+    override?.optionQtyOverride != null
+    || override?.strikeOverride != null
+    || override?.barrierValueOverride != null
+    || override?.barrierTypeOverride != null
+  ) {
+    return true
+  }
+  if (
+    override?.structure?.optionQty != null
+    || override?.structure?.strike != null
+    || override?.structure?.barrierValue != null
+    || (override?.structure?.barrierType && String(override.structure.barrierType).toLowerCase() !== 'auto')
+  ) {
+    return true
+  }
+  const legs = override?.legs && typeof override.legs === 'object' ? Object.values(override.legs) : []
+  if (legs.some((entry) => entry?.optionQtyOverride != null || entry?.strikeOverride != null || entry?.barrierValueOverride != null || entry?.barrierTypeOverride != null)) {
+    return true
+  }
+  const structureByLeg = override?.structureByLeg && typeof override.structureByLeg === 'object'
+    ? Object.values(override.structureByLeg)
+    : []
+  return structureByLeg.some((entry) => entry?.optionQty != null || entry?.strike != null || entry?.barrierValue != null || entry?.barrierType != null)
+}
+
 const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
   if (!row) return null
 
@@ -36,6 +64,8 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
   const badge = getBarrierBadge(row.barrierStatus)
   const overrideManual = row.override?.high !== 'auto' || row.override?.low !== 'auto'
   const cupomManual = row.manualCouponBRL != null
+  const ganhoOpcoesManual = row.override?.manualOptionsGainBRL != null
+  const parametrosEstruturaManual = hasStructureParamOverride(row.override)
   const warnings = []
   const valorEntrada = row.result?.valorEntrada
   const valorEntradaIncomplete = row.result?.valorEntradaIncomplete
@@ -52,6 +82,13 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
   }
   if (cupomManual) {
     warnings.push('Cupom manual aplicado.')
+  }
+  if (ganhoOpcoesManual) {
+    warnings.push('Ganho nas opções (manual) aplicado.')
+  }
+  if (parametrosEstruturaManual) {
+    const target = row.override?.optionSide ? ` (${row.override.optionSide})` : ''
+    warnings.push(`Parâmetros manuais (strike/barreira/tipo) aplicados${target}.`)
   }
 
   return (
@@ -176,7 +213,7 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
               <strong>{row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhoPut)}</strong>
             </div>
             <div>
-              <span>Ganhos nas opcoes</span>
+              <span>{ganhoOpcoesManual ? 'Ganhos nas opções (manual)' : 'Ganhos nas opções'}</span>
               <strong>{row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhosOpcoes)}</strong>
             </div>
             <div>
@@ -227,11 +264,17 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
                   && Number(strikeAdjusted) !== Number(strikeOriginal)
                 const rawQty = leg?.quantidadeEfetiva ?? leg?.quantidade ?? 0
                 const qtyLabel = formatNumber(Math.abs(Number(rawQty) || 0))
+                const optionExpiryDate = leg?.optionExpiryDateOverride ?? leg?.optionExpiryDate ?? null
+                const settlementSpotLabel = Number.isFinite(Number(leg?.settlementSpotOverride))
+                  ? formatNumber(leg.settlementSpotOverride)
+                  : null
                 return (
                   <div key={`${leg?.id || index}-${strikeOriginal}`}>
                     <span>{tipo} {sideLabel}</span>
                     <strong>Strike {strikeAdjustedLabel}</strong>
                     <span>Qtd {qtyLabel}</span>
+                    {optionExpiryDate ? <small className="muted">Venc {formatDate(optionExpiryDate)}</small> : null}
+                    {settlementSpotLabel ? <small className="muted">Spot travado {settlementSpotLabel}</small> : null}
                     {showOriginal ? <small className="muted">Orig {strikeOriginalLabel}</small> : null}
                   </div>
                 )

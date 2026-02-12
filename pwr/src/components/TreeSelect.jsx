@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icons'
 
-const TreeCheckbox = ({ label, count, checked, indeterminate, depth = 0, onToggle }) => {
+const TreeRow = ({
+  label,
+  count,
+  checked,
+  indeterminate,
+  depth = 0,
+  onToggle,
+  canExpand = false,
+  expanded = false,
+  onToggleExpand,
+}) => {
   const inputRef = useRef(null)
 
   useEffect(() => {
@@ -11,16 +21,34 @@ const TreeCheckbox = ({ label, count, checked, indeterminate, depth = 0, onToggl
   }, [indeterminate])
 
   return (
-    <label className="tree-node" style={{ paddingLeft: `${depth * 16}px` }}>
-      <input
-        ref={inputRef}
-        type="checkbox"
-        checked={checked}
-        onChange={onToggle}
-      />
-      <span>{label}</span>
-      {typeof count === 'number' ? <small className="muted">({count})</small> : null}
-    </label>
+    <div className="tree-node" style={{ paddingLeft: `${depth * 16}px` }}>
+      {canExpand ? (
+        <button
+          className={`tree-caret ${expanded ? 'expanded' : 'collapsed'}`}
+          type="button"
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onToggleExpand?.()
+          }}
+          aria-label={expanded ? 'Recolher' : 'Expandir'}
+        >
+          <Icon name="arrow-down" size={12} />
+        </button>
+      ) : (
+        <span className="tree-caret-spacer" />
+      )}
+      <label className="tree-label">
+        <input
+          ref={inputRef}
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+        />
+        <span>{label}</span>
+        {typeof count === 'number' ? <small className="muted">({count})</small> : null}
+      </label>
+    </div>
   )
 }
 
@@ -29,6 +57,8 @@ const TreeSelect = ({
   tree = [],
   allValues: _allValues = [],
   onChange,
+  onDraftChange,
+  onCancel,
   placeholder = 'Selecionar',
   searchable = true,
   searchPlaceholder = 'Buscar',
@@ -37,16 +67,22 @@ const TreeSelect = ({
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [draft, setDraft] = useState(new Set(value))
+  const [expanded, setExpanded] = useState(new Set())
   const wrapRef = useRef(null)
   const selectAllRef = useRef(null)
+
+  const closeDropdown = (reason) => {
+    setOpen(false)
+    if (reason === 'cancel') onCancel?.()
+  }
 
   useEffect(() => {
     const handleOutside = (event) => {
       if (!wrapRef.current || wrapRef.current.contains(event.target)) return
-      setOpen(false)
+      if (open) closeDropdown('cancel')
     }
     const handleEscape = (event) => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key === 'Escape' && open) closeDropdown('cancel')
     }
     document.addEventListener('mousedown', handleOutside)
     document.addEventListener('keydown', handleEscape)
@@ -54,11 +90,27 @@ const TreeSelect = ({
       document.removeEventListener('mousedown', handleOutside)
       document.removeEventListener('keydown', handleEscape)
     }
-  }, [])
+  }, [open])
 
   const summaryLabel = value.length
     ? `${value.length} selecionado${value.length > 1 ? 's' : ''}`
     : placeholder
+
+  const buildExpandedState = () => {
+    const next = new Set()
+    const selected = new Set(value)
+    const walk = (nodes, depth = 0) => {
+      nodes.forEach((node) => {
+        const values = node.values || (node.value ? [node.value] : [])
+        const hasSelected = values.some((val) => selected.has(val))
+        if (depth === 0) next.add(node.key)
+        if (depth > 0 && hasSelected) next.add(node.key)
+        if (node.children?.length) walk(node.children, depth + 1)
+      })
+    }
+    walk(tree)
+    return next
+  }
 
   const filteredTree = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -119,6 +171,7 @@ const TreeSelect = ({
         if (shouldAdd) next.add(val)
         else next.delete(val)
       })
+      onDraftChange?.(Array.from(next).sort())
       return next
     })
   }
@@ -138,17 +191,29 @@ const TreeSelect = ({
     return nodes.map((node) => {
       const values = node.values || (node.value ? [node.value] : [])
       const state = getState(values)
+      const hasChildren = Boolean(node.children?.length)
+      const isExpanded = search ? true : expanded.has(node.key)
       return (
         <div key={node.key} className="tree-group">
-          <TreeCheckbox
+          <TreeRow
             label={node.label}
             count={node.count}
             checked={state.checked}
             indeterminate={state.indeterminate}
             depth={depth}
             onToggle={() => toggleValues(values)}
+            canExpand={hasChildren}
+            expanded={isExpanded}
+            onToggleExpand={() => {
+              setExpanded((prev) => {
+                const next = new Set(prev)
+                if (next.has(node.key)) next.delete(node.key)
+                else next.add(node.key)
+                return next
+              })
+            }}
           />
-          {node.children?.length ? (
+          {hasChildren && isExpanded ? (
             <div className="tree-children">
               {renderNodes(node.children, depth + 1)}
             </div>
@@ -169,6 +234,9 @@ const TreeSelect = ({
             if (next) {
               setDraft(new Set(value))
               setSearch('')
+              setExpanded(buildExpandedState())
+            } else {
+              onCancel?.()
             }
             return next
           })
@@ -206,7 +274,7 @@ const TreeSelect = ({
             {filteredTree.length ? renderNodes(filteredTree) : <div className="select-empty">Sem resultados</div>}
           </div>
           <div className="tree-footer">
-            <button className="btn btn-secondary" type="button" onClick={() => setOpen(false)}>Cancelar</button>
+            <button className="btn btn-secondary" type="button" onClick={() => closeDropdown('cancel')}>Cancelar</button>
             <button className="btn btn-primary" type="button" onClick={handleApply}>Aplicar</button>
           </div>
         </div>

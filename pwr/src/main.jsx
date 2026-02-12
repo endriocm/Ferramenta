@@ -1,4 +1,3 @@
-import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import { hydrateLocalStorage } from './services/nativeStorage'
@@ -25,9 +24,7 @@ const bootstrap = async () => {
   }
 
   createRoot(document.getElementById('root')).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
+    <App />,
   )
 }
 

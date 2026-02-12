@@ -1,4 +1,5 @@
 ﻿import { loadXlsx } from './xlsxLoader'
+import { normalizeAssessorName } from '../utils/assessor'
 
 const normalizeKey = (value) => String(value || '')
   .toLowerCase()
@@ -178,7 +179,7 @@ const parsePosicaoConsolidada = (normalizedRow, fallbackRow, XLSX) => {
     }),
     codigoCliente,
     cliente: clienteLabel,
-    assessor: getValue(normalizedRow, ['codigodoassessor', 'assessor', 'consultor']),
+    assessor: normalizeAssessorName(getValue(normalizedRow, ['codigodoassessor', 'assessor', 'consultor'])),
     broker: getValue(normalizedRow, ['canaldeorigem', 'broker', 'corretora']),
     ativo: getValue(normalizedRow, ['ativo', 'ticker']),
     estrutura: getValue(normalizedRow, ['estrutura', 'tipoestrutura']),
@@ -307,7 +308,7 @@ const parseBuffer = (buffer, XLSX) => {
       }),
       cliente: clienteLabel,
       codigoCliente,
-      assessor: getValue(normalizedRow, ['assessor', 'consultor']),
+      assessor: normalizeAssessorName(getValue(normalizedRow, ['assessor', 'consultor'])),
       broker: getValue(normalizedRow, ['broker', 'corretora']),
       ativo: getValue(normalizedRow, ['ativo', 'ticker']),
       estrutura: getValue(normalizedRow, ['estrutura', 'tipoestrutura']),
@@ -334,3 +335,4 @@ export const parseWorkbook = async (file) => {
   const buffer = await file.arrayBuffer()
   return parseWorkbookBuffer(buffer)
 }
+

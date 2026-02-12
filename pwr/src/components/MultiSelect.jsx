@@ -1,6 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icons'
 
+const normalizeToken = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+
+const isAllLikeToken = (value) => {
+  const token = normalizeToken(value)
+  return token === '__all__' || token === 'all' || token === 'todos' || token === 'todas' || token === 'todo'
+}
+
+const resolveAllLikeValues = (options) => {
+  const set = new Set()
+  ;(Array.isArray(options) ? options : []).forEach((option) => {
+    if (!option) return
+    if (isAllLikeToken(option.value) || isAllLikeToken(option.label)) {
+      set.add(option.value)
+    }
+  })
+  return set
+}
+
 const buildLabel = (values, options, placeholder) => {
   if (!values?.length) return placeholder
   const labels = values
@@ -26,6 +48,7 @@ const MultiSelect = ({
   const wrapRef = useRef(null)
   const selectAllRef = useRef(null)
   const label = useMemo(() => buildLabel(value, options, placeholder), [value, options, placeholder])
+  const allLikeValues = useMemo(() => resolveAllLikeValues(options), [options])
 
   useEffect(() => {
     const handleOutside = (event) => {
@@ -65,8 +88,16 @@ const MultiSelect = ({
   const toggleValue = (next) => {
     setDraft((prev) => {
       const updated = new Set(prev)
-      if (updated.has(next)) updated.delete(next)
-      else updated.add(next)
+      const isAllLike = allLikeValues.has(next)
+      if (updated.has(next)) {
+        updated.delete(next)
+      } else if (isAllLike) {
+        updated.clear()
+        updated.add(next)
+      } else {
+        allLikeValues.forEach((value) => updated.delete(value))
+        updated.add(next)
+      }
       return updated
     })
   }
@@ -83,7 +114,12 @@ const MultiSelect = ({
     })
   }
   const handleApply = () => {
-    onChange?.(Array.from(draft).sort())
+    const nextValues = Array.from(draft)
+    const hasAllLike = nextValues.some((item) => allLikeValues.has(item))
+    const normalized = hasAllLike && nextValues.length > 1
+      ? nextValues.filter((item) => !allLikeValues.has(item))
+      : nextValues
+    onChange?.(normalized.sort())
     setOpen(false)
   }
 

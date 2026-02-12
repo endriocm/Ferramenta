@@ -1,4 +1,6 @@
-﻿const parsePercent = (value) => {
+import { normalizeDateKey } from '../utils/dateKey.js'
+
+const parsePercent = (value) => {
   if (value == null) return 0
   if (typeof value === 'number') return value
   const cleaned = String(value).replace('%', '').replace(',', '.')
@@ -28,15 +30,59 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-const resolveBarrierDirection = (type, barrierValue, spotInicial) => {
-  const upper = (type || '').toUpperCase()
-  if (upper.includes('UP') || upper.includes('UO') || upper.includes('UI')) return 'high'
-  if (upper.includes('DOWN') || upper.includes('DO') || upper.includes('DI')) return 'low'
-  if (upper.includes('KO') || upper.includes('KI')) {
-    if (barrierValue != null && spotInicial != null) {
-      return Number(barrierValue) >= Number(spotInicial) ? 'high' : 'low'
-    }
+const normalizeDateOverride = (value) => {
+  if (value == null) return null
+  const normalized = normalizeDateKey(String(value).trim())
+  return normalized || null
+}
+
+const normalizeOptionSide = (value) => {
+  if (value == null) return null
+  const raw = String(value).trim().toUpperCase()
+  if (!raw) return null
+  if (raw === 'CALL' || raw === 'PUT') return raw
+  return null
+}
+
+const normalizeBarrierTypeOverride = (value, directionHint = null) => {
+  if (value == null) return null
+  const raw = String(value).trim().toUpperCase()
+  if (!raw || raw === 'AUTO') return null
+  if (raw === 'NONE' || raw === 'SEM BARREIRA' || raw === 'SEM_BARRERA' || raw === 'NO_BARRIER') return 'NONE'
+
+  if (raw === 'UI' || raw === 'UO' || raw === 'KI' || raw === 'KO') return raw
+  if (raw === 'DI') return 'KI'
+  if (raw === 'DO') return 'KO'
+
+  const isUp = raw.includes('UP') || raw.startsWith('U')
+  const isDown = raw.includes('DOWN') || raw.startsWith('D')
+  const isOut = raw.includes('OUT') || raw.includes('KNOCK-OUT') || raw.includes('KNOCKOUT') || raw.endsWith('O')
+  const isIn = raw.includes('IN') || raw.includes('KNOCK-IN') || raw.includes('KNOCKIN') || raw.endsWith('I')
+
+  if (isUp && isOut) return 'UO'
+  if (isUp && isIn) return 'UI'
+  if (isDown && isOut) return 'KO'
+  if (isDown && isIn) return 'KI'
+
+  if (raw === 'OUT' || isOut) {
+    return directionHint === 'high' ? 'UO' : 'KO'
   }
+  if (raw === 'IN' || isIn) {
+    return directionHint === 'high' ? 'UI' : 'KI'
+  }
+  return null
+}
+
+const resolveBarrierDirection = (type, barrierValue, spotInicial) => {
+  const normalized = normalizeBarrierTypeOverride(type)
+  if (normalized === 'NONE') return 'unknown'
+  if (normalized === 'UI' || normalized === 'UO') return 'high'
+  if (normalized === 'KI' || normalized === 'KO') return 'low'
+
+  const upper = (type || '').toUpperCase()
+  if (upper.includes('UP')) return 'high'
+  if (upper.includes('DOWN')) return 'low'
+
   if (barrierValue != null && spotInicial != null) {
     return Number(barrierValue) >= Number(spotInicial) ? 'high' : 'low'
   }
@@ -44,10 +90,275 @@ const resolveBarrierDirection = (type, barrierValue, spotInicial) => {
 }
 
 const resolveBarrierMode = (type) => {
-  const upper = (type || '').toUpperCase()
-  if (upper.includes('OUT') || upper.includes('KO') || upper.includes('UO') || upper.includes('DO')) return 'out'
-  if (upper.includes('IN') || upper.includes('KI') || upper.includes('UI') || upper.includes('DI')) return 'in'
+  const normalized = normalizeBarrierTypeOverride(type)
+  if (normalized === 'NONE') return 'none'
+  if (normalized === 'UO' || normalized === 'KO') return 'out'
+  if (normalized === 'UI' || normalized === 'KI') return 'in'
   return 'none'
+}
+
+const hasStrikeField = (leg) => {
+  const type = String(leg?.tipo || '').toUpperCase()
+  if (type === 'CALL' || type === 'PUT') return true
+  const strike = leg?.strikeAjustado ?? leg?.strikeAdjusted ?? leg?.strike ?? leg?.precoStrike
+  return strike != null && Number.isFinite(Number(strike))
+}
+
+const hasOptionLegType = (leg) => {
+  const type = String(leg?.tipo || '').toUpperCase()
+  return type === 'CALL' || type === 'PUT'
+}
+
+const hasBarrierField = (leg) => {
+  if (!leg) return false
+  if (hasOptionLegType(leg)) return true
+  if (leg.barreiraValor != null) return true
+  return String(leg?.barreiraTipo || '').trim() !== ''
+}
+
+const normalizeLegSide = (side) => {
+  const raw = String(side || '').trim().toLowerCase()
+  if (raw === 'short' || raw === 'vendida' || raw === 'venda') return 'short'
+  return 'long'
+}
+
+export const getLegOverrideKey = (leg, index = 0) => {
+  if (!leg || typeof leg !== 'object') return `LEG:${index}`
+  const type = String(leg?.tipo || 'LEG').trim().toUpperCase() || 'LEG'
+  const side = normalizeLegSide(leg?.side)
+  const id = leg?.id != null && String(leg.id).trim() !== '' ? String(leg.id).trim() : `idx-${index}`
+  return `${type}:${side}:${id}`
+}
+
+const resolveLegacyBarrierType = (typeOverride, leg, operation) => {
+  const normalized = normalizeBarrierTypeOverride(typeOverride)
+  if (normalized !== 'KO' && normalized !== 'KI') return normalized
+  const direction = resolveBarrierDirection(leg?.barreiraTipo, leg?.barreiraValor, operation?.spotInicial)
+  if (direction === 'high') return normalized === 'KO' ? 'UO' : 'UI'
+  if (direction === 'unknown' && import.meta?.env?.DEV) {
+    console.info('[vencimento] legacy barrier type fallback to DOWN', {
+      operationId: operation?.id || null,
+      legId: leg?.id || null,
+      typeOverride: normalized,
+    })
+  }
+  return normalized
+}
+
+const normalizeManualLegOverride = (value) => {
+  if (!value || typeof value !== 'object') return null
+  const structure = value.structure && typeof value.structure === 'object' ? value.structure : null
+  const strikeOverride = toNumber(value.strikeOverride ?? value.strike ?? structure?.strike)
+  const barrierValueOverride = toNumber(value.barrierValueOverride ?? value.barreiraValorOverride ?? structure?.barrierValue ?? structure?.barreiraValor)
+  const optionQtyOverride = toNumber(value.optionQtyOverride ?? value.optionQty ?? value.quantidadeOpcaoOverride ?? structure?.optionQty ?? structure?.qty)
+  const optionExpiryDateOverride = normalizeDateOverride(
+    value.optionExpiryDateOverride
+    ?? value.optionExpiryDate
+    ?? value.vencimentoOpcaoOverride
+    ?? value.vencimentoOpcao
+    ?? structure?.optionExpiryDate
+    ?? structure?.vencimentoOpcao,
+  )
+  const rawType = normalizeBarrierTypeOverride(value.barreiraTipo ?? structure?.barrierType ?? structure?.tipoBarreira, null)
+  const directionHint = rawType === 'UI' || rawType === 'UO' ? 'high' : null
+  const barrierTypeOverride = normalizeBarrierTypeOverride(
+    value.barrierTypeOverride ?? value.barreiraTipoOverride ?? structure?.barrierType ?? structure?.tipoBarreira,
+    directionHint,
+  )
+  const optionSide = normalizeOptionSide(value.optionSide ?? value.tipo ?? value.optionType ?? structure?.target?.side ?? structure?.side)
+  const legKeyRaw = value.legKey ?? structure?.target?.legKey
+  const legKey = legKeyRaw != null && String(legKeyRaw).trim() !== '' ? String(legKeyRaw).trim() : null
+  if (
+    strikeOverride == null
+    && optionQtyOverride == null
+    && barrierValueOverride == null
+    && barrierTypeOverride == null
+    && optionExpiryDateOverride == null
+    && optionSide == null
+    && legKey == null
+  ) return null
+  return {
+    optionQtyOverride: optionQtyOverride != null ? optionQtyOverride : null,
+    strikeOverride: strikeOverride != null ? strikeOverride : null,
+    barrierValueOverride: barrierValueOverride != null ? barrierValueOverride : null,
+    barrierTypeOverride: barrierTypeOverride != null ? barrierTypeOverride : null,
+    optionExpiryDateOverride,
+    optionSide,
+    legKey,
+  }
+}
+
+const matchesLegTarget = (leg, index, targetLegKey) => {
+  if (!targetLegKey) return false
+  const rawTarget = String(targetLegKey).trim()
+  if (!rawTarget) return false
+  if (String(index) === rawTarget) return true
+  if (leg?.id != null && String(leg.id) === rawTarget) return true
+  if (getLegOverrideKey(leg, index) === rawTarget) return true
+  return false
+}
+
+export const applyOverridesToOperation = (operation, override = {}) => {
+  if (!operation || typeof operation !== 'object') return operation
+  const legs = Array.isArray(operation?.pernas) ? operation.pernas : []
+  if (!legs.length) return operation
+
+  const structure = override?.structure && typeof override.structure === 'object' ? override.structure : null
+  const strikeOverrideGlobal = toNumber(override?.strikeOverride ?? override?.strike ?? structure?.strike)
+  const barrierValueOverrideGlobal = toNumber(
+    override?.barrierValueOverride ?? override?.barreiraValorOverride ?? structure?.barrierValue ?? structure?.barreiraValor,
+  )
+  const optionQtyOverrideGlobal = toNumber(
+    override?.optionQtyOverride ?? override?.optionQty ?? override?.quantidadeOpcaoOverride ?? structure?.optionQty ?? structure?.qty,
+  )
+  const optionExpiryDateOverrideGlobal = normalizeDateOverride(
+    override?.optionExpiryDateOverride
+    ?? override?.optionExpiryDate
+    ?? override?.vencimentoOpcaoOverride
+    ?? override?.vencimentoOpcao
+    ?? structure?.optionExpiryDate
+    ?? structure?.vencimentoOpcao,
+  )
+  const globalSideHint = normalizeOptionSide(override?.optionSide ?? override?.optionType ?? structure?.target?.side ?? structure?.side)
+  const directionHintGlobal = globalSideHint === 'CALL' ? 'high' : null
+  const barrierTypeOverrideGlobal = normalizeBarrierTypeOverride(
+    override?.barrierTypeOverride ?? override?.barreiraTipoOverride ?? structure?.barrierType ?? structure?.tipoBarreira,
+    directionHintGlobal,
+  )
+  const optionSideGlobal = globalSideHint
+  const legKeyRaw = override?.legKey ?? structure?.target?.legKey
+  const legKeyGlobal = legKeyRaw != null && String(legKeyRaw).trim() !== '' ? String(legKeyRaw).trim() : null
+  const legsOverrides = (
+    override?.legs && typeof override.legs === 'object'
+      ? override.legs
+      : (override?.structureByLeg && typeof override.structureByLeg === 'object' ? override.structureByLeg : null)
+  )
+  const legacyBarrierType = Boolean(override?.legacyBarrierType)
+
+  const hasGlobal =
+    strikeOverrideGlobal != null
+    || optionQtyOverrideGlobal != null
+    || barrierValueOverrideGlobal != null
+    || barrierTypeOverrideGlobal != null
+    || optionExpiryDateOverrideGlobal != null
+    || Boolean(legsOverrides)
+
+  if (!hasGlobal) return operation
+
+  let changed = false
+  const nextLegs = legs.map((leg, index) => {
+    if (!leg || typeof leg !== 'object') return leg
+
+    const legKey = getLegOverrideKey(leg, index)
+    const sideKey = normalizeOptionSide(leg?.tipo)
+    const legOverride = normalizeManualLegOverride(
+      legsOverrides?.[legKey]
+      ?? legsOverrides?.[String(leg?.id)]
+      ?? legsOverrides?.[String(index)]
+      ?? (sideKey ? legsOverrides?.[sideKey] : null)
+      ?? null,
+    )
+
+    const legScopeByKey = matchesLegTarget(leg, index, legKeyGlobal)
+    const legScopeBySide = !legKeyGlobal && optionSideGlobal && sideKey === optionSideGlobal
+    const applyGlobalToLeg = !legKeyGlobal && !optionSideGlobal ? true : (legScopeByKey || legScopeBySide)
+
+    const strikeOverride = legOverride?.strikeOverride ?? (applyGlobalToLeg ? strikeOverrideGlobal : null)
+    const optionQtyOverride = legOverride?.optionQtyOverride ?? (applyGlobalToLeg ? optionQtyOverrideGlobal : null)
+    const optionExpiryDateOverride = legOverride?.optionExpiryDateOverride ?? (applyGlobalToLeg ? optionExpiryDateOverrideGlobal : null)
+    const barrierValueOverride = legOverride?.barrierValueOverride ?? (applyGlobalToLeg ? barrierValueOverrideGlobal : null)
+    const barrierTypeOverrideRaw = legOverride?.barrierTypeOverride ?? (applyGlobalToLeg ? barrierTypeOverrideGlobal : null)
+    const barrierTypeOverride = legacyBarrierType
+      ? resolveLegacyBarrierType(barrierTypeOverrideRaw, leg, operation)
+      : barrierTypeOverrideRaw
+
+    let nextLeg = leg
+
+    if (barrierTypeOverride === 'NONE' && hasBarrierField(leg)) {
+      const currentBarrierNum = Number(nextLeg?.barreiraValor)
+      const currentBarrierType = String(nextLeg?.barreiraTipo || '').trim()
+      if (Number.isFinite(currentBarrierNum) || currentBarrierType) {
+        if (nextLeg === leg) nextLeg = { ...leg }
+        nextLeg.barreiraValor = null
+        nextLeg.barreiraTipo = ''
+        changed = true
+      }
+    }
+
+    if (optionQtyOverride != null && hasOptionLegType(leg)) {
+      const qtyMagnitude = Math.abs(Number(optionQtyOverride))
+      if (Number.isFinite(qtyMagnitude) && qtyMagnitude > 0) {
+        const currentQty = Number(nextLeg?.quantidade)
+        const defaultSign = normalizeLegSide(nextLeg?.side) === 'short' ? -1 : 1
+        const currentSign = Number.isFinite(currentQty) && currentQty !== 0 ? Math.sign(currentQty) : defaultSign
+        const nextQty = qtyMagnitude * (currentSign === 0 ? defaultSign : currentSign)
+        if (!Number.isFinite(currentQty) || Math.abs(currentQty - nextQty) >= 1e-9) {
+          if (nextLeg === leg) nextLeg = { ...leg }
+          if (nextLeg.quantidadeOriginal == null && Number.isFinite(currentQty)) {
+            nextLeg.quantidadeOriginal = currentQty
+          }
+          nextLeg.quantidade = nextQty
+          changed = true
+        }
+      }
+    }
+
+    if (strikeOverride != null && hasStrikeField(leg)) {
+      const currentStrike = nextLeg?.strikeAjustado ?? nextLeg?.strikeAdjusted ?? nextLeg?.strike ?? nextLeg?.precoStrike
+      const currentNum = Number(currentStrike)
+      if (
+        !Number.isFinite(currentNum)
+        || Math.abs(currentNum - strikeOverride) >= 1e-9
+      ) {
+        if (nextLeg === leg) nextLeg = { ...leg }
+        if (nextLeg.strikeOriginal == null && Number.isFinite(currentNum)) {
+          nextLeg.strikeOriginal = currentNum
+        }
+        nextLeg.strikeAjustado = strikeOverride
+        nextLeg.strikeAdjusted = strikeOverride
+        nextLeg.strike = strikeOverride
+        changed = true
+      }
+    }
+
+    if (optionExpiryDateOverride != null && hasOptionLegType(leg)) {
+      const currentExpiry = normalizeDateOverride(nextLeg?.optionExpiryDateOverride ?? nextLeg?.optionExpiryDate ?? nextLeg?.vencimentoOpcao)
+      if (currentExpiry !== optionExpiryDateOverride) {
+        if (nextLeg === leg) nextLeg = { ...leg }
+        nextLeg.optionExpiryDateOverride = optionExpiryDateOverride
+        changed = true
+      }
+    }
+
+    if (barrierTypeOverride !== 'NONE' && barrierValueOverride != null && hasBarrierField(leg)) {
+      const currentBarrier = Number(nextLeg?.barreiraValor)
+      if (
+        !Number.isFinite(currentBarrier)
+        || Math.abs(currentBarrier - barrierValueOverride) >= 1e-9
+      ) {
+        if (nextLeg === leg) nextLeg = { ...leg }
+        nextLeg.barreiraValor = barrierValueOverride
+        changed = true
+      }
+    }
+
+    if (barrierTypeOverride && barrierTypeOverride !== 'NONE' && hasBarrierField(leg)) {
+      const nextType = normalizeBarrierTypeOverride(barrierTypeOverride)
+      if (String(nextLeg?.barreiraTipo || '').toUpperCase() !== String(nextType).toUpperCase()) {
+        if (nextLeg === leg) nextLeg = { ...leg }
+        nextLeg.barreiraTipo = nextType
+        changed = true
+      }
+    }
+
+    return nextLeg
+  })
+
+  if (!changed) return operation
+  return {
+    ...operation,
+    pernas: nextLegs,
+  }
 }
 
 export const computeBarrierStatus = (operation, market, override) => {
@@ -70,13 +381,14 @@ export const computeBarrierStatus = (operation, market, override) => {
 
   const highBarriers = barriers.filter((item) => item.direction === 'high')
   const lowBarriers = barriers.filter((item) => item.direction === 'low')
-  const spotFinal = market?.close ?? operation?.spotInicial ?? null
+  const marketHigh = toNumber(market?.high ?? market?.close ?? operation?.spotInicial)
+  const marketLow = toNumber(market?.low ?? market?.close ?? operation?.spotInicial)
 
-  const autoHigh = highBarriers.length && spotFinal != null
-    ? highBarriers.some((item) => Number(spotFinal) >= Number(item.barreiraValor))
+  const autoHigh = highBarriers.length && marketHigh != null
+    ? highBarriers.some((item) => Number(marketHigh) >= Number(item.barreiraValor))
     : null
-  const autoLow = lowBarriers.length && spotFinal != null
-    ? lowBarriers.some((item) => Number(spotFinal) <= Number(item.barreiraValor))
+  const autoLow = lowBarriers.length && marketLow != null
+    ? lowBarriers.some((item) => Number(marketLow) <= Number(item.barreiraValor))
     : null
 
   const highOverride = override?.high && override.high !== 'auto' ? override.high === 'hit' : null
@@ -273,6 +585,12 @@ const resolveLegQuantity = (leg, fallback) => {
   return Number(fallback || 0)
 }
 
+const resolveLegSettlementSpot = (leg, globalSpotFinal) => {
+  const legSpot = toNumber(leg?.settlementSpotOverride ?? leg?.spotFinalOverride ?? leg?.spotFinal)
+  if (legSpot != null) return legSpot
+  return globalSpotFinal
+}
+
 export const getEffectiveLegs = (operation) => {
   const legs = Array.isArray(operation?.pernas) ? operation.pernas : []
   const booster = isBooster(operation?.estrutura)
@@ -360,6 +678,7 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
 
   const payoff = effectiveLegs.reduce((sum, leg) => {
     if (!isLegActive(leg, barrierStatus)) return sum
+    const legSpotFinal = resolveLegSettlementSpot(leg, spotFinal)
     const strike = resolveStrike(leg)
     const rawQty = resolveLegQuantity(leg, qtyBase)
     if (!rawQty) return sum
@@ -367,9 +686,9 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
     const tipo = (leg.tipo || '').toUpperCase()
     let intrinsic = 0
     if (tipo === 'CALL') {
-      intrinsic = Math.max(spotFinal - strike, 0)
+      intrinsic = Math.max(legSpotFinal - strike, 0)
     } else if (tipo === 'PUT') {
-      intrinsic = Math.max(strike - spotFinal, 0)
+      intrinsic = Math.max(strike - legSpotFinal, 0)
     }
     const side = (leg.side || 'long').toLowerCase() === 'short' ? -1 : 1
     const signedSide = rawQty < 0 ? side * -1 : side
@@ -381,6 +700,7 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
 
   const dividends = (market?.dividendsTotal || 0) * (qtyAtual || 0)
   const manualCouponBRL = toNumber(override?.manualCouponBRL ?? override?.manualCouponBrl)
+  const manualOptionsGainBRL = toNumber(override?.manualOptionsGainBRL ?? override?.manualOptionsGainBrl)
   const legacyCoupon = override?.manualCouponPct ?? override?.cupomManual ?? override?.cupomManualPct
   const legacyRaw = legacyCoupon != null && String(legacyCoupon).trim() !== '' ? String(legacyCoupon).trim() : null
   const legacyConvertible = legacyRaw && legacyRaw.includes('%') && custoTotal
@@ -400,20 +720,25 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
     return sum + Number(leg.rebate || 0) * qty
   }, 0)
 
-  if (isRecorrente) {
+  const optionsSuppressed = isRecorrente && manualOptionsGainBRL == null
+
+  if (optionsSuppressed) {
     ganhoCall = 0
     ganhoPut = 0
   }
-  const ganhosOpcoes = isRecorrente ? 0 : (ganhoCall + ganhoPut)
+  const ganhosOpcoesAuto = optionsSuppressed ? 0 : (ganhoCall + ganhoPut)
+  const ganhosOpcoes = manualOptionsGainBRL != null ? manualOptionsGainBRL : ganhosOpcoesAuto
+  const ganhosOpcoesSource = manualOptionsGainBRL != null ? 'manual' : optionsSuppressed ? 'suppressed' : 'auto'
 
   const debito = effectiveLegs.reduce((sum, leg) => {
     if (!isLegActive(leg, barrierStatus)) return sum
+    const legSpotFinal = resolveLegSettlementSpot(leg, spotFinal)
     const tipo = String(leg?.tipo || '').toUpperCase()
     if (tipo !== 'CALL' && tipo !== 'PUT') return sum
     if (!isShortLeg(leg)) return sum
     const strike = resolveStrike(leg)
     if (!Number.isFinite(strike) || strike <= 0) return sum
-    const liquidou = tipo === 'CALL' ? spotFinal >= strike : spotFinal <= strike
+    const liquidou = tipo === 'CALL' ? legSpotFinal >= strike : legSpotFinal <= strike
     if (!liquidou) return sum
     const qty = resolveDebitQuantity(leg, qtyBase)
     if (!qty) return sum
@@ -451,11 +776,12 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
     valorEntradaIncomplete: valorEntradaInfo.incomplete,
     valorEntradaComponents: valorEntradaInfo.components,
     debito: Number.isFinite(debito) ? debito : 0,
-    payoff: isRecorrente ? 0 : payoff,
+    payoff: optionsSuppressed ? 0 : payoff,
     ganhoCall,
     ganhoPut,
     ganhosOpcoes,
-    optionsSuppressed: isRecorrente,
+    ganhosOpcoesSource,
+    optionsSuppressed,
     dividends,
     cupomTotal,
     cupomSource: manualCouponBRL != null ? 'manual-brl' : legacyConverted ? 'legacy-percent' : legacyNeedsInput ? 'legacy-needs-input' : 'auto',

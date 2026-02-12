@@ -1,0 +1,37 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0C1320"/>
+      <stop offset="1" stop-color="#151D31"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="760" rx="24" fill="url(#bg)"/>
+  <rect x="68" y="64" width="1064" height="632" rx="22" fill="#121D30" stroke="#344864"/>
+  <rect x="100" y="102" width="1000" height="86" rx="14" fill="#1B2A44"/>
+  <text x="132" y="154" fill="#E3ECFA" font-family="Arial, sans-serif" font-size="24">Tags e vinculos</text>
+
+  <rect x="100" y="224" width="326" height="436" rx="14" fill="#0F1A2A" stroke="#2C405F"/>
+  <rect x="128" y="258" width="270" height="18" rx="9" fill="#283E5F"/>
+  <rect x="128" y="292" width="230" height="12" rx="6" fill="#21334F"/>
+  <rect x="128" y="314" width="242" height="12" rx="6" fill="#21334F"/>
+  <rect x="128" y="350" width="118" height="40" rx="20" fill="#103A5A" stroke="#2E688B"/>
+  <rect x="252" y="350" width="126" height="40" rx="20" fill="#274126" stroke="#507D4D"/>
+  <rect x="128" y="402" width="126" height="40" rx="20" fill="#4D3212" stroke="#8F683B"/>
+  <rect x="262" y="402" width="136" height="40" rx="20" fill="#4A1832" stroke="#8B3E66"/>
+  <rect x="128" y="454" width="270" height="172" rx="12" fill="#162843"/>
+
+  <rect x="452" y="224" width="648" height="436" rx="14" fill="#0F1A2A" stroke="#2C405F"/>
+  <rect x="482" y="260" width="588" height="46" rx="10" fill="#20314C"/>
+  <rect x="482" y="324" width="588" height="40" rx="9" fill="#1A2942"/>
+  <rect x="482" y="374" width="588" height="40" rx="9" fill="#1A2942"/>
+  <rect x="482" y="424" width="588" height="40" rx="9" fill="#1A2942"/>
+  <rect x="482" y="474" width="588" height="40" rx="9" fill="#1A2942"/>
+  <rect x="482" y="524" width="588" height="40" rx="9" fill="#1A2942"/>
+  <rect x="482" y="580" width="284" height="50" rx="11" fill="#173858"/>
+  <rect x="786" y="580" width="284" height="50" rx="11" fill="#193A5B"/>
+  <circle cx="510" cy="344" r="6" fill="#2CE0A7"/>
+  <circle cx="510" cy="394" r="6" fill="#2CE0A7"/>
+  <circle cx="510" cy="444" r="6" fill="#2CE0A7"/>
+  <circle cx="510" cy="494" r="6" fill="#EAC43A"/>
+  <circle cx="510" cy="544" r="6" fill="#FF6E86"/>
+</svg>

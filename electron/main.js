@@ -1,12 +1,22 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, globalShortcut, shell } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const path = require('path')
 const fs = require('fs/promises')
 const fsSync = require('fs')
 
 const isDev = !app.isPackaged
+const isDebugDevtools = process.env.OPEN_DEVTOOLS === '1'
+const DEFAULT_UPDATE_BASE_URL = 'https://xeo22it86oecxkxw.public.blob.vercel-storage.com/updates/win/'
 let mainWindow = null
-let updateState = { status: 'idle', message: '', progress: 0, info: null }
+let updateState = {
+  status: 'idle',
+  message: '',
+  progress: 0,
+  bytesPerSecond: 0,
+  transferred: 0,
+  total: 0,
+  info: null,
+}
 let updateFeedUrl = ''
 
 const STORAGE_KEYS = new Set([
@@ -120,15 +130,69 @@ const setUpdateState = (next) => {
   }
 }
 
+const sendToWindow = (channel, payload) => {
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send(channel, payload)
+  }
+}
+
+const normalizeBaseUrl = (value) => {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const withProtocol = raw.includes('://') ? raw : `https://${raw}`
+  const normalized = withProtocol.endsWith('/') ? withProtocol : `${withProtocol}/`
+  return normalized
+}
+
+const isValidBaseUrl = (value) => {
+  if (!value) return false
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
+const getDefaultUpdateBaseUrl = () => {
+  try {
+    const pkgPath = path.join(app.getAppPath(), 'package.json')
+    const pkg = require(pkgPath)
+    const publish = pkg?.build?.publish
+    if (Array.isArray(publish)) {
+      const entry = publish.find((item) => item?.provider === 'generic' && item?.url) || publish[0]
+      return normalizeBaseUrl(entry?.url || '')
+    }
+    if (publish?.url) return normalizeBaseUrl(publish.url)
+  } catch {
+    // noop
+  }
+  return ''
+}
+
+const resolveUpdateUrls = async () => {
+  const config = await loadConfig()
+  const envUrl = normalizeBaseUrl(process.env.UPDATE_BASE_URL)
+  const customUrl = normalizeBaseUrl(config.updateBaseUrl)
+  const defaultUrl = normalizeBaseUrl(getDefaultUpdateBaseUrl() || DEFAULT_UPDATE_BASE_URL)
+  const effectiveUrl = (isValidBaseUrl(envUrl) && envUrl) ||
+    (isValidBaseUrl(customUrl) && customUrl) ||
+    (isValidBaseUrl(defaultUrl) && defaultUrl) ||
+    ''
+  return {
+    customUrl: isValidBaseUrl(customUrl) ? customUrl : '',
+    defaultUrl: isValidBaseUrl(defaultUrl) ? defaultUrl : '',
+    effectiveUrl,
+  }
+}
+
 const ensureUpdateFeed = async () => {
   if (isDev) return ''
-  const config = await loadConfig()
-  const base = process.env.UPDATE_BASE_URL || config.updateBaseUrl
-  if (!base) return ''
-  const normalized = base.endsWith('/') ? base : `${base}/`
-  updateFeedUrl = normalized
-  autoUpdater.setFeedURL({ provider: 'generic', url: normalized })
-  return normalized
+  const { effectiveUrl } = await resolveUpdateUrls()
+  if (!effectiveUrl) return ''
+  updateFeedUrl = effectiveUrl
+  autoUpdater.setFeedURL({ provider: 'generic', url: effectiveUrl })
+  return effectiveUrl
 }
 
 const setupAutoUpdater = async () => {
@@ -140,27 +204,79 @@ const setupAutoUpdater = async () => {
   autoUpdater.autoDownload = false
 
   autoUpdater.on('checking-for-update', () => {
-    setUpdateState({ status: 'checking', message: 'Verificando atualizacoes...' })
+    sendToWindow('update:state', { state: 'checking' })
+    setUpdateState({
+      status: 'checking',
+      message: 'Verificando atualizacoes...',
+      progress: 0,
+      bytesPerSecond: 0,
+      transferred: 0,
+      total: 0,
+    })
   })
 
   autoUpdater.on('update-available', (info) => {
-    setUpdateState({ status: 'available', info, message: 'Atualizacao disponivel.' })
+    sendToWindow('update:state', { state: 'available', info })
+    setUpdateState({
+      status: 'available',
+      info,
+      message: 'Atualizacao disponivel.',
+      progress: 0,
+      bytesPerSecond: 0,
+      transferred: 0,
+      total: 0,
+    })
   })
 
   autoUpdater.on('update-not-available', (info) => {
-    setUpdateState({ status: 'not-available', info, message: 'Nenhuma atualizacao encontrada.' })
+    sendToWindow('update:state', { state: 'not-available', info })
+    setUpdateState({
+      status: 'not-available',
+      info,
+      message: 'Nenhuma atualizacao encontrada.',
+      progress: 0,
+      bytesPerSecond: 0,
+      transferred: 0,
+      total: 0,
+    })
   })
 
   autoUpdater.on('download-progress', (progress) => {
-    setUpdateState({ status: 'downloading', progress: progress?.percent ?? 0, message: 'Baixando atualizacao...' })
+    sendToWindow('update:download-progress', progress)
+    const percent = Number.isFinite(progress?.percent) ? progress.percent : 0
+    setUpdateState({
+      status: 'downloading',
+      progress: percent,
+      bytesPerSecond: Number.isFinite(progress?.bytesPerSecond) ? progress.bytesPerSecond : 0,
+      transferred: Number.isFinite(progress?.transferred) ? progress.transferred : 0,
+      total: Number.isFinite(progress?.total) ? progress.total : 0,
+      message: 'Baixando atualizacao...',
+    })
   })
 
   autoUpdater.on('update-downloaded', (info) => {
-    setUpdateState({ status: 'downloaded', info, message: 'Atualizacao pronta para instalar.' })
+    sendToWindow('update:state', { state: 'downloaded', info })
+    setUpdateState({
+      status: 'downloaded',
+      info,
+      message: 'Atualizacao pronta para instalar.',
+      progress: 100,
+      bytesPerSecond: 0,
+      transferred: updateState.total || updateState.transferred,
+      total: updateState.total || updateState.transferred,
+    })
   })
 
   autoUpdater.on('error', (error) => {
-    setUpdateState({ status: 'error', message: error?.message || 'Falha ao atualizar.' })
+    sendToWindow('update:state', { state: 'error', message: String(error) })
+    setUpdateState({
+      status: 'error',
+      message: error?.message || 'Falha ao atualizar.',
+      progress: 0,
+      bytesPerSecond: 0,
+      transferred: 0,
+      total: 0,
+    })
   })
 
   await ensureUpdateFeed()
@@ -171,12 +287,14 @@ const createWindow = () => {
     width: 1300,
     height: 820,
     backgroundColor: '#0b0f17',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
+  win.setMenuBarVisibility(false)
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL
   if (isDev && devServerUrl) {
@@ -184,12 +302,32 @@ const createWindow = () => {
   } else {
     win.loadFile(path.join(__dirname, '..', 'pwr', 'dist', 'index.html'))
   }
+  if (isDebugDevtools) {
+    win.webContents.once('did-finish-load', () => {
+      if (!win.isDestroyed()) {
+        win.webContents.openDevTools({ mode: 'detach' })
+      }
+    })
+  }
   return win
 }
 
 app.whenReady().then(async () => {
+  if (process.platform === 'win32') {
+    Menu.setApplicationMenu(null)
+  }
   mainWindow = createWindow()
   await setupAutoUpdater()
+
+  if (isDebugDevtools) {
+    const toggle = () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.toggleDevTools()
+      }
+    }
+    globalShortcut.register('F12', toggle)
+    globalShortcut.register('CommandOrControl+Shift+I', toggle)
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -200,6 +338,26 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('will-quit', () => {
+  if (isDebugDevtools) {
+    globalShortcut.unregisterAll()
+  }
+})
+
+ipcMain.handle('app:getVersion', () => app.getVersion())
+
+ipcMain.handle('open-external', async (_event, url) => {
+  if (typeof url === 'string' && (url.startsWith('https://') || url.startsWith('http://'))) {
+    await shell.openExternal(url)
+  }
+})
+
+ipcMain.handle('pwr:openExternal', async (_event, url) => {
+  if (!url || typeof url !== 'string') return false
+  await shell.openExternal(url)
+  return true
 })
 
 ipcMain.handle('select-folder', async () => {
@@ -280,11 +438,31 @@ ipcMain.handle('config:selectWorkDir', async () => {
 
 ipcMain.handle('updates:getStatus', async () => updateState)
 
+ipcMain.handle('updates:getUrls', async () => {
+  return resolveUpdateUrls()
+})
+
+ipcMain.handle('updates:setUrl', async (_event, url) => {
+  const normalized = normalizeBaseUrl(url)
+  if (normalized && !isValidBaseUrl(normalized)) {
+    return { ok: false, message: 'URL de atualizacao invalida.' }
+  }
+  await saveConfig({ updateBaseUrl: normalized })
+  await ensureUpdateFeed()
+  return { ok: true, urls: await resolveUpdateUrls() }
+})
+
+ipcMain.handle('updates:resetUrl', async () => {
+  await saveConfig({ updateBaseUrl: '' })
+  await ensureUpdateFeed()
+  return { ok: true, urls: await resolveUpdateUrls() }
+})
+
 ipcMain.handle('updates:check', async () => {
   if (isDev) return { status: 'disabled', message: 'Atualizacoes desativadas em DEV.' }
   const feed = await ensureUpdateFeed()
   if (!feed) {
-    setUpdateState({ status: 'error', message: 'UPDATE_BASE_URL nao configurado.' })
+    setUpdateState({ status: 'error', message: 'URL de atualizacao nao configurada.' })
     return updateState
   }
   try {
@@ -302,7 +480,7 @@ ipcMain.handle('updates:download', async () => {
   if (isDev) return { status: 'disabled', message: 'Atualizacoes desativadas em DEV.' }
   const feed = await ensureUpdateFeed()
   if (!feed) {
-    setUpdateState({ status: 'error', message: 'UPDATE_BASE_URL nao configurado.' })
+    setUpdateState({ status: 'error', message: 'URL de atualizacao nao configurada.' })
     return updateState
   }
   try {

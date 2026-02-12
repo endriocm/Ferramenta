@@ -14,8 +14,8 @@ import { normalizeDateKey } from '../utils/dateKey'
 import { fetchYahooMarketData, normalizeYahooSymbol } from '../services/marketData'
 import { exportXlsx } from '../services/exportXlsx'
 import { buildDividendKey, clearDividendsCache, fetchDividend, fetchDividendsBatch } from '../services/dividends'
-import { computeBarrierStatus, computeResult, getEffectiveLegs } from '../services/settlement'
-import { clearOverride, loadOverrides, saveOverrides, updateOverride } from '../services/overrides'
+import { applyOverridesToOperation, computeBarrierStatus, computeResult, getEffectiveLegs, getLegOverrideKey } from '../services/settlement'
+import { loadOverrides, saveOverrides, updateOverride } from '../services/overrides'
 import { parseWorkbook, parseWorkbookBuffer } from '../services/excel'
 import { exportReportPdf, exportVencimentosReportPdf } from '../services/pdf'
 import { getCurrentUserKey } from '../services/currentUser'
@@ -164,11 +164,11 @@ const resolveBarrierLevels = (legs, hasBarrier = true) => {
   let ko = null
   ;(legs || []).forEach((leg) => {
     if (leg?.barreiraValor == null) return
-    const type = String(leg?.barreiraTipo || '').toUpperCase()
+    const type = normalizeBarrierTypeInput(leg?.barreiraTipo)
     const value = toOptionalNumber(leg.barreiraValor)
     if (value == null) return
-    const isKi = type.includes('KI') || type.includes('IN') || type.endsWith('I')
-    const isKo = type.includes('KO') || type.includes('OUT') || type.endsWith('O')
+    const isKi = type === 'KI' || type === 'UI'
+    const isKo = type === 'KO' || type === 'UO'
     if (isKi && ki == null) ki = value
     if (isKo && ko == null) ko = value
   })
@@ -217,6 +217,409 @@ const parseQuantity = (value) => {
   const cleaned = String(value).trim().replace(/\s+/g, '').replace(',', '.')
   const parsed = Number(cleaned)
   return Number.isFinite(parsed) ? parsed : 0
+}
+
+const parseLocaleNumber = (value) => {
+  if (value == null || value === '') return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  const raw = String(value).trim()
+  if (!raw) return null
+  let cleaned = raw.replace(/[^\d,.-]/g, '')
+  const hasComma = cleaned.includes(',')
+  const hasDot = cleaned.includes('.')
+  if (hasComma && hasDot) {
+    if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
+      cleaned = cleaned.replace(/\./g, '').replace(/,/g, '.')
+    } else {
+      cleaned = cleaned.replace(/,/g, '')
+    }
+  } else if (hasComma) {
+    cleaned = cleaned.replace(/,/g, '.')
+  }
+  const parsed = Number(cleaned)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const normalizeDateInput = (value) => {
+  if (value == null) return null
+  const normalized = normalizeDateKey(String(value).trim())
+  return normalized || null
+}
+
+const normalizeBarrierTypeInput = (value) => {
+  if (value == null) return null
+  const raw = String(value).trim().toUpperCase()
+  if (!raw || raw === 'AUTO') return null
+  if (raw === 'NONE' || raw === 'SEM BARREIRA' || raw === 'SEM_BARRERA' || raw === 'NO_BARRIER') return 'NONE'
+  if (raw === 'UI' || raw === 'UO' || raw === 'KI' || raw === 'KO') return raw
+  if (raw === 'DI') return 'KI'
+  if (raw === 'DO') return 'KO'
+  const isUp = raw.includes('UP') || raw.startsWith('U')
+  const isDown = raw.includes('DOWN') || raw.startsWith('D')
+  const isOut = raw.includes('OUT') || raw.endsWith('O')
+  const isIn = raw.includes('IN') || raw.endsWith('I')
+  if (isUp && isOut) return 'UO'
+  if (isUp && isIn) return 'UI'
+  if (isDown && isOut) return 'KO'
+  if (isDown && isIn) return 'KI'
+  if (raw === 'OUT' || isOut) return 'KO'
+  if (raw === 'IN' || isIn) return 'KI'
+  return null
+}
+
+const normalizeOptionSideInput = (value) => {
+  if (value == null) return null
+  const raw = String(value).trim().toUpperCase()
+  if (raw === 'CALL' || raw === 'PUT') return raw
+  return null
+}
+
+const isExplicitBarrierTypeInput = (value) => {
+  const normalized = normalizeBarrierTypeInput(value)
+  return normalized === 'UI' || normalized === 'UO' || normalized === 'KI' || normalized === 'KO'
+}
+
+const describeBarrierType = (value) => {
+  const normalized = normalizeBarrierTypeInput(value)
+  if (!normalized) return { key: 'auto', label: 'Sem alteracao (importado)', direction: null, mode: null }
+  if (normalized === 'NONE') return { key: 'none', label: 'Sem barreira', direction: null, mode: null }
+  if (normalized === 'UI') return { key: 'UI', label: 'Alta • Ativação (UI)', direction: 'high', mode: 'in' }
+  if (normalized === 'UO') return { key: 'UO', label: 'Alta • Desativação (UO)', direction: 'high', mode: 'out' }
+  if (normalized === 'KI') return { key: 'KI', label: 'Queda • Ativação (KI)', direction: 'low', mode: 'in' }
+  return { key: 'KO', label: 'Queda • Desativação (KO)', direction: 'low', mode: 'out' }
+}
+
+const getLegStrike = (leg) => {
+  return toOptionalNumber(leg?.strikeAjustado ?? leg?.strikeAdjusted ?? leg?.strike ?? leg?.precoStrike)
+}
+
+let structureEntrySeq = 0
+
+const nextStructureEntryId = () => {
+  structureEntrySeq += 1
+  return `se-${structureEntrySeq}`
+}
+
+const toDraftFieldValue = (value) => {
+  if (value == null) return ''
+  return String(value)
+}
+
+const createStructureEntryDraft = (input = {}) => {
+  const normalizedType = normalizeBarrierTypeInput(input?.barrierTypeOverride)
+  const normalizedExpiry = normalizeDateInput(input?.optionExpiryDateOverride)
+  return {
+    id: input?.id || nextStructureEntryId(),
+    legKey: input?.legKey != null ? String(input.legKey) : '',
+    optionSide: normalizeOptionSideInput(input?.optionSide) || '',
+    optionQtyOverride: toDraftFieldValue(input?.optionQtyOverride),
+    strikeOverride: toDraftFieldValue(input?.strikeOverride),
+    barrierTypeOverride: normalizedType || '',
+    barrierValueOverride: toDraftFieldValue(input?.barrierValueOverride),
+    optionExpiryDateOverride: normalizedExpiry || '',
+  }
+}
+
+const hasStructureEntryInput = (entry) => {
+  if (!entry || typeof entry !== 'object') return false
+  return Boolean(
+    String(entry.optionQtyOverride ?? '').trim()
+    || String(entry.strikeOverride ?? '').trim()
+    || String(entry.barrierTypeOverride ?? '').trim()
+    || String(entry.barrierValueOverride ?? '').trim()
+    || String(entry.optionExpiryDateOverride ?? '').trim()
+  )
+}
+
+const resolveStructureEntryTarget = (structureMeta, entry) => {
+  const rawLegKey = String(entry?.legKey ?? '').trim()
+  const defaultLegKey = !rawLegKey && !structureMeta?.requiresLegSelection ? (structureMeta?.defaultLegKey || '') : ''
+  const legKey = rawLegKey || defaultLegKey
+  const legMetaByKey = structureMeta?.legMetaByKey && typeof structureMeta.legMetaByKey === 'object'
+    ? structureMeta.legMetaByKey
+    : {}
+  const legMeta = legKey ? legMetaByKey[legKey] || null : null
+  return { legKey, legMeta }
+}
+
+const pickNextStructureLegKey = (structureMeta, entries = []) => {
+  const options = Array.isArray(structureMeta?.legOptions) ? structureMeta.legOptions : []
+  if (!options.length) return ''
+  const used = new Set(
+    (entries || [])
+      .map((entry) => String(entry?.legKey || '').trim())
+      .filter(Boolean),
+  )
+  const next = options.find((option) => !used.has(option.value)) || options[0]
+  return next?.value || ''
+}
+
+const buildEmptyStructureEntry = (structureMeta, entries = []) => {
+  const legKey = pickNextStructureLegKey(structureMeta, entries)
+  const optionSide = legKey
+    ? normalizeOptionSideInput(structureMeta?.legMetaByKey?.[legKey]?.optionSide)
+    : normalizeOptionSideInput(structureMeta?.defaultOptionSide)
+  return createStructureEntryDraft({
+    legKey,
+    optionSide: optionSide || '',
+  })
+}
+
+const normalizeStructureDraftEntries = (entries, structureMeta) => {
+  const list = Array.isArray(entries)
+    ? entries.map((entry) => createStructureEntryDraft(entry))
+    : []
+  if (list.length) return list
+  return structureMeta?.hasStructureFields ? [buildEmptyStructureEntry(structureMeta)] : []
+}
+
+const buildStructureEntriesFromOverride = (override, structureMeta) => {
+  const entries = []
+  const pushEntry = (value, keyHint = null) => {
+    if (!value || typeof value !== 'object') return
+    const structure = value.structure && typeof value.structure === 'object' ? value.structure : null
+    const legKeyRaw = value.legKey ?? structure?.target?.legKey ?? keyHint
+    const legKey = legKeyRaw != null ? String(legKeyRaw).trim() : ''
+    const optionSide = normalizeOptionSideInput(
+      value.optionSide
+      ?? value.optionType
+      ?? value.tipo
+      ?? structure?.target?.side
+      ?? structure?.side
+      ?? structureMeta?.legMetaByKey?.[legKey]?.optionSide,
+    )
+    const optionQtyOverride = value.optionQtyOverride
+      ?? value.optionQty
+      ?? value.quantidadeOpcaoOverride
+      ?? structure?.optionQty
+      ?? structure?.qty
+    const strikeOverride = value.strikeOverride ?? value.strike ?? structure?.strike
+    const barrierTypeOverride = normalizeBarrierTypeInput(
+      value.barrierTypeOverride
+      ?? value.barreiraTipoOverride
+      ?? value.barreiraTipo
+      ?? structure?.barrierType
+      ?? structure?.tipoBarreira,
+    )
+    const barrierValueOverride = value.barrierValueOverride
+      ?? value.barreiraValorOverride
+      ?? structure?.barrierValue
+      ?? structure?.barreiraValor
+    const optionExpiryDateOverride = normalizeDateInput(
+      value.optionExpiryDateOverride
+      ?? value.optionExpiryDate
+      ?? value.vencimentoOpcaoOverride
+      ?? value.vencimentoOpcao
+      ?? structure?.optionExpiryDate
+      ?? structure?.vencimentoOpcao,
+    )
+    const entry = createStructureEntryDraft({
+      legKey,
+      optionSide: optionSide || '',
+      optionQtyOverride,
+      strikeOverride,
+      barrierTypeOverride: barrierTypeOverride || '',
+      barrierValueOverride,
+      optionExpiryDateOverride: optionExpiryDateOverride || '',
+    })
+    if (hasStructureEntryInput(entry)) {
+      entries.push(entry)
+    }
+  }
+
+  const legsOverride = override?.legs && typeof override.legs === 'object' ? override.legs : null
+  if (legsOverride) {
+    Object.entries(legsOverride).forEach(([key, value]) => pushEntry(value, key))
+  }
+
+  const structureByLeg = !entries.length && override?.structureByLeg && typeof override.structureByLeg === 'object'
+    ? override.structureByLeg
+    : null
+  if (structureByLeg) {
+    Object.entries(structureByLeg).forEach(([key, value]) => pushEntry(value, key))
+  }
+
+  if (!entries.length) {
+    pushEntry(override)
+  }
+
+  if (entries.length) return entries
+  return normalizeStructureDraftEntries([], structureMeta)
+}
+
+const buildStructureMeta = (row) => {
+  const legs = Array.isArray(row?.pernas) ? row.pernas : []
+  const optionLegs = legs.filter((leg) => {
+    const tipo = normalizeOptionSideInput(leg?.tipo)
+    return tipo === 'CALL' || tipo === 'PUT'
+  })
+  const sourceLegs = optionLegs.length ? optionLegs : legs
+  const qtyBaseHint = row?.qtyBase != null && Number.isFinite(Number(row.qtyBase)) && Number(row.qtyBase) > 0
+    ? Number(row.qtyBase)
+    : null
+  const sideCount = new Map()
+
+  const legOptions = sourceLegs.map((leg, fallbackIndex) => {
+    const absoluteIndex = legs.indexOf(leg)
+    const safeIndex = absoluteIndex >= 0 ? absoluteIndex : fallbackIndex
+    const optionSide = normalizeOptionSideInput(leg?.tipo)
+    const sideKey = optionSide || 'LEG'
+    const nextCount = (sideCount.get(sideKey) || 0) + 1
+    sideCount.set(sideKey, nextCount)
+    const optionQtyCurrentRaw = leg?.quantidade
+    const optionQtyCurrent = optionQtyCurrentRaw != null && Number.isFinite(Number(optionQtyCurrentRaw))
+      ? Math.abs(Number(optionQtyCurrentRaw))
+      : null
+    const strikeCurrent = getLegStrike(leg)
+    const hasBarrierField = (
+      leg?.barreiraValor != null
+      || String(leg?.barreiraTipo || '').trim() !== ''
+      || optionSide === 'CALL'
+      || optionSide === 'PUT'
+    )
+    const barrierValueCurrent = leg?.barreiraValor != null ? toOptionalNumber(leg?.barreiraValor) : null
+    const barrierTypeCurrent = normalizeBarrierTypeInput(leg?.barreiraTipo) || null
+    const barrierTypeCurrentLabel = describeBarrierType(barrierTypeCurrent).label
+    const optionExpiryDateCurrent = normalizeDateInput(
+      leg?.optionExpiryDateOverride
+      ?? leg?.optionExpiryDate
+      ?? leg?.vencimentoOpcao
+      ?? row?.vencimento,
+    )
+    const legKey = getLegOverrideKey(leg, safeIndex)
+    const baseLabel = optionSide || 'PERNA'
+    const label = nextCount > 1 ? `${baseLabel} ${nextCount}` : baseLabel
+    const optionQtySuggestion = qtyBaseHint != null ? qtyBaseHint : optionQtyCurrent
+    return {
+      value: legKey,
+      label,
+      legKey,
+      optionSide: optionSide || null,
+      hasOptionQty: optionSide === 'CALL' || optionSide === 'PUT',
+      hasStrike: strikeCurrent != null || optionSide === 'CALL' || optionSide === 'PUT',
+      hasBarrierValue: hasBarrierField,
+      hasBarrierType: hasBarrierField,
+      optionQtyCurrent,
+      optionQtySuggestion,
+      strikeCurrent,
+      barrierValueCurrent,
+      barrierTypeCurrent,
+      barrierTypeCurrentLabel,
+      optionExpiryDateCurrent,
+    }
+  })
+
+  const legMetaByKey = legOptions.reduce((acc, option) => {
+    acc[option.legKey] = option
+    return acc
+  }, {})
+
+  const sideMap = legOptions.reduce((acc, option) => {
+    const side = normalizeOptionSideInput(option.optionSide)
+    if (!side) return acc
+    acc.set(side, (acc.get(side) || 0) + 1)
+    return acc
+  }, new Map())
+  const sideOptions = Array.from(sideMap.entries()).map(([value, count]) => ({
+    value,
+    label: count > 1 ? `${value} (${count})` : value,
+  }))
+  const requiresLegSelection = legOptions.length > 1
+  const defaultLegKey = legOptions.length === 1 ? legOptions[0].value : ''
+  const defaultOptionSide = legOptions.length === 1 ? normalizeOptionSideInput(legOptions[0].optionSide) : null
+  const selectedLeg = defaultLegKey ? legMetaByKey[defaultLegKey] : null
+
+  return {
+    hasStructureFields: legOptions.length > 0,
+    hasOptionQty: legOptions.some((option) => option.hasOptionQty),
+    hasStrike: legOptions.some((option) => option.hasStrike),
+    hasBarrierValue: legOptions.some((option) => option.hasBarrierValue),
+    hasBarrierType: legOptions.some((option) => option.hasBarrierType),
+    optionQtyCurrent: selectedLeg?.optionQtyCurrent ?? null,
+    optionQtySuggestion: selectedLeg?.optionQtySuggestion ?? null,
+    strikeCurrent: selectedLeg?.strikeCurrent ?? null,
+    barrierValueCurrent: selectedLeg?.barrierValueCurrent ?? null,
+    barrierTypeCurrent: selectedLeg?.barrierTypeCurrent ?? null,
+    barrierTypeCurrentLabel: selectedLeg?.barrierTypeCurrentLabel || 'Sem alteracao (importado)',
+    legOptions,
+    legMetaByKey,
+    requiresLegSelection,
+    defaultLegKey,
+    sideOptions,
+    requiresOptionSide: sideOptions.length > 1,
+    defaultOptionSide,
+    targetLegKey: defaultLegKey || null,
+  }
+}
+
+const hasStructureParamOverride = (override) => {
+  if (!override || typeof override !== 'object') return false
+  if (
+    override?.optionQtyOverride != null
+    || override?.optionExpiryDateOverride != null
+    || override?.strikeOverride != null
+    || override?.barrierValueOverride != null
+    || override?.barrierTypeOverride != null
+  ) {
+    return true
+  }
+  if (
+    override?.structure?.optionQty != null
+    || override?.structure?.optionExpiryDate != null
+    || override?.structure?.strike != null
+    || override?.structure?.barrierValue != null
+    || (override?.structure?.barrierType && String(override.structure.barrierType).toLowerCase() !== 'auto')
+  ) {
+    return true
+  }
+  const legs = override?.legs && typeof override.legs === 'object' ? Object.values(override.legs) : []
+  if (legs.some((entry) => entry?.optionQtyOverride != null || entry?.optionExpiryDateOverride != null || entry?.strikeOverride != null || entry?.barrierValueOverride != null || entry?.barrierTypeOverride != null)) {
+    return true
+  }
+  const structureByLeg = override?.structureByLeg && typeof override.structureByLeg === 'object'
+    ? Object.values(override.structureByLeg)
+    : []
+  return structureByLeg.some((entry) => entry?.optionQty != null || entry?.optionExpiryDate != null || entry?.strike != null || entry?.barrierValue != null || entry?.barrierType != null)
+}
+
+const EMPTY_OVERRIDE_DRAFT = {
+  schemaVersion: 2,
+  high: 'auto',
+  low: 'auto',
+  manualCouponBRL: '',
+  manualOptionsGainBRL: '',
+  structureEntries: [],
+  optionQtyOverride: '',
+  optionExpiryDateOverride: '',
+  strikeOverride: '',
+  barrierValueOverride: '',
+  barrierTypeOverride: '',
+  optionSide: '',
+  legKey: '',
+  legacyBarrierType: false,
+  qtyBonus: 0,
+  bonusDate: '',
+  bonusNote: '',
+}
+
+const EMPTY_OVERRIDE_VALUE = {
+  schemaVersion: 2,
+  high: 'auto',
+  low: 'auto',
+  manualCouponBRL: null,
+  manualCouponPct: null,
+  manualOptionsGainBRL: null,
+  optionQtyOverride: null,
+  optionExpiryDateOverride: null,
+  strikeOverride: null,
+  barrierValueOverride: null,
+  barrierTypeOverride: null,
+  optionSide: null,
+  legKey: null,
+  legacyBarrierType: false,
+  qtyBonus: 0,
+  bonusDate: '',
+  bonusNote: '',
 }
 
 const formatMonthName = (year, month) => {
@@ -434,6 +837,53 @@ const resolveSpotBase = (operation, market) => {
   return null
 }
 
+const buildLegSettlementLookupKey = (operationId, legKey, expiryDate) => `${operationId}:${legKey}:${expiryDate}`
+
+const resolveLegExpiryDate = (leg) => normalizeDateInput(
+  leg?.optionExpiryDateOverride
+  ?? leg?.optionExpiryDate
+  ?? leg?.vencimentoOpcaoOverride
+  ?? leg?.vencimentoOpcao,
+)
+
+const withLegSettlementSpots = (operation, optionSettlementCloseMap) => {
+  if (!operation || typeof operation !== 'object') return operation
+  const legs = Array.isArray(operation?.pernas) ? operation.pernas : []
+  if (!legs.length) return operation
+  let changed = false
+  const nextLegs = legs.map((leg, index) => {
+    if (!leg || typeof leg !== 'object') return leg
+    const expiryDate = resolveLegExpiryDate(leg)
+    const legKey = getLegOverrideKey(leg, index)
+    const lookupKey = expiryDate ? buildLegSettlementLookupKey(operation?.id, legKey, expiryDate) : null
+    const settlementSpot = lookupKey ? toOptionalNumber(optionSettlementCloseMap?.[lookupKey]) : null
+    const currentSpot = toOptionalNumber(leg?.settlementSpotOverride)
+
+    if (settlementSpot == null) {
+      if (currentSpot != null) {
+        changed = true
+        const nextLeg = { ...leg }
+        delete nextLeg.settlementSpotOverride
+        return nextLeg
+      }
+      return leg
+    }
+
+    if (currentSpot == null || Math.abs(currentSpot - settlementSpot) > 1e-9) {
+      changed = true
+      return { ...leg, settlementSpotOverride: settlementSpot }
+    }
+
+    return leg
+  })
+
+  if (!changed) return operation
+  return {
+    ...operation,
+    pernas: nextLegs,
+  }
+}
+
 const Vencimento = () => {
   const { notify } = useToast()
   const { selectedBroker, selectedAssessor, clientCodeFilter, setClientCodeFilter, tagsIndex } = useGlobalFilters()
@@ -449,10 +899,12 @@ const Vencimento = () => {
   })
   const [operations, setOperations] = useState(vencimentos)
   const [marketMap, setMarketMap] = useState({})
+  const [optionSettlementCloseMap, setOptionSettlementCloseMap] = useState({})
   const [overrides, setOverrides] = useState(() => loadOverrides(userKey))
   const [selectedReport, setSelectedReport] = useState(null)
   const [selectedOverride, setSelectedOverride] = useState(null)
-  const [overrideDraft, setOverrideDraft] = useState({ high: 'auto', low: 'auto', manualCouponBRL: '', qtyBonus: 0, bonusDate: '', bonusNote: '' })
+  const [overrideDraft, setOverrideDraft] = useState(EMPTY_OVERRIDE_DRAFT)
+  const [overrideErrors, setOverrideErrors] = useState({})
   const [reportDate, setReportDate] = useState('')
   const [dividendAdjustments, setDividendAdjustments] = useState(new Map())
   const [dividendStatus, setDividendStatus] = useState({ loading: false, error: '' })
@@ -468,6 +920,7 @@ const Vencimento = () => {
   const [isExporting, setIsExporting] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const fileInputRef = useRef(null)
+  const rowCacheRef = useRef(new Map())
   const broadcastRef = useRef(null)
   const tabIdRef = useRef(Math.random().toString(36).slice(2))
   const restoreRef = useRef({ running: false })
@@ -813,6 +1266,73 @@ const Vencimento = () => {
 
   useEffect(() => {
     let active = true
+    const loadOptionSettlementCloses = async () => {
+      const requests = []
+      const marketRequests = new Map()
+
+      operations.forEach((operation) => {
+        const override = overrides[operation?.id] || EMPTY_OVERRIDE_VALUE
+        if (!operation?.id || !operation?.ativo || !operation?.dataRegistro) return
+        const startDate = normalizeDateKey(operation?.dataRegistro)
+        if (!startDate) return
+
+        const operationEffective = applyOverridesToOperation(operation, override)
+        const legs = Array.isArray(operationEffective?.pernas) ? operationEffective.pernas : []
+        legs.forEach((leg, index) => {
+          const expiryDate = resolveLegExpiryDate(leg)
+          if (!expiryDate) return
+          if (startDate > expiryDate) return
+          const legKey = getLegOverrideKey(leg, index)
+          const lookupKey = buildLegSettlementLookupKey(operation.id, legKey, expiryDate)
+          const marketKey = `${normalizeYahooSymbol(operation.ativo)}:${startDate}:${expiryDate}`
+          requests.push({ lookupKey, marketKey })
+          if (!marketRequests.has(marketKey)) {
+            marketRequests.set(marketKey, {
+              symbol: operation.ativo,
+              startDate,
+              endDate: expiryDate,
+            })
+          }
+        })
+      })
+
+      if (!requests.length) {
+        if (active) setOptionSettlementCloseMap({})
+        return
+      }
+
+      const marketResponses = await mapWithConcurrency(
+        Array.from(marketRequests.entries()),
+        SPOT_CONCURRENCY,
+        async ([marketKey, request]) => {
+          try {
+            const market = await fetchYahooMarketData(request)
+            return [marketKey, toOptionalNumber(market?.close)]
+          } catch {
+            return [marketKey, null]
+          }
+        },
+      )
+
+      if (!active) return
+
+      const closeByMarketKey = new Map(marketResponses)
+      const next = {}
+      requests.forEach(({ lookupKey, marketKey }) => {
+        const close = closeByMarketKey.get(marketKey)
+        if (close != null) next[lookupKey] = close
+      })
+      setOptionSettlementCloseMap(next)
+    }
+
+    loadOptionSettlementCloses()
+    return () => {
+      active = false
+    }
+  }, [operations, overrides])
+
+  useEffect(() => {
+    let active = true
     const run = async () => {
       if (!reportDate) {
         setDividendAdjustments(new Map())
@@ -944,7 +1464,7 @@ const Vencimento = () => {
   const buildRow = useCallback((operation) => {
     const market = marketMap[operation.id]
     const dividendInfo = dividendAdjustments.get(operation.id)
-    const override = overrides[operation.id] || { high: 'auto', low: 'auto', manualCouponBRL: null, manualCouponPct: null, qtyBonus: 0, bonusDate: '', bonusNote: '' }
+    const override = overrides[operation.id] || EMPTY_OVERRIDE_VALUE
     const qtyBase = parseQuantity(operation.qtyBase ?? operation.quantidade ?? 0)
     const qtyAtualRaw = operation.qtyAtual ?? operation.quantidadeAtual
     const qtyAtualSource = parseQuantity(qtyAtualRaw)
@@ -966,7 +1486,9 @@ const Vencimento = () => {
     const operationWithSpot = spotBase != null
       ? { ...operation, spotInicial: spotBase, qtyBase, qtyBonus, qtyAtual, pernas: adjustedLegs }
       : { ...operation, qtyBase, qtyBonus, qtyAtual, pernas: adjustedLegs }
-    const barrierStatus = computeBarrierStatus(operationWithSpot, market, override)
+    const operationEffectiveRaw = applyOverridesToOperation(operationWithSpot, override)
+    const operationEffective = withLegSettlementSpots(operationEffectiveRaw, optionSettlementCloseMap)
+    const barrierStatus = computeBarrierStatus(operationEffective, market, override)
     const manualCouponBRL = override?.manualCouponBRL != null && Number.isFinite(Number(override.manualCouponBRL))
       ? Number(override.manualCouponBRL)
       : null
@@ -974,10 +1496,10 @@ const Vencimento = () => {
     const cupomResolved = manualCouponBRL != null
       ? formatCurrency(manualCouponBRL)
       : (legacyCouponLabel || operation.cupom || 'N/A')
-    const result = computeResult(operationWithSpot, market, barrierStatus, override)
-    const effectiveLegs = result.effectiveLegs || getEffectiveLegs(operationWithSpot)
+    const result = computeResult(operationEffective, market, barrierStatus, override)
+    const effectiveLegs = result.effectiveLegs || getEffectiveLegs(operationEffective)
     return {
-      ...operation,
+      ...operationEffective,
       qtyBase,
       qtyBonus,
       qtyAtual,
@@ -994,12 +1516,44 @@ const Vencimento = () => {
       dividendSource: dividendInfo?.source || null,
       status: getStatus(operation.vencimento),
     }
-  }, [applyDividendAdjustments, dividendAdjustments, marketMap, overrides])
+  }, [applyDividendAdjustments, dividendAdjustments, marketMap, optionSettlementCloseMap, overrides])
 
-  const mappedRows = useMemo(
-    () => enrichedOperations.map((operation) => buildRow(operation)),
-    [enrichedOperations, buildRow],
-  )
+  const mappedRows = useMemo(() => {
+    const previousCache = rowCacheRef.current
+    const nextCache = new Map()
+
+    const rowsList = enrichedOperations.map((operation) => {
+      const overrideRef = overrides[operation.id] || EMPTY_OVERRIDE_VALUE
+      const marketRef = marketMap[operation.id] || null
+      const dividendRef = dividendAdjustments.get(operation.id) || null
+      const cached = previousCache.get(operation.id)
+
+      if (
+        cached
+        && cached.operationRef === operation
+        && cached.overrideRef === overrideRef
+        && cached.marketRef === marketRef
+        && cached.dividendRef === dividendRef
+      ) {
+        nextCache.set(operation.id, cached)
+        return cached.row
+      }
+
+      const row = buildRow(operation)
+      const nextEntry = {
+        row,
+        operationRef: operation,
+        overrideRef,
+        marketRef,
+        dividendRef,
+      }
+      nextCache.set(operation.id, nextEntry)
+      return row
+    })
+
+    rowCacheRef.current = nextCache
+    return rowsList
+  }, [buildRow, dividendAdjustments, enrichedOperations, marketMap, overrides])
 
   const rows = useMemo(() => {
     const vencimentoSet = new Set(filters.vencimentos)
@@ -1040,6 +1594,12 @@ const Vencimento = () => {
     const updated = rows.find((row) => row.id === selectedReport.id)
     if (updated && updated !== selectedReport) setSelectedReport(updated)
   }, [rows, selectedReport])
+
+  useEffect(() => {
+    if (!selectedOverride) return
+    const updated = rows.find((row) => row.id === selectedOverride.id)
+    if (updated && updated !== selectedOverride) setSelectedOverride(updated)
+  }, [rows, selectedOverride])
 
   const handleRefreshAll = useCallback(async () => {
     setIsRefreshingAll(true)
@@ -1109,10 +1669,354 @@ const Vencimento = () => {
   }, [])
 
   const handleOverrideClick = useCallback((row) => {
-    const current = overrides[row.id] || { high: 'auto', low: 'auto', manualCouponBRL: '', qtyBonus: 0, bonusDate: '', bonusNote: '' }
-    setOverrideDraft({ ...current, manualCouponBRL: current.manualCouponBRL ?? '' })
+    const current = overrides[row.id] || EMPTY_OVERRIDE_DRAFT
+    const structureMeta = buildStructureMeta(row)
+    const structureEntries = buildStructureEntriesFromOverride(current, structureMeta)
+    const primaryEntry = structureEntries[0] || null
+    setOverrideDraft({
+      ...EMPTY_OVERRIDE_DRAFT,
+      ...current,
+      manualCouponBRL: current.manualCouponBRL ?? '',
+      manualOptionsGainBRL: current.manualOptionsGainBRL ?? '',
+      structureEntries,
+      optionQtyOverride: primaryEntry?.optionQtyOverride ?? current.optionQtyOverride ?? current.structure?.optionQty ?? '',
+      optionExpiryDateOverride: primaryEntry?.optionExpiryDateOverride ?? current.optionExpiryDateOverride ?? current.structure?.optionExpiryDate ?? '',
+      strikeOverride: primaryEntry?.strikeOverride ?? current.strikeOverride ?? '',
+      barrierValueOverride: primaryEntry?.barrierValueOverride ?? current.barrierValueOverride ?? '',
+      barrierTypeOverride: primaryEntry?.barrierTypeOverride ?? current.barrierTypeOverride ?? '',
+      optionSide: primaryEntry?.optionSide ?? normalizeOptionSideInput(current.optionSide ?? current.structure?.target?.side) ?? '',
+      legKey: primaryEntry?.legKey ?? current.legKey ?? '',
+    })
+    setOverrideErrors({})
     setSelectedOverride(row)
   }, [overrides])
+
+  const selectedStructureMeta = useMemo(
+    () => buildStructureMeta(selectedOverride),
+    [selectedOverride],
+  )
+
+  const validateOverrideDraft = useCallback((draft, structureMeta) => {
+    const errors = {}
+    const entries = normalizeStructureDraftEntries(draft?.structureEntries, structureMeta)
+    const usedTargets = new Set()
+
+    entries.forEach((entry, index) => {
+      const entryId = entry?.id || `entry-${index}`
+      const errorKey = (field) => `structureEntries.${entryId}.${field}`
+      const qtyRaw = String(entry?.optionQtyOverride ?? '').trim()
+      const expiryRaw = String(entry?.optionExpiryDateOverride ?? '').trim()
+      const strikeRaw = String(entry?.strikeOverride ?? '').trim()
+      const barrierRaw = String(entry?.barrierValueOverride ?? '').trim()
+      const typeRaw = String(entry?.barrierTypeOverride ?? '').trim()
+      const typeNormalized = normalizeBarrierTypeInput(typeRaw)
+      const hasInput = Boolean(qtyRaw || expiryRaw || strikeRaw || barrierRaw || typeRaw)
+      if (!hasInput) return
+
+      const { legKey, legMeta } = resolveStructureEntryTarget(structureMeta, entry)
+      const requiresLegSelection = Boolean(structureMeta?.requiresLegSelection)
+      if (requiresLegSelection && !legKey) {
+        errors[errorKey('legKey')] = 'Escolhe a perna.'
+      }
+      if (legKey) {
+        if (usedTargets.has(legKey)) {
+          errors[errorKey('legKey')] = 'Perna duplicada.'
+        } else {
+          usedTargets.add(legKey)
+        }
+      }
+
+      const canEditQty = legMeta?.hasOptionQty ?? structureMeta?.hasOptionQty
+      const canEditStrike = legMeta?.hasStrike ?? structureMeta?.hasStrike
+      const canEditBarrier = legMeta?.hasBarrierValue ?? structureMeta?.hasBarrierValue
+      const canEditBarrierType = legMeta?.hasBarrierType ?? structureMeta?.hasBarrierType
+      const requiresBarrierValue = typeNormalized === 'UI' || typeNormalized === 'UO' || typeNormalized === 'KI' || typeNormalized === 'KO'
+
+      if (qtyRaw && !canEditQty) {
+        errors[errorKey('optionQtyOverride')] = 'Qtd não aplicável.'
+      } else if (qtyRaw) {
+        const qty = parseLocaleNumber(qtyRaw)
+        if (qty == null || qty <= 0) {
+          errors[errorKey('optionQtyOverride')] = 'Qtd inválida.'
+        }
+      }
+
+      if (expiryRaw) {
+        const expiry = normalizeDateInput(expiryRaw)
+        if (!expiry) {
+          errors[errorKey('optionExpiryDateOverride')] = 'Data inválida.'
+        }
+      }
+
+      if (strikeRaw && !canEditStrike) {
+        errors[errorKey('strikeOverride')] = 'Strike não aplicável.'
+      } else if (strikeRaw) {
+        const strike = parseLocaleNumber(strikeRaw)
+        if (strike == null || strike <= 0) {
+          errors[errorKey('strikeOverride')] = 'Strike inválido.'
+        }
+      }
+
+      if (barrierRaw && !canEditBarrier) {
+        errors[errorKey('barrierValueOverride')] = 'Barreira não aplicável.'
+      } else if (barrierRaw) {
+        const barrierValue = parseLocaleNumber(barrierRaw)
+        if (barrierValue == null || barrierValue <= 0) {
+          errors[errorKey('barrierValueOverride')] = 'Barreira inválida.'
+        }
+      }
+
+      if (typeRaw && !canEditBarrierType) {
+        errors[errorKey('barrierTypeOverride')] = 'Tipo não aplicável.'
+      } else if (typeRaw && !typeNormalized) {
+        errors[errorKey('barrierTypeOverride')] = 'Tipo inválido.'
+      }
+
+      if (requiresBarrierValue && !barrierRaw) {
+        errors[errorKey('barrierValueOverride')] = 'Informe o valor.'
+      }
+      if (!isExplicitBarrierTypeInput(typeNormalized) && barrierRaw) {
+        errors[errorKey('barrierTypeOverride')] = 'Selecione o tipo.'
+      }
+    })
+
+    return errors
+  }, [])
+
+  const buildStructureOverridePatch = useCallback((draft, structureMeta) => {
+    const entries = normalizeStructureDraftEntries(draft?.structureEntries, structureMeta)
+    const legs = {}
+    const manualEntries = []
+
+    entries.forEach((entry, index) => {
+      const qtyRaw = String(entry?.optionQtyOverride ?? '').trim()
+      const expiryRaw = String(entry?.optionExpiryDateOverride ?? '').trim()
+      const strikeRaw = String(entry?.strikeOverride ?? '').trim()
+      const barrierRaw = String(entry?.barrierValueOverride ?? '').trim()
+      const typeRaw = String(entry?.barrierTypeOverride ?? '').trim()
+      const hasInput = Boolean(qtyRaw || expiryRaw || strikeRaw || barrierRaw || typeRaw)
+      if (!hasInput) return
+
+      const { legKey, legMeta } = resolveStructureEntryTarget(structureMeta, entry)
+      const optionSide = normalizeOptionSideInput(entry?.optionSide) || legMeta?.optionSide || null
+      const optionQtyOverride = qtyRaw ? parseLocaleNumber(qtyRaw) : null
+      const optionExpiryDateOverride = expiryRaw ? normalizeDateInput(expiryRaw) : null
+      const strikeOverride = strikeRaw ? parseLocaleNumber(strikeRaw) : null
+      const barrierTypeOverride = typeRaw ? normalizeBarrierTypeInput(typeRaw) : null
+      const requiresBarrierValue = isExplicitBarrierTypeInput(barrierTypeOverride)
+      const barrierValueOverride = requiresBarrierValue && barrierRaw ? parseLocaleNumber(barrierRaw) : null
+      const targetLegKey = legKey || null
+
+      const payload = {
+        optionQtyOverride: optionQtyOverride != null ? optionQtyOverride : null,
+        optionExpiryDateOverride,
+        strikeOverride: strikeOverride != null ? strikeOverride : null,
+        barrierValueOverride: barrierValueOverride != null ? barrierValueOverride : null,
+        barrierTypeOverride: barrierTypeOverride != null ? barrierTypeOverride : null,
+        optionSide: optionSide || null,
+        legKey: targetLegKey,
+      }
+      payload.structure = {
+        target: {
+          side: payload.optionSide || null,
+          legKey: targetLegKey,
+        },
+        optionQty: payload.optionQtyOverride != null ? payload.optionQtyOverride : null,
+        optionExpiryDate: payload.optionExpiryDateOverride || null,
+        strike: payload.strikeOverride != null ? payload.strikeOverride : null,
+        barrierType: payload.barrierTypeOverride || 'auto',
+        barrierValue: payload.barrierValueOverride != null ? payload.barrierValueOverride : null,
+      }
+
+      const mapKey = targetLegKey || payload.optionSide || `entry-${index}`
+      legs[mapKey] = payload
+      manualEntries.push(payload)
+    })
+
+    const hasManualStructure = manualEntries.length > 0
+    const primary = hasManualStructure ? manualEntries[0] : null
+    return {
+      optionQtyOverride: primary?.optionQtyOverride ?? null,
+      optionExpiryDateOverride: primary?.optionExpiryDateOverride ?? null,
+      strikeOverride: primary?.strikeOverride ?? null,
+      barrierValueOverride: primary?.barrierValueOverride ?? null,
+      barrierTypeOverride: primary?.barrierTypeOverride ?? null,
+      optionSide: primary?.optionSide ?? null,
+      legKey: primary?.legKey ?? null,
+      legacyBarrierType: false,
+      structure: primary?.structure || null,
+      structureByLeg: null,
+      legs: hasManualStructure ? legs : null,
+    }
+  }, [])
+
+  const handleApplyOverride = useCallback(() => {
+    if (!selectedOverride) return
+    const errors = validateOverrideDraft(overrideDraft, selectedStructureMeta)
+    setOverrideErrors(errors)
+    if (Object.keys(errors).length) {
+      notify('Corrige os campos de parâmetros da estrutura para salvar.', 'warning')
+      return
+    }
+
+    const structurePatch = buildStructureOverridePatch(overrideDraft, selectedStructureMeta)
+    const nextPayload = { ...overrideDraft, ...structurePatch }
+    setOverrides((prev) => updateOverride(prev, selectedOverride.id, nextPayload))
+    debugLog('vencimento.override.apply', {
+      id: selectedOverride.id,
+      structurePatch,
+      target: structurePatch.optionSide || 'GLOBAL',
+      before: {
+        financeiroFinal: selectedOverride.result?.financeiroFinal ?? null,
+        ganho: selectedOverride.result?.ganho ?? null,
+        percent: selectedOverride.result?.percent ?? null,
+      },
+      afterHint: {
+        qty: structurePatch.optionQtyOverride,
+        optionExpiryDate: structurePatch.optionExpiryDateOverride,
+        strike: structurePatch.strikeOverride,
+        barrierType: structurePatch.barrierTypeOverride || 'auto',
+        barrierValue: structurePatch.barrierValueOverride,
+      },
+    })
+    notify('Override aplicado.', 'success')
+    setSelectedOverride(null)
+    setOverrideErrors({})
+  }, [buildStructureOverridePatch, notify, overrideDraft, selectedOverride, selectedStructureMeta, validateOverrideDraft])
+
+  const handleResetOverride = useCallback(() => {
+    if (!selectedOverride) return
+    setOverrides((prev) => updateOverride(prev, selectedOverride.id, {
+      high: 'auto',
+      low: 'auto',
+    }))
+    setOverrideDraft((prev) => ({
+      ...prev,
+      high: 'auto',
+      low: 'auto',
+    }))
+    notify('Batimento manual voltou para automático.', 'success')
+    setOverrideErrors({})
+  }, [notify, selectedOverride])
+
+  const handleClearStructureOverrides = useCallback(() => {
+    if (!selectedOverride) return
+    const clearedEntries = normalizeStructureDraftEntries([], selectedStructureMeta)
+    const primaryEntry = clearedEntries[0] || null
+    setOverrides((prev) => updateOverride(prev, selectedOverride.id, {
+      optionQtyOverride: null,
+      optionExpiryDateOverride: null,
+      strikeOverride: null,
+      barrierValueOverride: null,
+      barrierTypeOverride: null,
+      optionSide: null,
+      legKey: null,
+      legacyBarrierType: false,
+      structure: null,
+      structureByLeg: null,
+      legs: null,
+    }))
+    setOverrideDraft((prev) => ({
+      ...prev,
+      structureEntries: clearedEntries,
+      optionQtyOverride: '',
+      optionExpiryDateOverride: '',
+      strikeOverride: '',
+      barrierValueOverride: '',
+      barrierTypeOverride: '',
+      optionSide: primaryEntry?.optionSide || selectedStructureMeta?.defaultOptionSide || '',
+      legKey: primaryEntry?.legKey || '',
+      legacyBarrierType: false,
+    }))
+    setOverrideErrors({})
+    notify('Parâmetros da estrutura limpos.', 'success')
+  }, [notify, selectedOverride, selectedStructureMeta])
+
+  const handleStructureEntryChange = useCallback((entryId, patch) => {
+    setOverrideDraft((prev) => {
+      const currentEntries = normalizeStructureDraftEntries(prev?.structureEntries, selectedStructureMeta)
+      const nextEntries = currentEntries.map((entry) => {
+        if (entry.id !== entryId) return entry
+        const next = {
+          ...entry,
+          ...patch,
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, 'legKey')) {
+          const legKey = String(patch.legKey || '').trim()
+          next.legKey = legKey
+          const nextLegMeta = legKey ? selectedStructureMeta?.legMetaByKey?.[legKey] : null
+          next.optionSide = normalizeOptionSideInput(patch.optionSide ?? next.optionSide) || nextLegMeta?.optionSide || ''
+        } else {
+          next.optionSide = normalizeOptionSideInput(next.optionSide) || ''
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, 'barrierTypeOverride')) {
+          const normalizedType = normalizeBarrierTypeInput(patch.barrierTypeOverride)
+          next.barrierTypeOverride = normalizedType || ''
+          if (!isExplicitBarrierTypeInput(normalizedType)) {
+            next.barrierValueOverride = ''
+          }
+        }
+        return createStructureEntryDraft(next)
+      })
+      return {
+        ...prev,
+        structureEntries: nextEntries,
+      }
+    })
+  }, [selectedStructureMeta])
+
+  const handleAddStructureEntry = useCallback(() => {
+    setOverrideDraft((prev) => {
+      const currentEntries = normalizeStructureDraftEntries(prev?.structureEntries, selectedStructureMeta)
+      const nextEntry = buildEmptyStructureEntry(selectedStructureMeta, currentEntries)
+      return {
+        ...prev,
+        structureEntries: [...currentEntries, nextEntry],
+      }
+    })
+  }, [selectedStructureMeta])
+
+  const handleRemoveStructureEntry = useCallback((entryId) => {
+    setOverrideDraft((prev) => {
+      const currentEntries = normalizeStructureDraftEntries(prev?.structureEntries, selectedStructureMeta)
+      const filtered = currentEntries.filter((entry) => entry.id !== entryId)
+      const nextEntries = filtered.length ? filtered : normalizeStructureDraftEntries([], selectedStructureMeta)
+      return {
+        ...prev,
+        structureEntries: nextEntries,
+      }
+    })
+    setOverrideErrors((prev) => {
+      if (!prev || typeof prev !== 'object') return prev
+      const needle = `structureEntries.${entryId}.`
+      return Object.keys(prev).reduce((acc, key) => {
+        if (!key.startsWith(needle)) acc[key] = prev[key]
+        return acc
+      }, {})
+    })
+  }, [selectedStructureMeta])
+
+  const handleUseQtyBase = useCallback((entryId) => {
+    setOverrideDraft((prev) => {
+      const currentEntries = normalizeStructureDraftEntries(prev?.structureEntries, selectedStructureMeta)
+      const nextEntries = currentEntries.map((entry) => {
+        if (entry.id !== entryId) return entry
+        const { legMeta } = resolveStructureEntryTarget(selectedStructureMeta, entry)
+        const suggestion = legMeta?.optionQtySuggestion ?? selectedStructureMeta?.optionQtySuggestion
+        if (suggestion == null || !Number.isFinite(Number(suggestion)) || Number(suggestion) <= 0) {
+          return entry
+        }
+        return {
+          ...entry,
+          optionQtyOverride: String(suggestion),
+        }
+      })
+      return {
+        ...prev,
+        structureEntries: nextEntries,
+      }
+    })
+  }, [selectedStructureMeta])
 
   const fetchSpotMapForExport = useCallback(async (rowsToExport) => {
     const pending = new Map()
@@ -1422,7 +2326,7 @@ const Vencimento = () => {
         label: 'Status barreira',
         render: (row) => {
           const badge = getBarrierBadge(row.barrierStatus)
-          const manual = row.override?.high !== 'auto' || row.override?.low !== 'auto'
+          const manual = row.override?.high !== 'auto' || row.override?.low !== 'auto' || hasStructureParamOverride(row.override)
           return (
             <div className="cell-stack">
               <Badge tone={badge.tone}>{badge.label}</Badge>
@@ -1637,6 +2541,7 @@ const Vencimento = () => {
       warnings: [
         row.market?.source !== 'yahoo' ? 'Cotacao em fallback.' : null,
         row.override?.high !== 'auto' || row.override?.low !== 'auto' ? 'Override manual aplicado.' : null,
+        hasStructureParamOverride(row.override) ? 'Parâmetros manuais da estrutura aplicados.' : null,
         row.manualCouponBRL != null ? 'Cupom manual aplicado.' : null,
       ].filter(Boolean),
     }
@@ -1936,20 +2841,20 @@ const Vencimento = () => {
         value={overrideDraft}
         qtyBase={selectedOverride?.qtyBase}
         qtyAtual={selectedOverride?.qtyAtual}
-        onClose={() => setSelectedOverride(null)}
+        structureMeta={selectedStructureMeta}
+        errors={overrideErrors}
+        onClose={() => {
+          setSelectedOverride(null)
+          setOverrideErrors({})
+        }}
         onChange={setOverrideDraft}
-        onApply={() => {
-          if (!selectedOverride) return
-          setOverrides((prev) => updateOverride(prev, selectedOverride.id, overrideDraft))
-          notify('Override aplicado.', 'success')
-          setSelectedOverride(null)
-        }}
-        onReset={() => {
-          if (!selectedOverride) return
-          setOverrides((prev) => clearOverride(prev, selectedOverride.id))
-          notify('Override resetado.', 'success')
-          setSelectedOverride(null)
-        }}
+        onApply={handleApplyOverride}
+        onReset={handleResetOverride}
+        onClearStructureOverrides={handleClearStructureOverrides}
+        onUseQtyBase={handleUseQtyBase}
+        onAddStructureEntry={handleAddStructureEntry}
+        onRemoveStructureEntry={handleRemoveStructureEntry}
+        onStructureEntryChange={handleStructureEntryChange}
       />
     </div>
   )
