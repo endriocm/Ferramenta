@@ -6,8 +6,10 @@ const fsSync = require('fs')
 
 const isDev = !app.isPackaged
 const isDebugDevtools = process.env.OPEN_DEVTOOLS === '1'
-const DEFAULT_UPDATE_BASE_URL = 'https://xeo22it86oecxkxw.public.blob.vercel-storage.com/updates/win/'
+const DEFAULT_UPDATE_BASE_URL = 'https://ferramenta-updates-937506434821.s3.sa-east-1.amazonaws.com/win/'
+const EMBEDDED_SERVER_PORT = 4170
 let mainWindow = null
+let embeddedServer = null
 let updateState = {
   status: 'idle',
   message: '',
@@ -312,10 +314,65 @@ const createWindow = () => {
   return win
 }
 
+const startEmbeddedServer = () => {
+  return new Promise((resolve) => {
+    try {
+      const serverPath = path.join(__dirname, '..', 'server', 'index.js')
+      if (!fsSync.existsSync(serverPath)) {
+        appendLog('embedded-server: server/index.js nao encontrado, pulando')
+        resolve(false)
+        return
+      }
+
+      const hubxpRuntimeDir = path.join(getUserDataPath(), 'hubxp-runtime')
+      if (!process.env.HUBXP_RUNTIME_DIR) process.env.HUBXP_RUNTIME_DIR = hubxpRuntimeDir
+      if (!process.env.HUBXP_DEBUG_DIR) process.env.HUBXP_DEBUG_DIR = path.join(hubxpRuntimeDir, 'debug')
+      if (!process.env.HUBXP_SESSION_FILE) process.env.HUBXP_SESSION_FILE = path.join(hubxpRuntimeDir, 'hubxp-session.json')
+
+      process.env.PORT = String(EMBEDDED_SERVER_PORT)
+      const { app: serverApp } = require(serverPath)
+      if (!serverApp?.listen) {
+        appendLog('embedded-server: modulo carregado mas sem app.listen')
+        resolve(false)
+        return
+      }
+      const server = serverApp.listen(EMBEDDED_SERVER_PORT, () => {
+        appendLog(`embedded-server: servidor iniciado na porta ${EMBEDDED_SERVER_PORT}`)
+        embeddedServer = server
+        resolve(true)
+      })
+      server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          appendLog(`embedded-server: porta ${EMBEDDED_SERVER_PORT} em uso, tentando porta ${EMBEDDED_SERVER_PORT + 1}`)
+          const fallbackServer = serverApp.listen(EMBEDDED_SERVER_PORT + 1, () => {
+            appendLog(`embedded-server: servidor iniciado na porta ${EMBEDDED_SERVER_PORT + 1}`)
+            embeddedServer = fallbackServer
+            resolve(true)
+          })
+          fallbackServer.on('error', (err2) => {
+            appendLog(`embedded-server: fallback tambem falhou — ${err2?.message || err2}`)
+            resolve(false)
+          })
+        } else {
+          appendLog(`embedded-server: erro ao iniciar — ${err?.message || err}`)
+          resolve(false)
+        }
+      })
+    } catch (err) {
+      appendLog(`embedded-server: erro ao carregar modulo — ${err?.message || err}`)
+      resolve(false)
+    }
+  })
+}
+
 app.whenReady().then(async () => {
   if (process.platform === 'win32') {
     Menu.setApplicationMenu(null)
   }
+
+  // Iniciar servidor Express embutido para APIs (HubXP, etc)
+  await startEmbeddedServer()
+
   mainWindow = createWindow()
   await setupAutoUpdater()
 

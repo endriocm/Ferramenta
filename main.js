@@ -1,5 +1,6 @@
-const DOWNLOAD_URL = 'https://xeo22it86oecxkxw.public.blob.vercel-storage.com/updates/win/Ferramenta%20Setup%20Latest.exe'
-const LATEST_YML_URL = 'https://xeo22it86oecxkxw.public.blob.vercel-storage.com/updates/win/latest.yml'
+const UPDATE_BASE_URL = 'https://ferramenta-updates-937506434821.s3.sa-east-1.amazonaws.com/win/'
+const DOWNLOAD_URL = `${UPDATE_BASE_URL}Ferramenta%20Setup%20Latest.exe`
+const LATEST_YML_URL = `${UPDATE_BASE_URL}latest.yml`
 
 const setDownloadLinks = () => {
   document.querySelectorAll('[data-download-link]').forEach((link) => {
