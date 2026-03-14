@@ -15,10 +15,12 @@ const removableDirNames = new Set([
   '.cache',
   '.turbo',
   '.parcel-cache',
+  '.next',
   'coverage',
   'logs',
   '.vercel',
   '.cache_market_data',
+  'tmp',
 ]);
 
 const removableFileExts = new Set(['.log', '.tmp']);
@@ -28,6 +30,7 @@ const explicitPaths = [
   'pwr/dist',
   '.cache_market_data',
   '.vercel',
+  'tmp',
 ];
 
 if (removeAll) {

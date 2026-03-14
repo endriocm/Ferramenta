@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icons'
+import Modal from './Modal'
 
 const CSV_COLUMNS = [
   'rowIndex',
@@ -135,10 +136,23 @@ const SyncPanel = ({
   steps = DEFAULT_STEPS,
   accept = '.xlsx,.xls',
   directory = false,
+  directoryOptions = [],
+  directoryValue = '',
+  onDirectoryChange,
+  directoryOptionsLoading = false,
+  directoryOptionsEmptyMessage = '',
+  linkedFileOptions = [],
+  linkedFileValue = '',
+  onLinkedFileChange,
+  linkedFileLabel = 'Arquivo importado',
+  linkedFileEmptyMessage = '',
+  hideLocalPicker = false,
+  contextHelp = null,
 }) => {
   const [stage, setStage] = useState(0)
   const [runningInternal, setRunningInternal] = useState(false)
   const [selectedFileInternal, setSelectedFileInternal] = useState(null)
+  const [isContextHelpOpen, setIsContextHelpOpen] = useState(false)
   const selectedFile = selectedFileProp !== undefined ? selectedFileProp : selectedFileInternal
   const setSelectedFile = onSelectedFileChange || setSelectedFileInternal
   const inputIdRef = useRef(`sync-${Math.random().toString(36).slice(2)}`)
@@ -149,7 +163,13 @@ const SyncPanel = ({
     if (!onSync || running) return
     if (!isControlled) setRunningInternal(true)
     try {
-      await onSync(selectedFile)
+      const SYNC_TIMEOUT_MS = 5 * 60 * 1000
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Sincronizacao excedeu o tempo limite.')), SYNC_TIMEOUT_MS)
+      })
+      await Promise.race([onSync(selectedFile), timeoutPromise])
+    } catch {
+      // error handled by caller or swallowed
     } finally {
       if (!isControlled) setRunningInternal(false)
     }
@@ -212,6 +232,17 @@ const SyncPanel = ({
   }, [running, steps.length])
 
   const canSync = Boolean(onSync) && Boolean(selectedFile)
+  const hasDirectoryOptions = directory && Array.isArray(directoryOptions) && directoryOptions.length > 0
+  const selectedDirectoryOption = hasDirectoryOptions
+    ? directoryOptions.find((option) => option?.value === directoryValue) || null
+    : null
+  const hasLinkedFileOptions = Array.isArray(linkedFileOptions) && linkedFileOptions.length > 0
+  const selectedLinkedFileOption = hasLinkedFileOptions
+    ? linkedFileOptions.find((option) => option?.value === linkedFileValue) || null
+    : null
+  const directoryButtonLabel = directory
+    ? (hasDirectoryOptions ? 'Selecionar pasta manual' : 'Selecionar pasta')
+    : 'Selecionar arquivo'
 
   const selectedFileLabel = selectedFile?.name
     || selectedFile?.fileName
@@ -226,34 +257,40 @@ const SyncPanel = ({
           <p className="muted">{helper}</p>
         </div>
         <div className="panel-actions">
-          <label className="btn btn-secondary" htmlFor={inputIdRef.current}>
-            <Icon name="upload" size={16} />
-            {directory ? 'Selecionar pasta' : 'Selecionar arquivo'}
-          </label>
-          <input
-            id={inputIdRef.current}
-            type="file"
-            accept={accept}
-            onChange={async (event) => {
-              const fileList = Array.from(event.target.files || [])
-              const payload = directory ? fileList : fileList[0] || null
-              let next = payload
-              if (onFileSelected) {
-                const result = await onFileSelected(payload)
-                if (result !== undefined) {
-                  next = result
-                }
-              }
-              if (Array.isArray(next)) {
-                next = next[0] || null
-              }
-              setSelectedFile(next)
-            }}
-            multiple={directory}
-            webkitdirectory={directory ? 'true' : undefined}
-            directory={directory ? 'true' : undefined}
-            hidden
-          />
+          {!hideLocalPicker ? (
+            <>
+              <label className="btn btn-secondary" htmlFor={inputIdRef.current}>
+                <Icon name="upload" size={16} />
+                {directoryButtonLabel}
+              </label>
+              <input
+                id={inputIdRef.current}
+                type="file"
+                accept={accept}
+                onChange={async (event) => {
+                  const fileList = Array.from(event.target.files || [])
+                  const payload = directory ? fileList : fileList[0] || null
+                  let next = payload
+                  if (onFileSelected) {
+                    const result = await onFileSelected(payload)
+                    if (result !== undefined) {
+                      next = result
+                    }
+                  }
+                  if (Array.isArray(next)) {
+                    next = next[0] || null
+                  }
+                  setSelectedFile(next)
+                  // Permite selecionar o mesmo arquivo/pasta novamente e disparar onChange.
+                  event.target.value = ''
+                }}
+                multiple={directory}
+                webkitdirectory={directory ? 'true' : undefined}
+                directory={directory ? 'true' : undefined}
+                hidden
+              />
+            </>
+          ) : null}
           <button className="btn btn-primary" type="button" onClick={startSync} disabled={!canSync || running}>
             <Icon name="sync" size={16} />
             {running ? 'Processando' : 'Sincronizar'}
@@ -265,6 +302,83 @@ const SyncPanel = ({
           ) : null}
         </div>
       </div>
+
+      {contextHelp ? (
+        <div className="sync-context-help">
+          <button
+            className="sync-context-help-trigger"
+            type="button"
+            onClick={() => setIsContextHelpOpen(true)}
+            aria-haspopup="dialog"
+          >
+            <span>{contextHelp.triggerLabel || 'Ver instrucao do relatorio'}</span>
+          </button>
+        </div>
+      ) : null}
+
+      {directory ? (
+        <div className="sync-folder-filter">
+          <label className="sync-folder-filter-field">
+            <span>Pasta da global</span>
+            <select
+              className="input"
+              value={directoryValue || ''}
+              onChange={(event) => {
+                if (!onDirectoryChange) return
+                onDirectoryChange(event.target.value)
+              }}
+              disabled={!hasDirectoryOptions || directoryOptionsLoading || running || !onDirectoryChange}
+            >
+              {!hasDirectoryOptions ? (
+                <option value="">
+                  {directoryOptionsLoading ? 'Carregando pastas...' : 'Sem pastas disponiveis'}
+                </option>
+              ) : null}
+              {directoryOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedDirectoryOption?.description ? (
+            <div className="muted">{selectedDirectoryOption.description}</div>
+          ) : directoryOptionsEmptyMessage ? (
+            <div className="muted">{directoryOptionsEmptyMessage}</div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {(hasLinkedFileOptions || linkedFileEmptyMessage) ? (
+        <div className="sync-folder-filter">
+          <label className="sync-folder-filter-field">
+            <span>{linkedFileLabel}</span>
+            <select
+              className="input"
+              value={linkedFileValue || ''}
+              onChange={(event) => {
+                if (!onLinkedFileChange) return
+                onLinkedFileChange(event.target.value)
+              }}
+              disabled={!hasLinkedFileOptions || running || !onLinkedFileChange}
+            >
+              {!hasLinkedFileOptions ? (
+                <option value="">Sem arquivos disponiveis</option>
+              ) : null}
+              {linkedFileOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedLinkedFileOption?.description ? (
+            <div className="muted">{selectedLinkedFileOption.description}</div>
+          ) : linkedFileEmptyMessage ? (
+            <div className="muted">{linkedFileEmptyMessage}</div>
+          ) : null}
+        </div>
+      ) : null}
 
       {selectedFile ? (
         <div className="muted">Arquivo selecionado: {selectedFileLabel}</div>
@@ -356,6 +470,28 @@ const SyncPanel = ({
       ) : (
         <div className="muted">{running ? 'Processando arquivos em tempo real.' : 'Nenhuma sincronizacao recente.'}</div>
       )}
+
+      <Modal
+        open={Boolean(contextHelp) && isContextHelpOpen}
+        onClose={() => setIsContextHelpOpen(false)}
+        title={contextHelp?.title || 'Relatorio desta pagina'}
+        subtitle={contextHelp?.subtitle || ''}
+      >
+        <div className="sync-context-help-body">
+          {contextHelp?.description ? <p>{contextHelp.description}</p> : null}
+          {contextHelp?.path ? <p className="sync-context-help-path">{contextHelp.path}</p> : null}
+          {contextHelp?.url ? (
+            <a
+              className="sync-context-help-link"
+              href={contextHelp.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {contextHelp.urlLabel || contextHelp.url}
+            </a>
+          ) : null}
+        </div>
+      </Modal>
     </section>
   )
 }

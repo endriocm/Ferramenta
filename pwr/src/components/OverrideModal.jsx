@@ -1,5 +1,5 @@
 import Modal from './Modal'
-import { formatNumber } from '../utils/format'
+import { formatCurrency, formatDate, formatNumber } from '../utils/format'
 
 const describeBarrierType = (value) => {
   const raw = String(value || '').trim().toUpperCase()
@@ -47,11 +47,28 @@ const OverrideModal = ({
   qtyAtual,
   structureMeta,
   errors,
+  dividendEvents = [],
+  autoDividendBRL = null,
+  dividendSource = '',
+  bonusEvents = [],
+  autoBonusQty = 0,
+  autoBonusQtyBase = null,
+  bonusSource = '',
+  bonusFactor = 1,
+  onUseAutoBonus,
 }) => {
   if (!value) return null
 
   const qtyBaseLabel = qtyBase != null ? formatNumber(qtyBase) : '-'
   const qtyAtualLabel = qtyAtual != null ? formatNumber(qtyAtual) : '-'
+  const qtyBaseOverrideRaw = value.qtyBaseOverride != null && value.qtyBaseOverride !== ''
+    ? parseFloat(String(value.qtyBaseOverride).replace(',', '.'))
+    : null
+  const effectiveQtyBase = Number.isFinite(qtyBaseOverrideRaw) ? qtyBaseOverrideRaw : (qtyBase ?? 0)
+  const bonusNum = parseFloat(String(value.qtyBonus || 0).replace(',', '.')) || 0
+  const qtyAtualPreview = qtyBaseOverrideRaw != null || bonusNum
+    ? formatNumber(Math.max(0, effectiveQtyBase + bonusNum))
+    : qtyAtualLabel
   const hasOptionQty = Boolean(structureMeta?.hasOptionQty)
   const hasStrike = Boolean(structureMeta?.hasStrike)
   const hasBarrierValue = Boolean(structureMeta?.hasBarrierValue)
@@ -64,6 +81,36 @@ const OverrideModal = ({
   const canAddEntry = hasStructureFields && typeof onAddStructureEntry === 'function'
   const showLegSelector = legOptions.length > 0
   const qtyBaseHint = qtyBase != null && Number.isFinite(Number(qtyBase)) ? formatNumber(qtyBase) : null
+  const sortedDividendEvents = Array.isArray(dividendEvents)
+    ? [...dividendEvents].sort((left, right) => {
+      const leftDate = String(left?.dataCom || '')
+      const rightDate = String(right?.dataCom || '')
+      if (leftDate !== rightDate) return leftDate.localeCompare(rightDate)
+      return String(left?.paymentDate || '').localeCompare(String(right?.paymentDate || ''))
+    })
+    : []
+  const hasAutoDividend = Number.isFinite(Number(autoDividendBRL))
+  const dividendSourceLabel = String(dividendSource || '').trim()
+  const sortedBonusEvents = Array.isArray(bonusEvents)
+    ? [...bonusEvents].sort((left, right) => {
+      const leftDate = String(left?.dataCom || left?.exDate || left?.incorporationDate || '')
+      const rightDate = String(right?.dataCom || right?.exDate || right?.incorporationDate || '')
+      if (leftDate !== rightDate) return leftDate.localeCompare(rightDate)
+      return String(left?.incorporationDate || '').localeCompare(String(right?.incorporationDate || ''))
+    })
+    : []
+  const autoBonusQtyNumber = Number(autoBonusQty || 0)
+  const autoBonusQtyBaseNumber = Number(autoBonusQtyBase)
+  const hasAutoBonusSuggestion = autoBonusQtyNumber > 0 || (Number.isFinite(autoBonusQtyBaseNumber) && autoBonusQtyBaseNumber > 0)
+  const bonusSourceLabel = String(bonusSource || '').trim()
+  const bonusFactorLabel = Number.isFinite(Number(bonusFactor)) && Number(bonusFactor) > 1
+    ? Number(bonusFactor).toFixed(6).replace('.', ',')
+    : ''
+  const formatPercentLabel = (value) => {
+    const number = Number(value)
+    if (!Number.isFinite(number)) return '-'
+    return `${number.toFixed(2).replace('.', ',')}%`
+  }
 
   return (
     <Modal open={open} onClose={onClose} title="Batimento manual e ajustes" subtitle="Ajuste local com recalc imediato">
@@ -104,8 +151,108 @@ const OverrideModal = ({
               onChange={(event) => onChange({ ...value, manualCouponBRL: event.target.value })}
             />
           </label>
+          <label>
+            Dividendos (R$)
+            <input
+              className="input"
+              type="number"
+              step="0.01"
+              placeholder="Auto"
+              value={value.manualDividendBRL ?? ''}
+              onChange={(event) => onChange({ ...value, manualDividendBRL: event.target.value })}
+            />
+            <small className="muted">Vazio = calculado automaticamente</small>
+          </label>
         </div>
+        {(sortedDividendEvents.length || hasAutoDividend) ? (
+          <div className="report-card">
+            <div>
+              <strong>Historico de proventos</strong>
+              <p className="muted">
+                Ajuste automatico por data com
+                {hasAutoDividend ? ` · total auto ${formatCurrency(autoDividendBRL)}` : ''}
+                {dividendSourceLabel ? ` · fonte ${dividendSourceLabel}` : ''}
+              </p>
+            </div>
+            {sortedDividendEvents.length ? (
+              <div className="report-list">
+                {sortedDividendEvents.map((event, index) => {
+                  const tipo = String(event?.type || event?.typeRaw || 'DIV').toUpperCase()
+                  const dataCom = event?.dataCom ? formatDate(event.dataCom) : '-'
+                  const paymentDate = event?.paymentDate ? formatDate(event.paymentDate) : '-'
+                  const amount = Number.isFinite(Number(event?.amount)) ? Number(event.amount) : null
+                  const valueNet = Number.isFinite(Number(event?.valueNet)) ? Number(event.valueNet) : null
+                  const amountLabel = valueNet != null ? formatCurrency(valueNet) : '-'
+                  const brutoLabel = amount != null ? formatCurrency(amount) : '-'
+                  return (
+                    <div key={`${event?.dataCom || 'event'}-${event?.paymentDate || 'nopay'}-${event?.type || index}`}>
+                      <span>{tipo} · Data com {dataCom}</span>
+                      <strong>{amountLabel}</strong>
+                      {paymentDate !== '-' ? <small className="muted">Pagamento {paymentDate}</small> : null}
+                      {amount != null && valueNet != null && Math.abs(amount - valueNet) > 0.000001 ? (
+                        <small className="muted">Bruto {brutoLabel}</small>
+                      ) : null}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <p className="muted">Sem eventos detalhados no periodo, mas o total automatico foi aplicado no ajuste.</p>
+            )}
+          </div>
+        ) : null}
       </section>
+
+      {(sortedBonusEvents.length || hasAutoBonusSuggestion) ? (
+        <section className="override-block">
+          <div className="override-section-head">
+            <div>
+              <h4 className="override-block-title">B.1) Bonificacao</h4>
+              <p className="muted override-help">
+                Historico societario para sugerir base e bonus
+                {bonusSourceLabel ? ` · fonte ${bonusSourceLabel}` : ''}
+                {bonusFactorLabel ? ` · fator ${bonusFactorLabel}` : ''}
+              </p>
+            </div>
+            {hasAutoBonusSuggestion && typeof onUseAutoBonus === 'function' ? (
+              <button className="btn btn-secondary btn-inline" type="button" onClick={onUseAutoBonus}>
+                Usar bonus automatico
+              </button>
+            ) : null}
+          </div>
+          {hasAutoBonusSuggestion ? (
+            <div className="report-card">
+              <div className="report-list">
+                <div>
+                  <span>Sugestao automatica</span>
+                  <strong>{formatNumber(autoBonusQtyBaseNumber || 0)} + {formatNumber(autoBonusQtyNumber || 0)}</strong>
+                  <small className="muted">Base + bonus</small>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {sortedBonusEvents.length ? (
+            <div className="report-card">
+              <div className="report-list">
+                {sortedBonusEvents.map((event, index) => {
+                  const dataCom = event?.dataCom ? formatDate(event.dataCom) : '-'
+                  const exDate = event?.exDate ? formatDate(event.exDate) : '-'
+                  const incorporationDate = event?.incorporationDate ? formatDate(event.incorporationDate) : '-'
+                  const proportion = formatPercentLabel(event?.proportionPct)
+                  return (
+                    <div key={`${event?.dataCom || event?.incorporationDate || 'bonus'}-${event?.factor || index}`}>
+                      <span>BONUS · Data com {dataCom}</span>
+                      <strong>{proportion}</strong>
+                      {exDate !== '-' ? <small className="muted">Ex {exDate}</small> : null}
+                      {incorporationDate !== '-' ? <small className="muted">Incorp {incorporationDate}</small> : null}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="override-block override-structure-block">
         <div className="override-section-head">
@@ -141,15 +288,13 @@ const OverrideModal = ({
                 <article className="structure-row" key={entry.id || `entry-${index}`}>
                   <div className="structure-row-top">
                     <span className="structure-row-tag">Opcao {index + 1}</span>
-                    {structureEntries.length > 1 ? (
-                      <button
-                        className="btn btn-secondary btn-inline"
-                        type="button"
-                        onClick={() => onRemoveStructureEntry?.(entry.id)}
-                      >
-                        Remover
-                      </button>
-                    ) : null}
+                    <button
+                      className="btn btn-secondary btn-inline"
+                      type="button"
+                      onClick={() => onRemoveStructureEntry?.(entry.id)}
+                    >
+                      Remover
+                    </button>
                   </div>
                   <div className="structure-row-grid">
                     {showLegSelector ? (
@@ -294,7 +439,17 @@ const OverrideModal = ({
       <div className="override-grid">
         <label>
           Qtd base
-          <input className="input" type="text" value={qtyBaseLabel} readOnly />
+          <input
+            className="input"
+            type="text"
+            inputMode="decimal"
+            placeholder={qtyBaseLabel}
+            value={value.qtyBaseOverride ?? ''}
+            onChange={(event) => onChange({ ...value, qtyBaseOverride: event.target.value })}
+          />
+          <small className="muted">
+            {qtyBaseOverrideRaw != null ? `Calculado ${qtyBaseLabel}` : 'Editar para bonificacao'}
+          </small>
         </label>
         <label>
           Bonus
@@ -308,8 +463,20 @@ const OverrideModal = ({
           />
         </label>
         <label>
+          Bonus auto
+          <select
+            className="input"
+            value={value.bonusAutoDisabled ? 'off' : 'auto'}
+            onChange={(event) => onChange({ ...value, bonusAutoDisabled: event.target.value === 'off' })}
+          >
+            <option value="auto">Automatico</option>
+            <option value="off">Ignorar</option>
+          </select>
+        </label>
+        <label>
           Qtd atual
-          <input className="input" type="text" value={qtyAtualLabel} readOnly />
+          <input className="input" type="text" value={qtyAtualPreview} readOnly />
+          {qtyBaseOverrideRaw != null ? <small className="muted">Base ajustada + bonus</small> : null}
         </label>
         <label>
           Data bonus

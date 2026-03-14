@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { HeadBucketCommand, ListBucketsCommand, S3Client } from '@aws-sdk/client-s3'
 
-const DEFAULT_REGION = 'us-east-1'
+const DEFAULT_REGION = 'sa-east-1'
 const DEFAULT_PREFIX = 'win'
 const DIST_DIR = 'dist_electron'
 const LATEST_FILE = 'latest.yml'
@@ -44,7 +44,57 @@ const normalizeBaseUrl = (value) => {
   const raw = String(value || '').trim()
   if (!raw) return ''
   const withProtocol = raw.includes('://') ? raw : `https://${raw}`
+  let parsed = null
+  try {
+    parsed = new URL(withProtocol)
+    const host = String(parsed.hostname || '').toLowerCase()
+    const pathParts = String(parsed.pathname || '').split('/').filter(Boolean)
+
+    const bucketRegionMatch = host.match(/^([^.]+)\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$/)
+    if (bucketRegionMatch) {
+      const bucket = bucketRegionMatch[1]
+      const region = bucketRegionMatch[2]
+      const prefix = pathParts.join('/')
+      const nextPath = [bucket, prefix].filter(Boolean).join('/')
+      return `https://s3.${region}.amazonaws.com/${nextPath}/`
+    }
+
+    const bucketGlobalMatch = host.match(/^([^.]+)\.s3\.amazonaws\.com$/)
+    if (bucketGlobalMatch) {
+      const bucket = bucketGlobalMatch[1]
+      const prefix = pathParts.join('/')
+      const nextPath = [bucket, prefix].filter(Boolean).join('/')
+      return `https://s3.amazonaws.com/${nextPath}/`
+    }
+  } catch {
+    // noop
+  }
+
   return withProtocol.replace(/\/+$/, '') + '/'
+}
+
+const isLegacyBlobUrl = (value) => {
+  const normalized = normalizeBaseUrl(value)
+  if (!normalized) return false
+  try {
+    const parsed = new URL(normalized)
+    const host = String(parsed.hostname || '').toLowerCase()
+    return host.includes('blob.vercel-storage.com')
+  } catch {
+    return false
+  }
+}
+
+const pickFirstSupportedBaseUrl = (candidates) => {
+  for (const candidate of candidates) {
+    const normalized = normalizeBaseUrl(candidate)
+    if (!normalized) continue
+    if (isLegacyBlobUrl(normalized)) {
+      continue
+    }
+    return normalized
+  }
+  return ''
 }
 
 const parseS3BaseUrl = (baseUrl) => {
@@ -100,6 +150,13 @@ const format = (status, label, value) => {
   console.log(`${status} ${label}${suffix}`)
 }
 
+const createS3Client = (region) => {
+  return new S3Client({
+    region,
+    forcePathStyle: true,
+  })
+}
+
 const run = async () => {
   const envFile = parseEnvFile(path.resolve(process.cwd(), '.env.local'))
   const pkgPath = path.resolve(process.cwd(), 'package.json')
@@ -117,15 +174,20 @@ const run = async () => {
     publishUrl = firstNonEmpty(publish?.url)
   }
 
-  const configuredBaseUrl = normalizeBaseUrl(
-    firstNonEmpty(
-      process.env.UPDATE_BASE_URL,
-      process.env.AWS_UPDATES_BASE_URL,
-      envFile.UPDATE_BASE_URL,
-      envFile.AWS_UPDATES_BASE_URL,
-      publishUrl,
-    ),
+  const legacyBaseUrl = firstNonEmpty(
+    process.env.UPDATE_BASE_URL,
+    process.env.AWS_UPDATES_BASE_URL,
+    envFile.UPDATE_BASE_URL,
+    envFile.AWS_UPDATES_BASE_URL,
+    publishUrl,
   )
+  const configuredBaseUrl = pickFirstSupportedBaseUrl([
+    process.env.UPDATE_BASE_URL,
+    process.env.AWS_UPDATES_BASE_URL,
+    envFile.UPDATE_BASE_URL,
+    envFile.AWS_UPDATES_BASE_URL,
+    publishUrl,
+  ])
   const parsedBaseUrl = parseS3BaseUrl(configuredBaseUrl)
 
   const region = firstNonEmpty(
@@ -182,7 +244,12 @@ const run = async () => {
   format(version ? '[ok]' : '[fail]', 'version', version || 'missing in package.json')
   if (!version) blocking = true
 
-  format(configuredBaseUrl ? '[ok]' : '[warn]', 'update base url', configuredBaseUrl || 'not configured')
+  if (!configuredBaseUrl && isLegacyBlobUrl(legacyBaseUrl)) {
+    format('[fail]', 'update base url', 'legacy Vercel Blob URL configured')
+    blocking = true
+  } else {
+    format(configuredBaseUrl ? '[ok]' : '[warn]', 'update base url', configuredBaseUrl || 'not configured')
+  }
   format(bucket ? '[ok]' : '[fail]', 'updates bucket', bucket || 'missing')
   if (!bucket) blocking = true
   format('[ok]', 'updates region', region)
@@ -203,7 +270,7 @@ const run = async () => {
   let s3ServiceBlocked = false
   if (hasAnyCredentials) {
     try {
-      const s3 = new S3Client({ region })
+      const s3 = createS3Client(region)
       await s3.send(new ListBucketsCommand({}))
       format('[ok]', 's3 service', 'available')
     } catch (error) {
@@ -224,7 +291,7 @@ const run = async () => {
 
   if (bucket && hasAnyCredentials && !s3ServiceBlocked) {
     try {
-      const s3 = new S3Client({ region })
+      const s3 = createS3Client(region)
       await s3.send(new HeadBucketCommand({ Bucket: bucket }))
       format('[ok]', 's3 bucket access', `s3://${bucket}`)
     } catch (error) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icons'
 
 const normalizeToken = (value) => String(value || '')
@@ -119,7 +119,10 @@ const MultiSelect = ({
     const normalized = hasAllLike && nextValues.length > 1
       ? nextValues.filter((item) => !allLikeValues.has(item))
       : nextValues
-    onChange?.(normalized.sort())
+    // Se todos estão selecionados, tratar como nenhum selecionado (sem filtro)
+    const nonAllOptions = options.filter((opt) => !allLikeValues.has(opt.value))
+    const allSelected = nonAllOptions.length > 0 && nonAllOptions.every((opt) => normalized.includes(opt.value))
+    onChange?.(allSelected ? [] : normalized.sort())
     setOpen(false)
   }
 
@@ -194,4 +197,4 @@ const MultiSelect = ({
   )
 }
 
-export default MultiSelect
+export default memo(MultiSelect)

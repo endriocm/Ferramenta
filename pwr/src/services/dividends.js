@@ -1,4 +1,5 @@
 import { normalizeDateKey } from '../utils/dateKey'
+import { apiFetch } from './apiBase'
 
 const normalizeTicker = (ticker) => String(ticker || '').trim().toUpperCase()
 const CACHE_TTL = 30 * 60 * 1000
@@ -53,11 +54,11 @@ export const fetchDividendsBatch = async (requests) => {
     else pending.push(entry)
   }
   if (!pending.length) return cachedResults
-  const response = await fetch('/api/dividends', {
+  const response = await apiFetch('/api/dividends', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ requests: pending.map(({ ticker, from, to }) => ({ ticker, from, to })) }),
-  })
+    body: JSON.stringify({ requests: pending.map(({ ticker, from, to }) => ({ ticker, from, to })), includeEvents: true }),
+  }, { retries: 1, backoffMs: 500, timeoutMs: 12000 })
   if (!response.ok) {
     throw new Error('dividends-batch-failed')
   }
@@ -80,8 +81,9 @@ export const fetchDividend = async ({ ticker, from, to }) => {
     ticker: normalized.ticker,
     from: normalized.from,
     to: normalized.to,
+    includeEvents: '1',
   })
-  const promise = fetch(`/api/dividends?${params.toString()}`)
+  const promise = apiFetch(`/api/dividends?${params.toString()}`, {}, { retries: 2, backoffMs: 400, timeoutMs: 8000 })
     .then((response) => {
       if (!response.ok) throw new Error('dividends-fetch-failed')
       return response.json()

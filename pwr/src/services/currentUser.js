@@ -7,10 +7,28 @@ const normalizeValue = (value) => {
   return ''
 }
 
+const collapseRepeatedPrefix = (value, prefix) => {
+  const token = `${prefix}:`
+  let next = String(value || '')
+  while (next.startsWith(token)) {
+    next = next.slice(token.length)
+  }
+  return next
+}
+
 const normalizeKey = (value) => {
   const raw = normalizeValue(value)
   if (!raw) return ''
+
   const lower = raw.toLowerCase()
+  if (lower.startsWith('email:')) {
+    const rest = collapseRepeatedPrefix(lower, 'email')
+    return rest ? `email:${rest}` : ''
+  }
+  if (lower.startsWith('id:')) {
+    const rest = collapseRepeatedPrefix(lower, 'id')
+    return rest ? `id:${rest}` : ''
+  }
   if (lower.includes('@')) return `email:${lower}`
   return `id:${lower}`
 }
@@ -37,23 +55,19 @@ const safeParse = (raw) => {
   }
 }
 
-export const getCurrentUserKey = () => {
+const resolveUserKey = () => {
   if (typeof window === 'undefined') return DEFAULT_USER_KEY
 
   const directKey = normalizeKey(window.__PWR_USER_KEY__)
   if (directKey) return directKey
 
-  const fromWindow = pickFromObject(window.__PWR_USER__) || pickFromObject(window.currentUser)
+  const fromWindow = pickFromObject(window.__PWR_USER__)
   if (fromWindow) return fromWindow
 
   const storageKeys = [
     'pwr.userKey',
     'pwr.user',
     'pwr.currentUser',
-    'currentUser',
-    'auth.user',
-    'user',
-    'session.user',
   ]
 
   for (const key of storageKeys) {
@@ -65,4 +79,15 @@ export const getCurrentUserKey = () => {
   }
 
   return DEFAULT_USER_KEY
+}
+
+export const getCurrentUserKey = () => resolveUserKey()
+
+export const normalizeUserKey = (value, fallback = DEFAULT_USER_KEY) => {
+  const normalized = normalizeKey(value)
+  return normalized || fallback
+}
+
+export const invalidateUserKeyCache = () => {
+  // no-op: cache removido para evitar chave de usuario stale
 }

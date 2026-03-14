@@ -18,9 +18,9 @@ export default function AccessGate({ onAccessGranted, children }) {
   const [loading, setLoading] = useState(false);
   const [payLoading, setPayLoading] = useState(false);
   const [payError, setPayError] = useState("");
-  const [checkingAccess, setCheckingAccess] = useState(false);
-  const [lastCheckedAt, setLastCheckedAt] = useState(null);
-  const [refreshError, setRefreshError] = useState("");
+  const checkingAccess = false;
+  const lastCheckedAt = null;
+  const refreshError = "";
 
   useEffect(() => {
     if (isBillingRoute) return;

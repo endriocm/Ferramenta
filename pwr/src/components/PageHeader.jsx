@@ -1,6 +1,8 @@
 ﻿import Icon from './Icons'
 
 const PageHeader = ({ title, subtitle, meta = [], actions = [] }) => {
+  const hasArrayActions = Array.isArray(actions)
+
   return (
     <div className="page-header">
       <div>
@@ -18,7 +20,7 @@ const PageHeader = ({ title, subtitle, meta = [], actions = [] }) => {
         ) : null}
       </div>
       <div className="page-actions">
-        {actions.map((action) => (
+        {hasArrayActions ? actions.map((action) => (
           <button
             key={action.label}
             className={`btn ${action.variant || 'btn-primary'}`}
@@ -29,7 +31,7 @@ const PageHeader = ({ title, subtitle, meta = [], actions = [] }) => {
             {action.icon ? <Icon name={action.icon} size={16} /> : null}
             {action.label}
           </button>
-        ))}
+        )) : actions}
       </div>
     </div>
   )

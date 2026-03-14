@@ -43,13 +43,7 @@ const logAuthEvent = (payload) => {
 };
 
 export default function Login() {
-  const [email, setEmail] = useState(() => {
-    try {
-      return localStorage.getItem("pwr_last_email") || "";
-    } catch {
-      return "";
-    }
-  });
+  const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
   const [status, setStatus] = useState("idle");
   const [erro, setErro] = useState("");
@@ -151,11 +145,6 @@ export default function Login() {
         await signInWithEmailAndPassword(auth, validation.email, senha);
       } else {
         await createUserWithEmailAndPassword(auth, validation.email, senha);
-      }
-      try {
-        localStorage.setItem("pwr_last_email", validation.email);
-      } catch {
-        // ignore
       }
       setStatus("idle");
     } catch (err) {

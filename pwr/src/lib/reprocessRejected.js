@@ -1,6 +1,7 @@
-import { loadXlsx } from '../services/xlsxLoader'
-import { resolveByClientCode, resolveByClientName } from './tagResolver'
+import { resolveByClientCode } from './tagResolver'
 import { normalizeAssessorName } from '../utils/assessor'
+import { toNumber } from '../utils/number'
+import { excelSerialToDateComponents } from '../utils/excelDate'
 
 const FACTOR_RECEITA = {
   bovespa: 0.9335 * 0.8285,
@@ -15,46 +16,14 @@ const normalizeValue = (value) => String(value || '')
   .normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '')
 
-const toNumber = (value) => {
-  if (value == null || value === '') return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const raw = String(value).trim()
-  if (!raw) return null
-  let cleaned = raw.replace(/[^\d,.-]/g, '')
-  if (!cleaned) return null
-  const hasComma = cleaned.includes(',')
-  const hasDot = cleaned.includes('.')
-  if (hasComma && hasDot) {
-    if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
-      cleaned = cleaned.replace(/\./g, '').replace(/,/g, '.')
-    } else {
-      cleaned = cleaned.replace(/,/g, '')
-    }
-  } else if (hasComma) {
-    cleaned = cleaned.replace(/,/g, '.')
-  }
-  const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-let xlsxCache = null
-const getXlsx = async () => {
-  if (xlsxCache) return xlsxCache
-  xlsxCache = await loadXlsx()
-  return xlsxCache
-}
-
-const parseDate = async (value) => {
+const parseDate = (value) => {
   if (!value) return ''
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10)
   if (typeof value === 'number') {
-    const XLSX = await getXlsx()
-    if (XLSX?.SSF?.parse_date_code) {
-      const parsed = XLSX.SSF.parse_date_code(value)
-      if (parsed?.y && parsed?.m && parsed?.d) {
-        const date = new Date(parsed.y, parsed.m - 1, parsed.d)
-        return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
-      }
+    const parsed = excelSerialToDateComponents(value)
+    if (parsed?.y && parsed?.m && parsed?.d) {
+      const date = new Date(parsed.y, parsed.m - 1, parsed.d)
+      return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
     }
   }
   const raw = String(value).trim()
@@ -78,16 +47,11 @@ const resolveModuleKey = (moduleLabel) => {
 const enrichFromTags = (partial, tagIndex) => {
   if (!tagIndex || !tagIndex.size) return { enriched: false, data: partial }
   const resolved = resolveByClientCode(tagIndex, partial.codigoCliente)
-    || resolveByClientName(tagIndex, partial.nomeCliente)
   if (!resolved) return { enriched: false, data: partial }
   const next = { ...partial }
   let enriched = false
   if (!next.codigoCliente && resolved.codigoCliente) {
     next.codigoCliente = resolved.codigoCliente
-    enriched = true
-  }
-  if (!next.nomeCliente && resolved.nomeCliente) {
-    next.nomeCliente = resolved.nomeCliente
     enriched = true
   }
   if (!next.assessor && resolved.assessor) {
@@ -179,7 +143,7 @@ export const tryNormalizeFromRejected = async (item, moduleLabel, { tagIndex } =
         comissao,
         quantidade: quantidade ?? null,
         precoCompra: precoCompra ?? null,
-        nomeCliente: enrichedFields.nomeCliente || nomeCliente,
+        nomeCliente: '',
         assessor: normalizeAssessorName(enrichedFields.assessor || assessor),
         broker: enrichedFields.broker || broker,
         origem: 'Estruturadas',
@@ -227,7 +191,7 @@ export const tryNormalizeFromRejected = async (item, moduleLabel, { tagIndex } =
       codigoCliente: conta,
       conta,
       data,
-      nomeCliente: enrichedFields.nomeCliente || nomeCliente,
+      nomeCliente: '',
       assessor: normalizeAssessorName(enrichedFields.assessor || assessor),
       broker: enrichedFields.broker || broker,
       corretagem,

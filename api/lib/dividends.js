@@ -97,6 +97,9 @@ const parseAmount = (value) => {
   return Number(raw)
 }
 
+const JCP_WITHHOLDING_RATE = 0.175
+const JCP_NET_FACTOR = 1 - JCP_WITHHOLDING_RATE
+
 const inRangeInclusive = (dateKey, from, to) => {
   const key = normalizeDateKey(dateKey)
   const start = normalizeDateKey(from)
@@ -112,14 +115,14 @@ const applyNetValue = (event) => {
   const amount = parseAmount(event?.amount ?? event?.value ?? event?.rate ?? event?.cash_amount ?? 0)
   if (!Number.isFinite(amount)) return 0
   const type = normalizeType(event?.type)
-  return type === 'JCP' ? amount * 0.85 : amount
+  return type === 'JCP' ? amount * JCP_NET_FACTOR : amount
 }
 
 const buildEvent = ({ typeRaw, dataCom, paymentDate, amount }) => {
   const normalizedType = normalizeType(typeRaw)
   const numericAmount = parseAmount(amount)
   if (!Number.isFinite(numericAmount)) return null
-  const valueNet = normalizedType === 'JCP' ? numericAmount * 0.85 : numericAmount
+  const valueNet = normalizedType === 'JCP' ? numericAmount * JCP_NET_FACTOR : numericAmount
   return {
     type: normalizedType,
     typeRaw: typeRaw ? String(typeRaw) : null,

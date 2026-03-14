@@ -12,14 +12,6 @@ const escapeHtml = (value) => String(value ?? '')
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#39;')
 
-const buildCell = (value) => `
-  <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:12px;">${escapeHtml(value)}</td>
-`
-
-const buildHeaderCell = (value) => `
-  <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e2e8f0;font-size:12px;color:#475569;">${escapeHtml(value)}</th>
-`
-
 const chunkArray = (items, size) => {
   const source = Array.isArray(items) ? items : []
   const chunkSize = Math.max(1, Number(size) || 1)
@@ -132,10 +124,21 @@ export const exportReportPdf = ({ title, header, summary, details, barriers, war
 </html>
 `
 
+  if (window.electronAPI?.savePdf) {
+    popup.close()
+    window.electronAPI.savePdf({ html, defaultPath: `${filename}.pdf`, landscape: false }).then((result) => {
+      if (!result?.ok) {
+        const fb = window.open('', '_blank')
+        if (fb) { fb.document.write(html); fb.document.close(); fb.focus(); setTimeout(() => fb.print(), 400) }
+      }
+    }).catch(() => {})
+    return true
+  }
+
   popup.document.write(html)
   popup.document.close()
   popup.focus()
-  popup.print()
+  setTimeout(() => popup.print(), 400)
   return true
 }
 
@@ -149,6 +152,24 @@ export const exportVencimentosReportPdf = ({
 }, filename = 'relatorio_vencimentos') => {
   const popup = window.open('', '_blank')
   if (!popup) return false
+
+  const normalizeReportRow = (row) => {
+    if (Array.isArray(row)) return { cells: row, tones: {} }
+    if (row && typeof row === 'object') {
+      return {
+        cells: Array.isArray(row.cells) ? row.cells : [],
+        tones: row.tones && typeof row.tones === 'object' ? row.tones : {},
+      }
+    }
+    return { cells: [], tones: {} }
+  }
+
+  const resolveToneClass = (tone) => {
+    if (tone === 'positive') return 'tone-positive'
+    if (tone === 'negative') return 'tone-negative'
+    if (tone === 'neutral') return 'tone-neutral'
+    return ''
+  }
 
   const filtersHtml = filters.length
     ? `
@@ -169,12 +190,21 @@ export const exportVencimentosReportPdf = ({
     : ''
 
   const tableHeader = columns.length
-    ? `<tr>${columns.map((col) => buildHeaderCell(col)).join('')}</tr>`
+    ? `<tr>${columns.map((col) => `<th class="vencimentos-head">${escapeHtml(col)}</th>`).join('')}</tr>`
     : ''
 
   const tableRows = rows.length
-    ? rows.map((row) => `<tr>${row.map((cell) => buildCell(cell)).join('')}</tr>`).join('')
-    : '<tr><td style="padding:12px;font-size:12px;color:#6b7280;">Sem dados para exibir.</td></tr>'
+    ? rows.map((row) => {
+      const normalized = normalizeReportRow(row)
+      const cells = columns.length
+        ? columns.map((_, index) => normalized.cells[index] ?? '')
+        : normalized.cells
+      return `<tr>${cells.map((cell, index) => {
+        const toneClass = resolveToneClass(normalized.tones?.[index])
+        return `<td class="vencimentos-cell ${toneClass}">${escapeHtml(cell)}</td>`
+      }).join('')}</tr>`
+    }).join('')
+    : `<tr><td class="vencimentos-empty" colspan="${Math.max(columns.length, 1)}">Sem dados para exibir.</td></tr>`
 
   const html = `
 <!doctype html>
@@ -187,6 +217,45 @@ export const exportVencimentosReportPdf = ({
     h1 { font-size: 20px; margin-bottom: 4px; }
     h2 { font-size: 16px; margin: 20px 0 8px; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+    .vencimentos-grid th {
+      text-align: center;
+      padding: 7px 8px;
+      border: 1px solid #d9e2ec;
+      background: #0f172a;
+      color: #ffffff;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .vencimentos-cell {
+      text-align: center;
+      padding: 6px 8px;
+      border: 1px solid #d9e2ec;
+      font-size: 11px;
+      color: #0f172a;
+    }
+    .vencimentos-empty {
+      text-align: center;
+      padding: 12px;
+      border: 1px solid #d9e2ec;
+      color: #64748b;
+      font-size: 12px;
+    }
+    .tone-positive {
+      color: #137333;
+      font-weight: 700;
+      background: #e7f6ec;
+    }
+    .tone-negative {
+      color: #b42318;
+      font-weight: 700;
+      background: #fbe9eb;
+    }
+    .tone-neutral {
+      color: #374151;
+      font-weight: 700;
+      background: #f3f4f6;
+    }
   </style>
 </head>
 <body>
@@ -196,8 +265,8 @@ export const exportVencimentosReportPdf = ({
   ${filtersHtml}
   ${summaryHtml}
 
-  <h2>Pagina atual</h2>
-  <table>
+  <h2>Tabela resumida</h2>
+  <table class="vencimentos-grid">
     ${tableHeader}
     ${tableRows}
   </table>
@@ -205,10 +274,21 @@ export const exportVencimentosReportPdf = ({
 </html>
 `
 
+  if (window.electronAPI?.savePdf) {
+    popup.close()
+    window.electronAPI.savePdf({ html, defaultPath: `${filename}.pdf`, landscape: false }).then((result) => {
+      if (!result?.ok) {
+        const fb = window.open('', '_blank')
+        if (fb) { fb.document.write(html); fb.document.close(); fb.focus(); setTimeout(() => fb.print(), 400) }
+      }
+    }).catch(() => {})
+    return true
+  }
+
   popup.document.write(html)
   popup.document.close()
   popup.focus()
-  popup.print()
+  setTimeout(() => popup.print(), 400)
   return true
 }
 
@@ -244,16 +324,11 @@ export const exportTimesReportPdf = ({
     emerald: '#34d3ae',
   }
 
-  const filtersHtml = filters.length
-    ? filters
-      .map((item) => `
-        <span class="filter-pill">
-          <b>${escapeHtml(item.label)}</b>
-          <em>${escapeHtml(item.value)}</em>
-        </span>
-      `)
-      .join('')
-    : '<span class="filter-pill"><b>Filtros</b><em>Sem filtros aplicados</em></span>'
+  // Mantido por compatibilidade da assinatura do export.
+  void filters
+
+  const TEAM_PERFORMANCE_FIRST_PAGE_LIMIT = 10
+  const TEAM_PERFORMANCE_EXTRA_PAGE_SIZE = 12
 
   const kpisHtml = kpis.length
     ? kpis.map((item) => {
@@ -302,8 +377,8 @@ export const exportTimesReportPdf = ({
     `).join('')
     : '<li class="row-item empty">Sem dados para Top Assessores.</li>'
 
-  const teamPerformanceHtml = teamPerformance.length
-    ? teamPerformance.map((row) => `
+  const renderTeamPerformanceRows = (rows) => (rows.length
+    ? rows.map((row) => `
       <div class="bar-row">
         <div class="bar-head">
           <b>${escapeHtml(row.team)}</b>
@@ -311,12 +386,38 @@ export const exportTimesReportPdf = ({
         </div>
         <div class="track"><span style="width:${clampPercent(row.attainmentPct)}%"></span></div>
         <div class="bar-meta">
-          <small>Receita ${escapeHtml(row.revenue || row.value || '—')}</small>
-          <small>Meta ${escapeHtml(row.goal || '—')}</small>
+          <small>Realizado ${escapeHtml(row.revenue || row.value || 'â€”')} | Meta ${escapeHtml(row.goal || 'â€”')}</small>
         </div>
       </div>
     `).join('')
-    : '<div class="bar-empty">Sem dados por equipe.</div>'
+    : '<div class="bar-empty">Sem dados por equipe.</div>')
+
+  const summaryTeamRows = Array.isArray(teamPerformance)
+    ? teamPerformance.slice(0, TEAM_PERFORMANCE_FIRST_PAGE_LIMIT)
+    : []
+  const overflowTeamRows = Array.isArray(teamPerformance)
+    ? teamPerformance.slice(TEAM_PERFORMANCE_FIRST_PAGE_LIMIT)
+    : []
+  const teamPerformanceHtml = renderTeamPerformanceRows(summaryTeamRows)
+  const teamPerformanceExtraPages = chunkArray(overflowTeamRows, TEAM_PERFORMANCE_EXTRA_PAGE_SIZE)
+
+  const extraTeamPerformanceHtml = teamPerformanceExtraPages.length
+    ? teamPerformanceExtraPages.map((rows, pageIndex) => `
+      <section class="times-pdf-page summary-extra-page page-break">
+        <div class="table-page-head">
+          <h2>Receita por Equipe (continuacao)</h2>
+          <span>Bloco ${pageIndex + 1}</span>
+        </div>
+        <article class="chart-card chart-card-full">
+          <div class="chart-head">
+            <h3>Receita por Equipe</h3>
+            <span>Receita x objetivo</span>
+          </div>
+          ${renderTeamPerformanceRows(rows)}
+        </article>
+      </section>
+    `).join('')
+    : ''
 
   const seniorityHtml = seniorityPerformance.length
     ? seniorityPerformance.map((row) => `
@@ -382,13 +483,14 @@ export const exportTimesReportPdf = ({
     totals: sumTeamTotals(rows),
   }))
   const teamPages = chunkArray(teamGroups, 3)
+  const tablePageStart = 2 + teamPerformanceExtraPages.length
 
   const tablePagesHtml = teamPages.length
     ? teamPages.map((groupPage, pageIndex) => `
       <section class="times-pdf-page table-page ${pageIndex < teamPages.length - 1 ? 'page-break' : ''}">
         <div class="table-page-head">
           <h2>Tabela por Equipe</h2>
-          <span>Pagina ${pageIndex + 2}</span>
+          <span>Pagina ${tablePageStart + pageIndex}</span>
         </div>
         ${groupPage.map((group) => `
           <article class="team-block">
@@ -473,7 +575,12 @@ export const exportTimesReportPdf = ({
       margin: 0 0 8mm;
     }
     .page-break { page-break-after: always; break-after: page; }
-    .first-page { page-break-after: always; break-after: page; }
+    .first-page {
+      page-break-after: always;
+      break-after: page;
+      page-break-inside: avoid;
+      break-inside: avoid-page;
+    }
     .report-head {
       display: flex;
       align-items: flex-start;
@@ -483,29 +590,13 @@ export const exportTimesReportPdf = ({
     }
     .report-head h1 { font-size: 20px; }
     .report-head small { color: #9cb0cb; font-size: 12px; }
-    .filters {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin: 10px 0 12px;
-    }
-    .filter-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 5px 8px;
-      border-radius: 999px;
-      border: 1px solid rgba(145, 195, 255, 0.3);
-      background: rgba(255, 255, 255, 0.04);
-      font-size: 11px;
-    }
-    .filter-pill b { color: #d8ecff; }
-    .filter-pill em { color: #9cb0cb; font-style: normal; }
     .kpi-grid {
       display: grid;
       grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 8px;
       margin-bottom: 10px;
+      page-break-inside: avoid;
+      break-inside: avoid-page;
     }
     .kpi-card {
       border-radius: 10px;
@@ -558,17 +649,28 @@ export const exportTimesReportPdf = ({
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
+      page-break-inside: avoid;
+      break-inside: avoid-page;
+    }
+    .charts-col {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+      min-height: 0;
     }
     .chart-card {
       border-radius: 10px;
       border: 1px solid rgba(126, 167, 255, 0.2);
       background: rgba(7, 18, 32, 0.9);
       padding: 8px;
-      min-height: 78mm;
+      min-height: 0;
       display: grid;
       align-content: start;
       gap: 8px;
+      page-break-inside: avoid;
+      break-inside: avoid-page;
     }
+    .chart-card-full { min-height: auto; }
     .chart-head {
       display: flex;
       align-items: center;
@@ -686,13 +788,13 @@ export const exportTimesReportPdf = ({
     }
     .gap-wrap {
       display: grid;
-      grid-template-columns: 92px 1fr;
-      align-items: center;
-      gap: 8px;
+      grid-template-columns: 120px minmax(0, 1fr);
+      align-items: flex-start;
+      gap: 10px;
     }
     .gap-pie {
-      width: 82px;
-      height: 82px;
+      width: 110px;
+      height: 110px;
       border-radius: 50%;
       border: 1px solid rgba(255, 255, 255, 0.2);
       background: conic-gradient(${gapGradient});
@@ -784,51 +886,83 @@ export const exportTimesReportPdf = ({
       </div>
       ${generatedAt ? `<small>Gerado em ${escapeHtml(generatedAt)}</small>` : ''}
     </header>
-    <div class="filters">${filtersHtml}</div>
     <section class="kpi-grid">${kpisHtml}</section>
     <section class="charts-grid">
-      <article class="chart-card">
-        <div class="chart-head">
-          <h3>Top Assessores</h3>
-          <span>Receita liquida</span>
-        </div>
-        <ul class="rows">${topAssessorsHtml}</ul>
-      </article>
-      <article class="chart-card">
-        <div class="chart-head">
-          <h3>Receita por Equipe</h3>
-          <span>Receita x objetivo</span>
-        </div>
-        ${teamPerformanceHtml}
-      </article>
-      <article class="chart-card">
-        <div class="chart-head">
-          <h3>Atingimento por Senioridade</h3>
-          <span>Senior, Pleno e Junior</span>
-        </div>
-        ${seniorityHtml}
-      </article>
-      <article class="chart-card">
-        <div class="chart-head">
-          <h3>GAP Objetivo</h3>
-          <span>Acima e abaixo da meta</span>
-        </div>
-        <div class="gap-wrap">
-          <div class="gap-pie"></div>
-          <ul class="rows">${gapListHtml}</ul>
-        </div>
-      </article>
+      <div class="charts-col">
+        <article class="chart-card">
+          <div class="chart-head">
+            <h3>Top Assessores</h3>
+            <span>Receita liquida</span>
+          </div>
+          <ul class="rows">${topAssessorsHtml}</ul>
+        </article>
+        <article class="chart-card">
+          <div class="chart-head">
+            <h3>Atingimento por Senioridade</h3>
+            <span>Senior, Pleno e Junior</span>
+          </div>
+          ${seniorityHtml}
+        </article>
+      </div>
+      <div class="charts-col">
+        <article class="chart-card">
+          <div class="chart-head">
+            <h3>Receita por Equipe</h3>
+            <span>Receita x objetivo</span>
+          </div>
+          ${teamPerformanceHtml}
+        </article>
+        <article class="chart-card">
+          <div class="chart-head">
+            <h3>GAP Objetivo</h3>
+            <span>Acima e abaixo da meta</span>
+          </div>
+          <div class="gap-wrap">
+            <div class="gap-pie"></div>
+            <ul class="rows">${gapListHtml}</ul>
+          </div>
+        </article>
+      </div>
     </section>
   </section>
+  ${extraTeamPerformanceHtml}
   ${tablePagesHtml}
 </body>
 </html>
 `
 
+  // Em Electron, usar API nativa para gerar PDF real em vez de popup.print()
+  if (window.electronAPI?.savePdf) {
+    popup.close()
+    window.electronAPI.savePdf({
+      html,
+      defaultPath: `${filename}.pdf`,
+      landscape: true,
+    }).then((result) => {
+      if (result?.ok) {
+        console.log('PDF salvo em:', result.filePath)
+      } else {
+        console.warn('Falha ao salvar PDF:', result?.error)
+        // Fallback: abrir popup para impressao manual
+        const fallbackPopup = window.open('', '_blank')
+        if (fallbackPopup) {
+          fallbackPopup.document.write(html)
+          fallbackPopup.document.close()
+          fallbackPopup.focus()
+          setTimeout(() => fallbackPopup.print(), 400)
+        }
+      }
+    }).catch((err) => {
+      console.warn('Erro ao salvar PDF via Electron:', err)
+    })
+    return true
+  }
+
+  // Fallback para navegadores normais: popup + print
   popup.document.write(html)
   popup.document.close()
   popup.focus()
-  popup.print()
+  setTimeout(() => popup.print(), 400)
   return true
 }
 

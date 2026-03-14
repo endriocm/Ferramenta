@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useState } from 'react'
+import { startTransition, useCallback, useEffect, useMemo, useState } from 'react'
 
 const normalize = (value) => {
   if (!value) return '/'
@@ -10,7 +10,12 @@ export const useHashRoute = (fallback = '/') => {
   const [path, setPath] = useState(() => normalize(window.location.hash) || fallback)
 
   useEffect(() => {
-    const handleChange = () => setPath(normalize(window.location.hash) || fallback)
+    const handleChange = () => {
+      const next = normalize(window.location.hash) || fallback
+      startTransition(() => {
+        setPath((previous) => (previous === next ? previous : next))
+      })
+    }
     window.addEventListener('hashchange', handleChange)
     return () => window.removeEventListener('hashchange', handleChange)
   }, [fallback])
@@ -18,9 +23,12 @@ export const useHashRoute = (fallback = '/') => {
   const navigate = useCallback((next) => {
     const target = normalize(next)
     if (target === path) return
+    if (normalize(window.location.hash) === target) {
+      startTransition(() => setPath(target))
+      return
+    }
     window.location.hash = target
   }, [path])
 
   return useMemo(() => ({ path, navigate }), [path, navigate])
 }
-

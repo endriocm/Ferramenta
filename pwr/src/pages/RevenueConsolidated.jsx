@@ -1,8 +1,15 @@
-﻿import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import PageHeader from '../components/PageHeader'
 import Icon from '../components/Icons'
 import { useToast } from '../hooks/useToast'
-import { importConsolidatedRevenueComplement } from '../services/revenueConsolidated'
+import useImportedFileBinding from '../hooks/useImportedFileBinding'
+import { exportXlsx } from '../services/exportXlsx'
+import { readImportedFileAsArrayBuffer } from '../services/importCatalog'
+import {
+  buildConsolidatedTemplateRows,
+  CONSOLIDATED_TEMPLATE_HEADERS,
+  importConsolidatedRevenueComplement,
+} from '../services/revenueConsolidated'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 
 const joinMonths = (months) => {
@@ -13,42 +20,49 @@ const joinMonths = (months) => {
 const RevenueConsolidated = () => {
   const { notify } = useToast()
   const { tagsIndex } = useGlobalFilters()
-  const fileInputRef = useRef(null)
-  const [selectedFile, setSelectedFile] = useState(null)
+  const importBinding = useImportedFileBinding('consolidado')
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState(null)
 
+  const selectedFile = importBinding.selectedFile
+  const selectedOption = importBinding.options.find((option) => option.value === importBinding.value) || null
   const summary = result?.summary || null
   const importedByLine = summary?.importedByLine || { bovespa: 0, bmf: 0, estruturadas: 0 }
 
   const headerMeta = useMemo(() => ([
-    { label: 'Arquivo selecionado', value: selectedFile?.name || 'Nenhum' },
+    { label: 'Arquivo selecionado', value: selectedFile?.fileName || selectedFile?.name || 'Nenhum' },
     { label: 'Linhas lidas', value: summary?.fileRows ?? 0 },
     { label: 'Linhas validas', value: summary?.parsedRows ?? 0 },
     { label: 'Linhas importadas', value: summary?.importedRows ?? 0 },
     { label: 'Meses importados', value: summary?.monthsToImport?.length ?? 0 },
     { label: 'Meses ignorados', value: summary?.monthsSkipped?.length ?? 0 },
-  ]), [selectedFile?.name, summary])
+  ]), [selectedFile?.fileName, selectedFile?.name, summary])
 
-  const handlePickFile = useCallback(() => {
-    fileInputRef.current?.click()
-  }, [])
-
-  const handleFileChange = useCallback((event) => {
-    const file = event.target.files?.[0] || null
-    setSelectedFile(file)
-  }, [])
+  const handleDownloadTemplate = useCallback(async () => {
+    await exportXlsx({
+      fileName: 'modelo_receita_consolidada.xlsx',
+      sheetName: 'Receita Bruta',
+      columns: CONSOLIDATED_TEMPLATE_HEADERS,
+      rows: buildConsolidatedTemplateRows(),
+    })
+    notify('Modelo da receita consolidada exportado.', 'success')
+  }, [notify])
 
   const handleImport = useCallback(async () => {
-    if (!selectedFile) {
+    let targetFile = selectedFile
+    if (!targetFile) targetFile = await importBinding.refreshFromCatalog()
+    if (!targetFile) {
       notify('Selecione um arquivo .xlsx para importar.', 'warning')
       return
     }
 
     setRunning(true)
     try {
+      const parseInput = targetFile?.source === 'electron'
+        ? (await readImportedFileAsArrayBuffer(targetFile)) || targetFile
+        : targetFile
       const response = await importConsolidatedRevenueComplement({
-        input: selectedFile,
+        input: parseInput,
         tagsIndex,
       })
       setResult(response)
@@ -67,7 +81,7 @@ const RevenueConsolidated = () => {
     } finally {
       setRunning(false)
     }
-  }, [notify, selectedFile, tagsIndex])
+  }, [importBinding.refreshFromCatalog, notify, selectedFile, tagsIndex])
 
   return (
     <div className="page">
@@ -76,18 +90,36 @@ const RevenueConsolidated = () => {
         subtitle="Importe planilhas consolidadas para complementar apenas meses ausentes, sem substituir os relatorios atuais."
         meta={headerMeta}
         actions={[
-          { label: 'Selecionar arquivo', icon: 'upload', variant: 'btn-secondary', onClick: handlePickFile },
+          { label: 'Baixar modelo', icon: 'download', variant: 'btn-secondary', onClick: handleDownloadTemplate },
           { label: running ? 'Importando...' : 'Importar consolidado', icon: 'sync', onClick: handleImport, disabled: running || !selectedFile },
         ]}
       />
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".xlsx,.xls"
-        onChange={handleFileChange}
-        hidden
-      />
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Arquivo importado</h3>
+            <p className="muted">Selecione um arquivo ja catalogado no menu lateral de Importacao.</p>
+          </div>
+        </div>
+        <div className="sync-folder-filter">
+          <label className="sync-folder-filter-field">
+            <span>Arquivo para complementar</span>
+            <select
+              className="input"
+              value={importBinding.value || ''}
+              onChange={(event) => importBinding.setValue(event.target.value)}
+              disabled={!importBinding.options.length || running}
+            >
+              {!importBinding.options.length ? <option value="">Sem arquivos disponiveis</option> : null}
+              {importBinding.options.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <div className="muted">{selectedOption?.description || importBinding.emptyMessage || 'Nenhum arquivo vinculado.'}</div>
+        </div>
+      </section>
 
       <section className="panel">
         <div className="panel-head">

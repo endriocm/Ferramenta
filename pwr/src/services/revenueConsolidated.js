@@ -1,9 +1,11 @@
 import { normalizeDateKey } from '../utils/dateKey'
-import { loadXlsx } from './xlsxLoader'
+import { parseXlsxInWorker } from './xlsxWorkerClient'
 import { loadRevenueList, saveRevenueList } from './revenueStore'
 import { loadStructuredRevenue, saveStructuredRevenue } from './revenueStructured'
 import { normalizeAssessorName } from '../utils/assessor'
 import { enrichRow } from './tags'
+import { toNumber as parseNumber, toSafeNumber } from '../utils/number'
+import { buildEffectiveBmfEntries, buildEffectiveBovespaEntries, buildEffectiveStructuredEntries } from './revenueXpCommission'
 
 const CONSOLIDATED_SOURCE = 'consolidated-import'
 
@@ -20,38 +22,10 @@ const normalizeToken = (value) => String(value || '')
   .normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '')
 
-const toSafeNumber = (value) => {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
 const toRounded = (value, digits = 2) => {
   if (!Number.isFinite(value)) return 0
   const factor = 10 ** digits
   return Math.round(value * factor) / factor
-}
-
-const parseNumber = (value) => {
-  if (value == null) return null
-  let text = String(value).trim()
-  if (!text) return null
-  text = text.replace(/\s+/g, '')
-  const hasComma = text.includes(',')
-  const hasDot = text.includes('.')
-  if (hasComma && hasDot) {
-    if (text.lastIndexOf(',') > text.lastIndexOf('.')) {
-      text = text.replace(/\./g, '').replace(',', '.')
-    } else {
-      text = text.replace(/,/g, '')
-    }
-  } else if (hasComma) {
-    text = text.replace(/\./g, '').replace(',', '.')
-  } else {
-    text = text.replace(/,/g, '')
-  }
-  text = text.replace(/[^0-9.-]/g, '')
-  const parsed = Number(text)
-  return Number.isFinite(parsed) ? parsed : null
 }
 
 const toArrayBuffer = async (input) => {
@@ -92,6 +66,9 @@ const resolveDataKey = (entry) => normalizeDateKey(entry?.dataEntrada || entry?.
 
 const resolveGrossRevenue = (line, entry) => {
   if (line === 'Estruturadas') {
+    if (entry?.comissaoBaseBruta != null && entry?.comissaoBaseBruta !== '') {
+      return toSafeNumber(entry?.comissaoBaseBruta)
+    }
     const base = toSafeNumber(entry?.comissao ?? entry?.receita ?? entry?.valor)
     return base * 2
   }
@@ -107,7 +84,7 @@ const resolveConsolidatedRow = (line, entry, tagsIndex) => {
   if (!data) return null
   const mesApuracao = data.slice(0, 7)
   const conta = String(enriched?.codigoCliente || enriched?.conta || enriched?.cliente || '').trim()
-  const cliente = String(enriched?.nomeCliente || enriched?.cliente || '').trim()
+  const cliente = conta
   const assessor = String(enriched?.assessor || '').trim()
   const broker = String(enriched?.broker || '').trim()
   const equipe = String(enriched?.time || '').trim()
@@ -135,11 +112,16 @@ const resolveConsolidatedRow = (line, entry, tagsIndex) => {
   const corretagemBruta = line === 'Estruturadas'
     ? null
     : toSafeNumber(enriched?.corretagem ?? enriched?.valor ?? enriched?.receita)
+  const structuredGrossBase = line === 'Estruturadas'
+    ? (enriched?.comissaoBaseBruta != null && enriched?.comissaoBaseBruta !== ''
+      ? toSafeNumber(enriched?.comissaoBaseBruta)
+      : toSafeNumber(enriched?.comissao ?? enriched?.receita ?? enriched?.valor) * 2)
+    : null
   const comissaoBase = line === 'Estruturadas'
-    ? toSafeNumber(enriched?.comissao ?? enriched?.receita ?? enriched?.valor)
+    ? structuredGrossBase
     : null
   const receitaLiquida = line === 'Estruturadas'
-    ? comissaoBase
+    ? toSafeNumber(enriched?.comissao ?? enriched?.receita ?? enriched?.valor)
     : toSafeNumber(enriched?.receita ?? enriched?.valor)
   const receitaBruta = resolveGrossRevenue(line, enriched)
 
@@ -288,10 +270,12 @@ const buildBovespaOrBmfEntry = (line, row, index, tagsIndex) => {
   const prefix = line === 'BMF' ? 'bmf' : 'bov'
   const id = `${prefix}-cns-${Date.now()}-${index}`
   const corretagem = toSafeNumber(row.corretagemBruta ?? row.receitaBruta)
+  const receitaBrutaBase = toSafeNumber(row.receitaBruta ?? corretagem)
   const tipoCorretagem = normalizeTipoCorretagem(row.tipoCorretagem || row.estrategia)
   const receita = row.receitaLiquida != null
     ? toSafeNumber(row.receitaLiquida)
     : corretagem
+  const repasse = receitaBrutaBase > 0 ? toSafeNumber(receita / receitaBrutaBase) : null
   const origemOperacao = String(row.origemOperacao || line).trim() || line
   const estrategia = String(row.estrategia || row.tipoCorretagem || '').trim()
   const operacao = String(row.operacao || '').trim() || `${line} - ${tipoCorretagem}`
@@ -300,11 +284,13 @@ const buildBovespaOrBmfEntry = (line, row, index, tagsIndex) => {
     codigoCliente: row.conta || '',
     conta: row.conta || '',
     data: row.data,
-    nomeCliente: row.cliente || '',
-    cliente: row.cliente || row.conta || '',
+    nomeCliente: '',
+    cliente: row.conta || '',
     assessor: normalizeAssessorName(row.assessor, 'Sem assessor') || 'Sem assessor',
     broker: row.broker || '',
     corretagem: toRounded(corretagem, 6),
+    receitaBrutaBase: toRounded(receitaBrutaBase, 6),
+    repasse: repasse == null ? '' : toRounded(repasse, 6),
     volumeNegociado: toRounded(toSafeNumber(row.volumeNegociado), 6),
     tipoCorretagem,
     mercado: row.mercado || (line === 'BMF' ? 'BMF' : 'BOV'),
@@ -326,9 +312,13 @@ const buildBovespaOrBmfEntry = (line, row, index, tagsIndex) => {
 
 const buildStructuredEntry = (row, index, tagsIndex) => {
   const id = `estr-cns-${Date.now()}-${index}`
-  const comissaoBase = row.comissaoBase != null
-    ? toSafeNumber(row.comissaoBase)
-    : toSafeNumber(row.receitaBruta) / 2
+  const receitaBruta = row.receitaBruta != null
+    ? toSafeNumber(row.receitaBruta)
+    : (row.comissaoBase != null ? toSafeNumber(row.comissaoBase) : 0)
+  const receitaLiquida = row.receitaLiquida != null
+    ? toSafeNumber(row.receitaLiquida)
+    : (row.comissaoBase != null ? toSafeNumber(row.comissaoBase) : receitaBruta / 2)
+  const repasse = receitaBruta > 0 ? toSafeNumber(receitaLiquida / receitaBruta) : null
   const estrutura = String(row.estrutura || row.estrategia || row.operacao || 'Estruturada').trim()
   const origemOperacao = String(row.origemOperacao || 'Estruturadas').trim() || 'Estruturadas'
   const baseEntry = {
@@ -338,11 +328,13 @@ const buildStructuredEntry = (row, index, tagsIndex) => {
     estrutura,
     ativo: row.ativo || '',
     vencimento: row.vencimento || '',
-    comissao: toRounded(comissaoBase, 6),
+    comissao: toRounded(receitaLiquida, 6),
+    comissaoBaseBruta: toRounded(receitaBruta, 6),
+    repasse: repasse == null ? '' : toRounded(repasse, 6),
     quantidade: row.quantidade != null ? row.quantidade : null,
     precoCompra: row.precoCompra != null ? row.precoCompra : null,
-    nomeCliente: row.cliente || '',
-    cliente: row.cliente || row.conta || '',
+    nomeCliente: '',
+    cliente: row.conta || '',
     assessor: normalizeAssessorName(row.assessor, 'Sem assessor') || 'Sem assessor',
     broker: row.broker || '',
     origem: origemOperacao,
@@ -388,11 +380,111 @@ export const CONSOLIDATED_EXPORT_COLUMNS = [
   { key: 'sourceRegistro', label: 'Source Registro' },
 ]
 
+export const CONSOLIDATED_TEMPLATE_HEADERS = CONSOLIDATED_EXPORT_COLUMNS.map((column) => column.label)
+
+const CONSOLIDATED_TEMPLATE_SAMPLE_DATA = [
+  {
+    linha: 'Bovespa',
+    origemOperacao: 'Bovespa',
+    operacao: 'Bovespa - variavel',
+    estrategia: 'variavel',
+    data: '01/02/2026',
+    mesApuracao: '2026-02',
+    idOperacao: 'BOV-EXEMPLO-001',
+    conta: '123456',
+    cliente: 'Cliente Exemplo Bovespa',
+    assessor: 'Assessor Exemplo',
+    broker: 'Broker Exemplo',
+    equipe: 'Time Alpha',
+    unidade: 'SP',
+    senioridade: 'Senior',
+    tipoCorretagem: 'variavel',
+    mercado: 'BOV',
+    estrutura: '',
+    ativo: 'PETR4',
+    vencimento: '',
+    quantidade: 1000,
+    precoCompra: 28.35,
+    volumeNegociado: 28350,
+    corretagemBruta: 520.5,
+    comissaoBase: '',
+    receitaLiquida: 390.38,
+    receitaBruta: 520.5,
+    sourceRegistro: 'modelo',
+  },
+  {
+    linha: 'BMF',
+    origemOperacao: 'BMF',
+    operacao: 'BMF - variavel',
+    estrategia: 'variavel',
+    data: '02/02/2026',
+    mesApuracao: '2026-02',
+    idOperacao: 'BMF-EXEMPLO-001',
+    conta: '654321',
+    cliente: 'Cliente Exemplo BMF',
+    assessor: 'Assessor Exemplo',
+    broker: 'Broker Exemplo',
+    equipe: 'Time Alpha',
+    unidade: 'RJ',
+    senioridade: 'Pleno',
+    tipoCorretagem: 'variavel',
+    mercado: 'BMF',
+    estrutura: '',
+    ativo: 'WINJ26',
+    vencimento: '',
+    quantidade: 12,
+    precoCompra: 132450,
+    volumeNegociado: 1589400,
+    corretagemBruta: 840.12,
+    comissaoBase: '',
+    receitaLiquida: 630.09,
+    receitaBruta: 840.12,
+    sourceRegistro: 'modelo',
+  },
+  {
+    linha: 'Estruturadas',
+    origemOperacao: 'Estruturadas',
+    operacao: 'Estruturada - Collar',
+    estrategia: 'Collar',
+    data: '03/02/2026',
+    mesApuracao: '2026-02',
+    idOperacao: 'EST-EXEMPLO-001',
+    conta: '998877',
+    cliente: 'Cliente Exemplo Estruturada',
+    assessor: 'Assessor Exemplo',
+    broker: 'Broker Exemplo',
+    equipe: 'Time Beta',
+    unidade: 'BH',
+    senioridade: 'Junior',
+    tipoCorretagem: '',
+    mercado: '',
+    estrutura: 'Collar',
+    ativo: 'VALE3',
+    vencimento: '20/03/2026',
+    quantidade: 500,
+    precoCompra: 62.8,
+    volumeNegociado: '',
+    corretagemBruta: '',
+    comissaoBase: 2000,
+    receitaLiquida: 1000,
+    receitaBruta: 2000,
+    sourceRegistro: 'modelo',
+  },
+]
+
+export const buildConsolidatedTemplateRows = () => CONSOLIDATED_TEMPLATE_SAMPLE_DATA.map((item) => (
+  CONSOLIDATED_EXPORT_COLUMNS.map((column) => item[column.key] ?? '')
+))
+
 export const buildMonthlyConsolidatedExportPayload = ({ monthKey, tagsIndex }) => {
+  const effectiveBovespa = buildEffectiveBovespaEntries(loadRevenueList('bovespa'))
+  const effectiveBmf = buildEffectiveBmfEntries(loadRevenueList('bmf'))
+  const effectiveStructured = buildEffectiveStructuredEntries(loadStructuredRevenue())
+
   const sources = [
-    { line: 'Bovespa', entries: loadRevenueList('bovespa') },
-    { line: 'BMF', entries: loadRevenueList('bmf') },
-    { line: 'Estruturadas', entries: loadStructuredRevenue() },
+    { line: 'Bovespa', entries: effectiveBovespa },
+    { line: 'BMF', entries: effectiveBmf },
+    { line: 'Estruturadas', entries: effectiveStructured },
   ]
 
   const totals = {
@@ -460,10 +552,9 @@ export const importConsolidatedRevenueComplement = async ({ input, tagsIndex }) 
     }
   }
 
-  const XLSX = await loadXlsx()
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
-  const sheetName = workbook.SheetNames.find((name) => normalizeHeader(name) === normalizeHeader('Receita Bruta'))
-    || workbook.SheetNames[0]
+  const { sheetNames, sheets } = await parseXlsxInWorker(buffer)
+  const sheetName = sheetNames.find((name) => normalizeHeader(name) === normalizeHeader('Receita Bruta'))
+    || sheetNames[0]
   if (!sheetName) {
     return {
       ok: false,
@@ -471,15 +562,17 @@ export const importConsolidatedRevenueComplement = async ({ input, tagsIndex }) 
     }
   }
 
-  const sheet = workbook.Sheets[sheetName]
-  const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
+  const { rows: rawRows } = sheets[sheetName]
   const { parsedRows, ignoredRows } = parseConsolidatedRows(rawRows)
 
   const existingBovespa = loadRevenueList('bovespa')
   const existingBmf = loadRevenueList('bmf')
   const existingStructured = loadStructuredRevenue()
+  const effectiveBovespa = buildEffectiveBovespaEntries(existingBovespa)
+  const effectiveBmf = buildEffectiveBmfEntries(existingBmf)
+  const effectiveStructured = buildEffectiveStructuredEntries(existingStructured)
   const existingMonths = new Set(
-    [...existingBovespa, ...existingBmf, ...existingStructured]
+    [...effectiveBovespa, ...effectiveBmf, ...effectiveStructured]
       .map((entry) => getMonthKey(resolveDataKey(entry)))
       .filter(Boolean),
   )

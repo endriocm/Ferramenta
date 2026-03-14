@@ -1,32 +1,11 @@
 import { normalizeDateKey } from '../utils/dateKey'
+import { toNumber as parseNumberSafe } from '../utils/number'
 
 const normalizeText = (value) => String(value || '')
   .trim()
   .toLowerCase()
   .normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '')
-
-const parseNumberSafe = (value) => {
-  if (value == null || value === '') return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const raw = String(value).trim()
-  if (!raw) return null
-  let cleaned = raw.replace(/[^\d,.-]/g, '')
-  if (!cleaned) return null
-  const hasComma = cleaned.includes(',')
-  const hasDot = cleaned.includes('.')
-  if (hasComma && hasDot) {
-    if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
-      cleaned = cleaned.replace(/\./g, '').replace(/,/g, '.')
-    } else {
-      cleaned = cleaned.replace(/,/g, '')
-    }
-  } else if (hasComma) {
-    cleaned = cleaned.replace(/,/g, '.')
-  }
-  const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
-}
 
 const normalizeEstrutura = (value) => normalizeText(value)
   .replace(/\s+/g, ' ')
@@ -76,7 +55,7 @@ export const buildVencimentoIndex = (rows) => {
 
 export const buildEstruturadasDashboard = ({ entries = [], vencimentoIndex }) => {
   const filtered = Array.isArray(entries) ? entries : []
-  const index = vencimentoIndex instanceof Map ? vencimentoIndex : new Map()
+  const _INDEX = vencimentoIndex instanceof Map ? vencimentoIndex : new Map()
 
   let totalRevenue = 0
   let totalVolume = 0

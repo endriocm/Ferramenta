@@ -46,6 +46,15 @@
           <path d="M12 7v5l3 2" />
         </svg>
       )
+    case 'calendar':
+      return (
+        <svg {...props}>
+          <rect x="3" y="4" width="18" height="17" rx="2" />
+          <path d="M8 2v4" />
+          <path d="M16 2v4" />
+          <path d="M3 10h18" />
+        </svg>
+      )
     case 'link':
       return (
         <svg {...props}>
@@ -132,6 +141,38 @@
           <path d="M14 3v6h6" />
         </svg>
       )
+    case 'copy':
+      return (
+        <svg {...props}>
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <rect x="4" y="4" width="11" height="11" rx="2" />
+        </svg>
+      )
+    case 'calculator':
+      return (
+        <svg {...props}>
+          <rect x="5" y="2.5" width="14" height="19" rx="2.5" />
+          <path d="M8 7h8" />
+          <path d="M8 11h2" />
+          <path d="M12 11h2" />
+          <path d="M16 11h0.01" />
+          <path d="M8 15h2" />
+          <path d="M12 15h2" />
+          <path d="M16 15h0.01" />
+          <path d="M8 19h2" />
+          <path d="M12 19h2" />
+          <path d="M16 19h0.01" />
+        </svg>
+      )
+    case 'call-spread':
+      return (
+        <svg {...props}>
+          <path d="M3 18h18" />
+          <path d="M6 16V8" />
+          <path d="M18 16V8" />
+          <path d="M3.5 17.5 9.5 11.5 13.5 11.5 20.5 4.5" />
+        </svg>
+      )
     case 'spark':
       return (
         <svg {...props}>
@@ -169,6 +210,22 @@
           <path d="M12 5v14" />
         </svg>
       )
+    case 'arrow-left':
+      return (
+        <svg {...props}>
+          <path d="m5 12 6-6" />
+          <path d="m5 12 6 6" />
+          <path d="M5 12h14" />
+        </svg>
+      )
+    case 'arrow-right':
+      return (
+        <svg {...props}>
+          <path d="m19 12-6-6" />
+          <path d="m19 12-6 6" />
+          <path d="M5 12h14" />
+        </svg>
+      )
     case 'info':
       return (
         <svg {...props}>
@@ -191,11 +248,25 @@
           <path d="M20 6 9 17l-5-5" />
         </svg>
       )
+    case 'bell':
+      return (
+        <svg {...props} strokeWidth={2}>
+          <path d="M18 16H6c1.2-1.4 2-3.6 2-6a4 4 0 1 1 8 0c0 2.4.8 4.6 2 6Z" />
+          <path d="M10 19a2 2 0 0 0 4 0" />
+        </svg>
+      )
     case 'x':
       return (
         <svg {...props}>
           <path d="M18 6 6 18" />
           <path d="M6 6l12 12" />
+        </svg>
+      )
+    case 'camera':
+      return (
+        <svg {...props}>
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z" />
+          <circle cx="12" cy="13" r="4" />
         </svg>
       )
     default:

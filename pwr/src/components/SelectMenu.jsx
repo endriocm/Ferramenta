@@ -17,6 +17,7 @@ const SelectMenu = ({
 
   const selected = options.find((option) => option.value === value)
   const displayLabel = selected?.label || placeholder
+  const selectedDotColor = selected?.dotColor || selected?.color || ''
 
   useEffect(() => {
     const handleOutside = (event) => {
@@ -61,7 +62,10 @@ const SelectMenu = ({
         aria-haspopup="listbox"
         aria-expanded={open}
       >
-        <span>{displayLabel}</span>
+        <span className="select-trigger-value">
+          {selectedDotColor ? <span className="select-option-dot" style={{ backgroundColor: selectedDotColor }} aria-hidden="true" /> : null}
+          <span>{displayLabel}</span>
+        </span>
         <Icon name="arrow-down" size={14} />
       </button>
       {open ? (
@@ -86,7 +90,14 @@ const SelectMenu = ({
                   className={`select-option ${option.value === draft ? 'active' : ''}`}
                   onClick={() => setDraft(option.value)}
                 >
-                  {option.label}
+                  {option?.dotColor || option?.color ? (
+                    <span
+                      className="select-option-dot"
+                      style={{ backgroundColor: option.dotColor || option.color }}
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                  <span>{option.label}</span>
                 </button>
               ))
             ) : (

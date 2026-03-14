@@ -1,10 +1,12 @@
-import { persistLocalStorage } from './nativeStorage'
+import { getHydratedStorageValue, persistLocalStorage, setHydratedStorageValue } from './nativeStorage'
 import { buildMonthLabel, getMonthKey } from '../lib/periodTree'
 import { normalizeAssessorName } from '../utils/assessor'
+import { applyRepasseToStructuredEntries, getRepasseConfigSignature } from './revenueRepasse'
 
 const STORAGE_KEY = 'pwr.receita.estruturadas'
 let rawCache = null
 let entriesCache = []
+let repasseSignatureCache = ''
 
 const normalizeStructuredEntry = (entry) => {
   if (!entry || typeof entry !== 'object') return entry
@@ -22,18 +24,35 @@ const normalizeStructuredEntries = (entries) => {
   return entries.map((entry) => normalizeStructuredEntry(entry))
 }
 
-export const loadStructuredRevenue = () => {
+const readStructuredRaw = () => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) return raw
+  } catch {
+    // noop
+  }
+  const hydrated = getHydratedStorageValue(STORAGE_KEY)
+  if (Array.isArray(hydrated)) return JSON.stringify(normalizeStructuredEntries(hydrated))
+  if (typeof hydrated === 'string') return hydrated
+  return ''
+}
+
+export const loadStructuredRevenue = () => {
+  try {
+    const raw = readStructuredRaw()
     if (!raw) return []
-    if (rawCache === raw) return entriesCache
+    const repasseSignature = getRepasseConfigSignature('estruturadas')
+    if (rawCache === raw && repasseSignatureCache === repasseSignature) return entriesCache
     const parsed = JSON.parse(raw)
     const entries = normalizeStructuredEntries(Array.isArray(parsed) ? parsed : [])
+    const adjustedEntries = applyRepasseToStructuredEntries(entries)
     rawCache = raw
-    entriesCache = entries
-    return entries
+    repasseSignatureCache = repasseSignature
+    entriesCache = adjustedEntries
+    return adjustedEntries
   } catch {
     rawCache = null
+    repasseSignatureCache = ''
     entriesCache = []
     return []
   }
@@ -41,15 +60,17 @@ export const loadStructuredRevenue = () => {
 
 export const saveStructuredRevenue = (entries) => {
   const normalizedEntries = normalizeStructuredEntries(entries || [])
+  const raw = JSON.stringify(normalizedEntries)
   try {
-    const raw = JSON.stringify(normalizedEntries)
     localStorage.setItem(STORAGE_KEY, raw)
-    rawCache = raw
-    entriesCache = normalizedEntries
-    window.dispatchEvent(new CustomEvent('pwr:receita-updated'))
   } catch {
     // noop
   }
+  setHydratedStorageValue(STORAGE_KEY, normalizedEntries)
+  rawCache = raw
+  repasseSignatureCache = getRepasseConfigSignature('estruturadas')
+  entriesCache = applyRepasseToStructuredEntries(normalizedEntries)
+  window.dispatchEvent(new CustomEvent('pwr:receita-updated'))
   void persistLocalStorage(STORAGE_KEY, normalizedEntries)
 }
 

@@ -10,7 +10,7 @@ import {
 const DEFAULT_PREFIX = 'win'
 const DEFAULT_KEEP = 1
 const DEFAULT_DIST = 'dist_electron'
-const DEFAULT_REGION = 'us-east-1'
+const DEFAULT_REGION = 'sa-east-1'
 const LATEST_FILE_NAME = 'latest.yml'
 const LATEST_INSTALLER_NAME = 'Ferramenta Setup Latest.exe'
 const MAX_LIST_LIMIT = 1000
@@ -140,15 +140,97 @@ const normalizeBucket = (value) => String(value || '').trim()
 
 const normalizeRegion = (value) => String(value || '').trim() || DEFAULT_REGION
 
+const normalizeEndpointUrl = (value) => {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  try {
+    const parsed = new URL(raw.includes('://') ? raw : `https://${raw}`)
+    return `${parsed.protocol}//${parsed.host}`
+  } catch {
+    return ''
+  }
+}
+
+const resolveS3ApiEndpoint = (region) => {
+  const fromEnv = normalizeEndpointUrl(process.env.AWS_S3_ENDPOINT || process.env.S3_ENDPOINT)
+  if (fromEnv) return fromEnv
+  return `https://s3.dualstack.${region}.amazonaws.com`
+}
+
+const toPathStyleS3Url = (value) => {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  let parsed = null
+  try {
+    parsed = new URL(raw.includes('://') ? raw : `https://${raw}`)
+  } catch {
+    return raw
+  }
+
+  const host = String(parsed.hostname || '').toLowerCase()
+  const pathParts = String(parsed.pathname || '').split('/').filter(Boolean)
+
+  const bucketRegionMatch = host.match(/^([^.]+)\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$/)
+  if (bucketRegionMatch) {
+    const bucket = bucketRegionMatch[1]
+    const region = bucketRegionMatch[2]
+    const prefix = pathParts.join('/')
+    const nextPath = [bucket, prefix].filter(Boolean).join('/')
+    return `https://s3.${region}.amazonaws.com/${nextPath}/`
+  }
+
+  const bucketGlobalMatch = host.match(/^([^.]+)\.s3\.amazonaws\.com$/)
+  if (bucketGlobalMatch) {
+    const bucket = bucketGlobalMatch[1]
+    const prefix = pathParts.join('/')
+    const nextPath = [bucket, prefix].filter(Boolean).join('/')
+    return `https://s3.amazonaws.com/${nextPath}/`
+  }
+
+  return parsed.toString()
+}
+
+const buildPathStyleBaseUrl = (bucket, region, prefix) => {
+  if (!bucket) return ''
+  const normalizedPrefix = normalizePrefix(prefix)
+  return `https://s3.${region}.amazonaws.com/${bucket}/${normalizedPrefix}/`
+}
+
 const normalizeBaseUrl = (value, bucket, region, prefix) => {
   const raw = String(value || '').trim()
   if (raw) {
-    const withProtocol = raw.includes('://') ? raw : `https://${raw}`
+    const pathStyle = toPathStyleS3Url(raw)
+    const withProtocol = pathStyle.includes('://') ? pathStyle : `https://${pathStyle}`
     return withProtocol.replace(/\/+$/, '') + '/'
   }
 
   if (!bucket) return ''
-  return `https://${bucket}.s3.${region}.amazonaws.com/${normalizePrefix(prefix)}/`
+  return buildPathStyleBaseUrl(bucket, region, prefix)
+}
+
+const isLegacyBlobUrl = (value) => {
+  const normalized = normalizeBaseUrl(value, '', DEFAULT_REGION, DEFAULT_PREFIX)
+  if (!normalized) return false
+  try {
+    const parsed = new URL(normalized)
+    const host = String(parsed.hostname || '').toLowerCase()
+    return host.includes('blob.vercel-storage.com')
+  } catch {
+    return false
+  }
+}
+
+const pickFirstSupportedBaseUrl = (candidates) => {
+  for (const candidate of candidates) {
+    const normalized = normalizeBaseUrl(candidate, '', DEFAULT_REGION, DEFAULT_PREFIX)
+    if (!normalized) continue
+    if (isLegacyBlobUrl(normalized)) {
+      console.warn(`Ignorando URL legado do Vercel Blob: ${normalized}`)
+      continue
+    }
+    return normalized
+  }
+  return ''
 }
 
 const joinStoragePath = (...segments) => {
@@ -372,6 +454,15 @@ const deleteObjects = async (s3, bucket, keys, dryRun = false) => {
   }
 }
 
+const createS3Client = (region) => {
+  const endpoint = resolveS3ApiEndpoint(region)
+  return new S3Client({
+    region,
+    forcePathStyle: true,
+    endpoint,
+  })
+}
+
 const main = async () => {
   const args = parseArgs(process.argv.slice(2))
   const envFile = parseEnvFile(path.resolve(process.cwd(), '.env.local'))
@@ -398,17 +489,14 @@ const main = async () => {
   if (!version) throw new Error('Versao nao encontrada. Use --version ou configure package.json.')
 
   const packagePublishBaseUrl = getPackagePublishBaseUrl()
-  const configuredBaseUrl = normalizeBaseUrl(
-    args.baseUrl ||
-      process.env.AWS_UPDATES_BASE_URL ||
-      process.env.UPDATE_BASE_URL ||
-      envFile.AWS_UPDATES_BASE_URL ||
-      envFile.UPDATE_BASE_URL ||
-      packagePublishBaseUrl,
-    '',
-    DEFAULT_REGION,
-    DEFAULT_PREFIX,
-  )
+  const configuredBaseUrl = pickFirstSupportedBaseUrl([
+    args.baseUrl,
+    process.env.AWS_UPDATES_BASE_URL,
+    process.env.UPDATE_BASE_URL,
+    envFile.AWS_UPDATES_BASE_URL,
+    envFile.UPDATE_BASE_URL,
+    packagePublishBaseUrl,
+  ])
   const parsedBaseUrl = parseS3BaseUrl(configuredBaseUrl)
 
   const region = normalizeRegion(
@@ -461,7 +549,9 @@ const main = async () => {
     if (!fs.existsSync(filePath)) throw new Error(`Nao achei ${filePath}`)
   })
 
-  const s3 = new S3Client({ region })
+  const s3Endpoint = resolveS3ApiEndpoint(region)
+  console.log(`Endpoint API S3: ${s3Endpoint}`)
+  const s3 = createS3Client(region)
 
   const latestObjectPath = joinStoragePath(prefix, LATEST_FILE_NAME)
   const versionedExeObjectPath = joinStoragePath(prefix, exeName)
@@ -507,7 +597,7 @@ const main = async () => {
 
   const encodedPrefix = encodePathForUrl(prefix)
   const encodedLatestInstaller = encodeURIComponent(LATEST_INSTALLER_NAME)
-  const normalizedBaseUrl = baseUrl || `https://${bucket}.s3.${region}.amazonaws.com/${encodedPrefix}/`
+  const normalizedBaseUrl = baseUrl || buildPathStyleBaseUrl(bucket, region, encodedPrefix)
   const latestInstallerUrl = `${normalizedBaseUrl}${encodedLatestInstaller}`
 
   console.log('')

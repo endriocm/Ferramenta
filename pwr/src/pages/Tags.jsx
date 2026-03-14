@@ -1,18 +1,39 @@
-﻿import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PageHeader from '../components/PageHeader'
 import SyncPanel from '../components/SyncPanel'
 import DataTable from '../components/DataTable'
 import MultiSelect from '../components/MultiSelect'
 import Icon from '../components/Icons'
 import { formatCurrency, formatDate, formatNumber } from '../utils/format'
-import { parseTagsXlsx, loadTags, saveTags, enrichRow, normalizeSeniorityLabel, normalizeUnitLabel } from '../services/tags'
+import {
+  parseTagsXlsx,
+  loadAssessorOverrides,
+  loadTags,
+  saveAssessorOverrides,
+  saveTags,
+  enrichRow,
+  normalizeAssessorOverrideKey,
+  normalizeSeniorityLabel,
+  normalizeUnitLabel,
+} from '../services/tags'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { useToast } from '../hooks/useToast'
 import { useHashRoute } from '../hooks/useHashRoute'
+import useGlobalFolderMenu from '../hooks/useGlobalFolderMenu'
 import { loadRevenueList, loadManualRevenue } from '../services/revenueStore'
 import { loadStructuredRevenue } from '../services/revenueStructured'
 import { filterByApuracaoMonths } from '../services/apuracao'
 import { exportTimesReportPdf } from '../services/pdf'
+import { exportXlsx } from '../services/exportXlsx'
+import { normalizeAssessorName } from '../utils/assessor'
+import { filterSpreadsheetCandidates, normalizeFileName } from '../utils/spreadsheet'
+import {
+  buildEffectiveBmfEntries,
+  buildEffectiveBovespaEntries,
+  buildEffectiveStructuredEntries,
+  loadXpRevenue,
+  stripEntriesByXpMonths,
+} from '../services/revenueXpCommission'
 
 const TAB_TAGS = 'tags'
 const TAB_TIMES = 'times'
@@ -20,6 +41,7 @@ const TEAM_FALLBACK = '(Sem time)'
 const CLIENT_FALLBACK = '(Sem cliente)'
 const ASSESSOR_FALLBACK = 'Sem assessor'
 const TIMES_PROFILE_PREFIX = 'pwr.times.profiles.'
+const TIMES_SHEET_EXCLUDED_TEAMS_PREFIX = 'pwr.times.sheet-excluded-teams.'
 
 const SENIORITY_OPTIONS = ['', 'Acad', 'Junior', 'Junior Acad', 'Pleno', 'Senior']
 const SENIORITY_ORDER = ['Senior', 'Pleno', 'Junior', 'Junior Acad', 'Acad', 'Sem nivel']
@@ -37,6 +59,7 @@ const UNIT_OPTIONS = [
   { value: UNIT_BALNEARIO, label: 'Unidade Balneario' },
 ]
 const EXCLUDED_TEAM_KEYS = new Set(['gregori'])
+const TIMES_XP_OVERLAY_OPTIONS = { forceOverlay: true }
 
 const normalizeKey = (value) => String(value || '')
   .trim()
@@ -184,6 +207,27 @@ const joinFilterList = (values, limit = 5) => {
 }
 
 const buildTimesProfileKey = (userKey) => `${TIMES_PROFILE_PREFIX}${userKey || 'anon'}`
+const buildTimesSheetExcludedTeamsKey = (userKey) => `${TIMES_SHEET_EXCLUDED_TEAMS_PREFIX}${userKey || 'anon'}`
+
+const normalizeTimesSheetExcludedTeams = (value) => {
+  if (!Array.isArray(value)) return []
+  const next = []
+  const seen = new Set()
+  value.forEach((item) => {
+    const team = normalizeTeam(item)
+    const teamKey = normalizeKey(team)
+    if (!teamKey || teamKey === MISSING_TEAM_KEY || seen.has(teamKey)) return
+    seen.add(teamKey)
+    next.push(team)
+  })
+  return next
+}
+
+const loadTimesSheetExcludedTeams = (userKey) => {
+  if (typeof window === 'undefined') return []
+  const parsed = safeJsonParse(localStorage.getItem(buildTimesSheetExcludedTeamsKey(userKey)))
+  return normalizeTimesSheetExcludedTeams(parsed)
+}
 
 const safeJsonParse = (raw) => {
   if (!raw) return null
@@ -213,10 +257,29 @@ const buildTimeAnalyticsRow = (entry, line, index) => {
   }
 }
 
+const resolveManualLine = (entry) => {
+  const token = normalizeKey(entry?.origem || entry?.line || '')
+  if (token.includes('estrutur')) return 'Estruturadas'
+  if (token.includes('bmf') || token.includes('futuro')) return 'BMF'
+  if (token.includes('bovespa') || token === 'bov') return 'Bovespa'
+  return 'Manual'
+}
+
 const sortByRevenueDesc = (a, b) => b.total - a.total
+
+const resolveMostFrequentValue = (map) => {
+  if (!(map instanceof Map) || !map.size) return ''
+  const ranked = Array.from(map.entries())
+  ranked.sort((left, right) => {
+    if (right[1] !== left[1]) return right[1] - left[1]
+    return String(left[0]).localeCompare(String(right[0]), 'pt-BR')
+  })
+  return String(ranked[0]?.[0] || '').trim()
+}
 
 const Tags = () => {
   const { notify } = useToast()
+  const globalFolderMenu = useGlobalFolderMenu('tags')
   const { path, navigate } = useHashRoute('/tags')
   const {
     userKey,
@@ -235,7 +298,10 @@ const Tags = () => {
   const [tagsAssessorQuery, setTagsAssessorQuery] = useState('')
   const [tagsSelectedAccounts, setTagsSelectedAccounts] = useState([])
   const [tagsSelectedAssessors, setTagsSelectedAssessors] = useState([])
+  const [savingAssessorRows, setSavingAssessorRows] = useState(() => new Set())
+  const [pinnedEditedRowId, setPinnedEditedRowId] = useState('')
   const [running, setRunning] = useState(false)
+  const [selectedFile, setSelectedFile] = useState(null)
   const [payload, setPayload] = useState(null)
   const [result, setResult] = useState(null)
   const [page, setPage] = useState(1)
@@ -243,25 +309,47 @@ const Tags = () => {
   const [selectedUnits, setSelectedUnits] = useState([])
   const [timesSheetQuery, setTimesSheetQuery] = useState('')
   const [timesSheetSeniorities, setTimesSheetSeniorities] = useState([])
+  const [timesSheetExcludedTeams, setTimesSheetExcludedTeams] = useState([])
   const [assessorProfiles, setAssessorProfiles] = useState({})
+  const [assessorManualOverrides, setAssessorManualOverrides] = useState({})
   const [profilesReady, setProfilesReady] = useState(false)
   const [interactiveFilters, setInteractiveFilters] = useState(DEFAULT_INTERACTIVE_FILTERS)
-  const [revenueSnapshot, setRevenueSnapshot] = useState(() => ({
-    bovespa: loadRevenueList('bovespa'),
-    bmf: loadRevenueList('bmf'),
-    estruturadas: loadStructuredRevenue(),
-    manual: loadManualRevenue(),
-  }))
+  const [revenueSnapshot, setRevenueSnapshot] = useState(() => {
+    const manualEntries = loadManualRevenue()
+    return {
+      bovespa: buildEffectiveBovespaEntries(loadRevenueList('bovespa'), TIMES_XP_OVERLAY_OPTIONS),
+      bmf: buildEffectiveBmfEntries(loadRevenueList('bmf'), TIMES_XP_OVERLAY_OPTIONS),
+      estruturadas: buildEffectiveStructuredEntries(loadStructuredRevenue(), TIMES_XP_OVERLAY_OPTIONS),
+      manual: stripEntriesByXpMonths(manualEntries, (entry) => entry.data || entry.dataEntrada, TIMES_XP_OVERLAY_OPTIONS),
+      xp: loadXpRevenue(),
+    }
+  })
+  const editedRowPinTimerRef = useRef(null)
   const pageSize = 30
   const isTagsTab = activeTab === TAB_TAGS
   const isTimesTab = activeTab === TAB_TIMES
+  const hasPendingAssessorSave = savingAssessorRows.size > 0
+  const directoryFilterOptions = useMemo(
+    () => globalFolderMenu.directoryOptions.map((option) => ({
+      value: option.value,
+      label: option.label,
+      description: option.directory?.folderPath || '',
+    })),
+    [globalFolderMenu.directoryOptions],
+  )
+  const directoryOptionsEmptyMessage = useMemo(() => {
+    if (globalFolderMenu.loading) return ''
+    return globalFolderMenu.emptyMessage
+  }, [globalFolderMenu.emptyMessage, globalFolderMenu.loading])
 
   const refreshRevenueSnapshot = useCallback(() => {
+    const manualEntries = loadManualRevenue()
     setRevenueSnapshot({
-      bovespa: loadRevenueList('bovespa'),
-      bmf: loadRevenueList('bmf'),
-      estruturadas: loadStructuredRevenue(),
-      manual: loadManualRevenue(),
+      bovespa: buildEffectiveBovespaEntries(loadRevenueList('bovespa'), TIMES_XP_OVERLAY_OPTIONS),
+      bmf: buildEffectiveBmfEntries(loadRevenueList('bmf'), TIMES_XP_OVERLAY_OPTIONS),
+      estruturadas: buildEffectiveStructuredEntries(loadStructuredRevenue(), TIMES_XP_OVERLAY_OPTIONS),
+      manual: stripEntriesByXpMonths(manualEntries, (entry) => entry.data || entry.dataEntrada, TIMES_XP_OVERLAY_OPTIONS),
+      xp: loadXpRevenue(),
     })
   }, [])
 
@@ -328,6 +416,26 @@ const Tags = () => {
   }, [userKey])
 
   useEffect(() => {
+    setAssessorManualOverrides(loadAssessorOverrides(userKey))
+  }, [userKey])
+
+  useEffect(() => {
+    setTimesSheetExcludedTeams(loadTimesSheetExcludedTeams(userKey))
+  }, [userKey])
+
+  useEffect(() => {
+    const key = buildTimesSheetExcludedTeamsKey(userKey)
+    localStorage.setItem(key, JSON.stringify(normalizeTimesSheetExcludedTeams(timesSheetExcludedTeams)))
+  }, [timesSheetExcludedTeams, userKey])
+
+  useEffect(() => () => {
+    if (editedRowPinTimerRef.current) {
+      clearTimeout(editedRowPinTimerRef.current)
+      editedRowPinTimerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
     if (!profilesReady) return
     const key = buildTimesProfileKey(userKey)
     const timer = setTimeout(() => {
@@ -378,27 +486,90 @@ const Tags = () => {
 
   const resetAssessorProfiles = useCallback(() => {
     setAssessorProfiles({})
-    notify('Senioridade e metas resetadas.', 'success')
+    notify('Times, senioridade e metas resetadas.', 'success')
   }, [notify])
+
+  const persistAssessorManualOverrides = useCallback((nextOverrides) => {
+    const saved = saveAssessorOverrides(userKey, nextOverrides)
+    if (!saved) {
+      notify('Falha ao salvar override manual por assessor.', 'warning')
+      return false
+    }
+    setAssessorManualOverrides(saved)
+    window.dispatchEvent(new CustomEvent('pwr:tags-updated', { detail: { userKey } }))
+    window.dispatchEvent(new CustomEvent('pwr:receita-updated'))
+    return true
+  }, [notify, userKey])
+
+  const updateAssessorManualOverride = useCallback((assessorName, field, rawValue) => {
+    const assessor = normalizeAssessorName(assessorName, '')
+    const assessorKey = normalizeAssessorOverrideKey(assessor)
+    if (!assessorKey) return
+    const next = { ...(assessorManualOverrides || {}) }
+    const current = { ...(next[assessorKey] || {}) }
+    const normalizedValue = field === 'unit'
+      ? normalizeUnitLabel(rawValue)
+      : String(rawValue || '').trim()
+
+    current.assessor = assessor
+    if (normalizedValue) current[field] = normalizedValue
+    else delete current[field]
+
+    if (!current.broker && !current.unit && !current.time) {
+      delete next[assessorKey]
+    } else {
+      next[assessorKey] = current
+    }
+
+    persistAssessorManualOverrides(next)
+  }, [assessorManualOverrides, persistAssessorManualOverrides])
+
+  const clearAssessorManualOverride = useCallback((assessorName) => {
+    const assessor = normalizeAssessorName(assessorName, '')
+    const assessorKey = normalizeAssessorOverrideKey(assessor)
+    if (!assessorKey || !assessorManualOverrides?.[assessorKey]) return
+    const next = { ...(assessorManualOverrides || {}) }
+    delete next[assessorKey]
+    persistAssessorManualOverrides(next)
+  }, [assessorManualOverrides, persistAssessorManualOverrides])
+
+  const markAssessorRowSaving = useCallback((rowId, saving) => {
+    if (!rowId) return
+    setSavingAssessorRows((prev) => {
+      const next = new Set(prev)
+      if (saving) next.add(rowId)
+      else next.delete(rowId)
+      return next
+    })
+  }, [])
+
+  const pinEditedRow = useCallback((rowId) => {
+    if (!rowId) return
+    setPinnedEditedRowId(rowId)
+    setPage(1)
+    if (editedRowPinTimerRef.current) {
+      clearTimeout(editedRowPinTimerRef.current)
+    }
+    editedRowPinTimerRef.current = setTimeout(() => {
+      setPinnedEditedRowId((current) => (current === rowId ? '' : current))
+      editedRowPinTimerRef.current = null
+    }, 12000)
+  }, [])
 
   const tagsSelectedAccountSet = useMemo(() => new Set(tagsSelectedAccounts), [tagsSelectedAccounts])
   const tagsSelectedAssessorSet = useMemo(() => new Set(tagsSelectedAssessors), [tagsSelectedAssessors])
 
   const tagsAccountOptions = useMemo(() => {
     if (!isTagsTab) return []
-    const accountMap = new Map()
+    const accountSet = new Set()
     ;(payload?.rows || []).forEach((item) => {
       const account = String(item?.cliente || '').trim()
       if (!account) return
-      const nome = String(item?.nomeCliente || '').trim()
-      if (!accountMap.has(account)) accountMap.set(account, nome)
+      accountSet.add(account)
     })
-    return Array.from(accountMap.entries())
-      .sort((left, right) => left[0].localeCompare(right[0], 'pt-BR'))
-      .map(([account, nome]) => ({
-        value: account,
-        label: nome ? `${account} - ${nome}` : account,
-      }))
+    return Array.from(accountSet)
+      .sort((left, right) => left.localeCompare(right, 'pt-BR'))
+      .map((account) => ({ value: account, label: account }))
   }, [isTagsTab, payload?.rows])
 
   const tagsAssessorOptions = useMemo(() => {
@@ -414,28 +585,98 @@ const Tags = () => {
       .map((assessor) => ({ value: assessor, label: assessor }))
   }, [isTagsTab, payload?.rows])
 
+  const tagsAssessorOptionSet = useMemo(() => (
+    new Set(tagsAssessorOptions
+      .map((item) => normalizeAssessorName(item?.value, ''))
+      .filter(Boolean))
+  ), [tagsAssessorOptions])
+
+  const handleChangeAssessor = useCallback(async (rowId, nextAssessorRaw) => {
+    if (!rowId || !payload?.rows?.length) return
+    if (hasPendingAssessorSave) return
+
+    const normalizedAssessor = normalizeAssessorName(nextAssessorRaw, '')
+    if (!normalizedAssessor) {
+      notify('Selecione um assessor valido.', 'warning')
+      return
+    }
+
+    if (!tagsAssessorOptionSet.has(normalizedAssessor)) {
+      notify('Escolha um assessor ja existente na lista.', 'warning')
+      return
+    }
+
+    const rowIndex = payload.rows.findIndex((row, index) => {
+      const rowKey = row?.id || row?.cliente || `row-${index}`
+      return String(rowKey) === String(rowId)
+    })
+    if (rowIndex < 0) return
+
+    const currentRow = payload.rows[rowIndex]
+    const currentAssessor = normalizeAssessorName(currentRow?.assessor, ASSESSOR_FALLBACK)
+    if (currentAssessor === normalizedAssessor) return
+
+    const previousPayload = payload
+    const nextRows = previousPayload.rows.map((row, index) => (
+      index === rowIndex
+        ? { ...row, assessor: normalizedAssessor }
+        : row
+    ))
+    const optimisticPayload = { ...previousPayload, rows: nextRows }
+
+    markAssessorRowSaving(rowId, true)
+    pinEditedRow(rowId)
+    setPayload(optimisticPayload)
+
+    try {
+      const saved = await saveTags(userKey, optimisticPayload)
+      if (!saved) throw new Error('tags-save-failed')
+      setPayload(saved)
+      await refreshTags()
+      window.dispatchEvent(new CustomEvent('pwr:tags-updated', { detail: { userKey } }))
+      notify('Assessor atualizado com sucesso.', 'success')
+    } catch {
+      setPayload(previousPayload)
+      notify('Falha ao atualizar assessor da conta.', 'warning')
+    } finally {
+      markAssessorRowSaving(rowId, false)
+    }
+  }, [hasPendingAssessorSave, markAssessorRowSaving, notify, payload, pinEditedRow, refreshTags, tagsAssessorOptionSet, userKey])
+
   const rows = useMemo(() => {
     if (!isTagsTab) return []
     const items = (payload?.rows || []).map((item, index) => (
-      item.id ? item : { ...item, id: item.cliente || item.nomeCliente || `row-${index}` }
+      item.id ? item : { ...item, id: item.cliente || `row-${index}` }
     ))
     const genericQuery = query.toLowerCase().trim()
     const accountQuery = tagsAccountQuery.toLowerCase().trim()
     const assessorQuery = tagsAssessorQuery.toLowerCase().trim()
 
-    return items.filter((item) => {
+    const filtered = items.filter((item) => {
+      const rowId = String(item?.id || '')
+      if (pinnedEditedRowId && rowId === pinnedEditedRowId) return true
+
       const account = String(item.cliente || '').trim()
       const assessor = String(item.assessor || '').trim()
-      const nomeCliente = String(item.nomeCliente || '').trim()
 
       if (selectedBroker.length && !selectedBroker.includes(String(item.broker || '').trim())) return false
       if (tagsSelectedAccountSet.size && !tagsSelectedAccountSet.has(account)) return false
       if (tagsSelectedAssessorSet.size && !tagsSelectedAssessorSet.has(assessor)) return false
-      if (accountQuery && !`${account} ${nomeCliente}`.toLowerCase().includes(accountQuery)) return false
+      if (accountQuery && !account.toLowerCase().includes(accountQuery)) return false
       if (assessorQuery && !assessor.toLowerCase().includes(assessorQuery)) return false
-      if (genericQuery && !`${account} ${nomeCliente} ${assessor} ${item.broker || ''} ${item.time || ''}`.toLowerCase().includes(genericQuery)) return false
+      if (genericQuery && !`${account} ${assessor} ${item.broker || ''}`.toLowerCase().includes(genericQuery)) return false
       return true
     })
+
+    if (pinnedEditedRowId) {
+      const pinnedIndex = filtered.findIndex((item) => String(item?.id || '') === pinnedEditedRowId)
+      if (pinnedIndex > 0) {
+        const [pinnedRow] = filtered.splice(pinnedIndex, 1)
+        filtered.unshift(pinnedRow)
+      }
+    }
+
+    return filtered
   }, [
     payload?.rows,
     query,
@@ -445,6 +686,7 @@ const Tags = () => {
     tagsSelectedAccountSet,
     tagsSelectedAssessorSet,
     isTagsTab,
+    pinnedEditedRowId,
   ])
 
   const totalRows = rows.length
@@ -480,15 +722,226 @@ const Tags = () => {
     })
   }, [isTagsTab, rows])
 
+  const assessorManualRows = useMemo(() => {
+    if (!isTagsTab) return []
+    const byAssessor = new Map()
+    ;(payload?.rows || []).forEach((entry) => {
+      const assessor = normalizeAssessorName(entry?.assessor, '')
+      const assessorKey = normalizeAssessorOverrideKey(assessor)
+      if (!assessorKey) return
+      const current = byAssessor.get(assessorKey) || {
+        assessor,
+        brokerFreq: new Map(),
+        unitFreq: new Map(),
+        teamFreq: new Map(),
+      }
+      const broker = String(entry?.broker || '').trim()
+      const unit = normalizeUnitLabel(entry?.unit || entry?.unidade)
+      const team = String(entry?.time || '').trim()
+      if (broker) current.brokerFreq.set(broker, (current.brokerFreq.get(broker) || 0) + 1)
+      if (unit) current.unitFreq.set(unit, (current.unitFreq.get(unit) || 0) + 1)
+      if (team) current.teamFreq.set(team, (current.teamFreq.get(team) || 0) + 1)
+      byAssessor.set(assessorKey, current)
+    })
+
+    const rowsList = Array.from(byAssessor.entries()).map(([assessorKey, info]) => {
+      const override = assessorManualOverrides?.[assessorKey] || {}
+      return {
+        id: assessorKey,
+        assessorKey,
+        assessor: override.assessor || info.assessor,
+        baseBroker: resolveMostFrequentValue(info.brokerFreq),
+        baseUnit: resolveMostFrequentValue(info.unitFreq),
+        baseTime: resolveMostFrequentValue(info.teamFreq),
+        broker: String(override.broker || '').trim(),
+        unit: normalizeUnitLabel(override.unit),
+        time: String(override.time || '').trim(),
+      }
+    })
+
+    Object.entries(assessorManualOverrides || {}).forEach(([assessorKey, override]) => {
+      if (byAssessor.has(assessorKey)) return
+      rowsList.push({
+        id: assessorKey,
+        assessorKey,
+        assessor: override.assessor || assessorKey,
+        baseBroker: '',
+        baseUnit: '',
+        baseTime: '',
+        broker: String(override.broker || '').trim(),
+        unit: normalizeUnitLabel(override.unit),
+        time: String(override.time || '').trim(),
+      })
+    })
+
+    return rowsList
+      .map((row) => ({
+        ...row,
+        hasOverride: Boolean(row.broker || row.unit || row.time),
+      }))
+      .sort((a, b) => String(a.assessor || '').localeCompare(String(b.assessor || ''), 'pt-BR'))
+  }, [isTagsTab, payload?.rows, assessorManualOverrides])
+
+  const assessorManualBrokerOptions = useMemo(() => {
+    const values = new Set()
+    ;(payload?.rows || []).forEach((entry) => {
+      const broker = String(entry?.broker || '').trim()
+      if (broker) values.add(broker)
+    })
+    assessorManualRows.forEach((row) => {
+      if (row.baseBroker) values.add(row.baseBroker)
+      if (row.broker) values.add(row.broker)
+    })
+    return Array.from(values).sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  }, [payload?.rows, assessorManualRows])
+
+  const assessorManualTeamOptions = useMemo(() => {
+    const values = new Set()
+    ;(payload?.rows || []).forEach((entry) => {
+      const team = String(entry?.time || '').trim()
+      if (team) values.add(team)
+    })
+    assessorManualRows.forEach((row) => {
+      if (row.baseTime) values.add(row.baseTime)
+      if (row.time) values.add(row.time)
+    })
+    return Array.from(values).sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  }, [payload?.rows, assessorManualRows])
+
+  const assessorManualUnitOptions = useMemo(() => {
+    const values = new Set(UNIT_OPTIONS.map((item) => item.value))
+    ;(payload?.rows || []).forEach((entry) => {
+      const unit = normalizeUnitLabel(entry?.unit || entry?.unidade)
+      if (unit) values.add(unit)
+    })
+    assessorManualRows.forEach((row) => {
+      if (row.baseUnit) values.add(row.baseUnit)
+      if (row.unit) values.add(row.unit)
+    })
+    return Array.from(values).sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  }, [payload?.rows, assessorManualRows])
+
+  const assessorManualColumns = useMemo(() => ([
+    { key: 'assessor', label: 'Assessor' },
+    {
+      key: 'broker',
+      label: 'Broker',
+      render: (row) => (
+        <select
+          className="tags-assessor-select"
+          value={row.broker}
+          onChange={(event) => updateAssessorManualOverride(row.assessor, 'broker', event.target.value)}
+          aria-label={`Broker manual de ${row.assessor}`}
+        >
+          <option value="">
+            {row.baseBroker ? `Padrao (${row.baseBroker})` : 'Padrao (sem broker)'}
+          </option>
+          {assessorManualBrokerOptions.map((value) => (
+            <option key={`${row.id}-broker-${value}`} value={value}>{value}</option>
+          ))}
+        </select>
+      ),
+    },
+    {
+      key: 'unit',
+      label: 'Unidade',
+      render: (row) => (
+        <select
+          className="tags-assessor-select"
+          value={row.unit}
+          onChange={(event) => updateAssessorManualOverride(row.assessor, 'unit', event.target.value)}
+          aria-label={`Unidade manual de ${row.assessor}`}
+        >
+          <option value="">
+            {row.baseUnit ? `Padrao (${row.baseUnit})` : 'Padrao (sem unidade)'}
+          </option>
+          {assessorManualUnitOptions.map((value) => (
+            <option key={`${row.id}-unit-${value}`} value={value}>{value}</option>
+          ))}
+        </select>
+      ),
+    },
+    {
+      key: 'time',
+      label: 'Time',
+      render: (row) => (
+        <select
+          className="tags-assessor-select"
+          value={row.time}
+          onChange={(event) => updateAssessorManualOverride(row.assessor, 'time', event.target.value)}
+          aria-label={`Time manual de ${row.assessor}`}
+        >
+          <option value="">
+            {row.baseTime ? `Padrao (${row.baseTime})` : 'Padrao (sem time)'}
+          </option>
+          {assessorManualTeamOptions.map((value) => (
+            <option key={`${row.id}-time-${value}`} value={value}>{value}</option>
+          ))}
+        </select>
+      ),
+    },
+    {
+      key: 'action',
+      label: 'Acoes',
+      render: (row) => (
+        <button
+          className="btn btn-secondary"
+          type="button"
+          style={{ padding: '6px 10px' }}
+          disabled={!row.hasOverride}
+          onClick={() => clearAssessorManualOverride(row.assessor)}
+        >
+          Limpar
+        </button>
+      ),
+    },
+  ]), [
+    assessorManualBrokerOptions,
+    assessorManualTeamOptions,
+    assessorManualUnitOptions,
+    clearAssessorManualOverride,
+    updateAssessorManualOverride,
+  ])
+
   const columns = useMemo(
     () => [
-      { key: 'cliente', label: 'Codigo cliente', render: (row) => row.cliente || '—' },
-      { key: 'nomeCliente', label: 'Nome do cliente', render: (row) => row.nomeCliente || row.cliente || '—' },
-      { key: 'assessor', label: 'Assessor', render: (row) => row.assessor || '—' },
+      { key: 'cliente', label: 'Conta', render: (row) => row.cliente || '—' },
+      {
+        key: 'assessor',
+        label: 'Assessor',
+        render: (row) => {
+          const rowId = String(row?.id || '')
+          const rawCurrent = String(row?.assessor || '').trim()
+          const currentAssessor = normalizeAssessorName(rawCurrent, '')
+          const isSaving = savingAssessorRows.has(rowId)
+          const showCurrentOption = currentAssessor && !tagsAssessorOptionSet.has(currentAssessor)
+          return (
+            <div className="tags-assessor-editor">
+              <select
+                className="tags-assessor-select"
+                value={rawCurrent}
+                disabled={hasPendingAssessorSave || !tagsAssessorOptions.length}
+                onChange={(event) => {
+                  const nextValue = event.target.value
+                  if (nextValue === rawCurrent) return
+                  void handleChangeAssessor(rowId, nextValue)
+                }}
+                aria-label={`Assessor da conta ${row?.cliente || rowId}`}
+              >
+                <option value="" disabled>Selecione</option>
+                {showCurrentOption ? <option value={rawCurrent}>{rawCurrent}</option> : null}
+                {tagsAssessorOptions.map((option) => (
+                  <option key={`${rowId}-${option.value}`} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              {isSaving ? <small className="muted">Salvando...</small> : null}
+            </div>
+          )
+        },
+      },
       { key: 'broker', label: 'Broker', render: (row) => row.broker || '—' },
-      { key: 'time', label: 'Time', render: (row) => row.time || TEAM_FALLBACK },
     ],
-    [],
+    [handleChangeAssessor, hasPendingAssessorSave, savingAssessorRows, tagsAssessorOptionSet, tagsAssessorOptions],
   )
 
   const assessorColumns = useMemo(
@@ -508,27 +961,34 @@ const Tags = () => {
     return values.length ? new Set(values) : null
   }, [isTimesTab, selectedAssessor])
 
-  const normalizedClientCodeFilter = useMemo(() => {
-    if (!isTimesTab) return null
-    const values = clientCodeFilter.map(normalizeClientCode).filter(Boolean)
-    return values.length ? new Set(values) : null
-  }, [isTimesTab, clientCodeFilter])
-
   const applyGlobalFilters = useCallback((entries) => {
     if (!isTimesTab) return []
-    return entries.filter((entry) => {
-      if (selectedBroker.length && !selectedBroker.includes(String(entry?.broker || '').trim())) return false
-      if (normalizedAssessorFilter?.size) {
+    const source = Array.isArray(entries) ? entries : []
+    if (!source.length) return []
+
+    const availableBrokers = new Set(
+      source.map((entry) => String(entry?.broker || '').trim()).filter(Boolean),
+    )
+    const effectiveBrokerFilter = selectedBroker
+      .map((item) => String(item || '').trim())
+      .filter((item) => availableBrokers.has(item))
+
+    const availableAssessorKeys = new Set(
+      source.map((entry) => normalizeKey(entry?.assessor)).filter(Boolean),
+    )
+    const effectiveAssessorFilter = normalizedAssessorFilter?.size
+      ? new Set(Array.from(normalizedAssessorFilter).filter((item) => availableAssessorKeys.has(item)))
+      : null
+
+    return source.filter((entry) => {
+      if (effectiveBrokerFilter.length && !effectiveBrokerFilter.includes(String(entry?.broker || '').trim())) return false
+      if (effectiveAssessorFilter?.size) {
         const assessorKey = normalizeKey(entry?.assessor)
-        if (!normalizedAssessorFilter.has(assessorKey)) return false
-      }
-      if (normalizedClientCodeFilter?.size) {
-        const code = resolveClientCodeFromRow(entry)
-        if (!normalizedClientCodeFilter.has(code)) return false
+        if (!effectiveAssessorFilter.has(assessorKey)) return false
       }
       return true
     })
-  }, [isTimesTab, selectedBroker, normalizedAssessorFilter, normalizedClientCodeFilter])
+  }, [isTimesTab, selectedBroker, normalizedAssessorFilter])
   const bovespaScoped = useMemo(
     () => (isTimesTab
       ? filterByApuracaoMonths(revenueSnapshot.bovespa, apuracaoMonths, (entry) => entry.data || entry.dataEntrada)
@@ -585,15 +1045,39 @@ const Tags = () => {
     return applyGlobalFilters(manualScoped.map((entry) => enrichRow(entry, tagsIndex)))
   }, [isTimesTab, applyGlobalFilters, manualScoped, tagsIndex])
 
+  const xpScoped = useMemo(
+    () => (isTimesTab
+      ? filterByApuracaoMonths(revenueSnapshot.xp || [], apuracaoMonths, (entry) => entry.data || entry.dataEntrada)
+      : []),
+    [isTimesTab, revenueSnapshot.xp, apuracaoMonths],
+  )
+
+  const xpRows = useMemo(() => {
+    if (!isTimesTab) return []
+    return applyGlobalFilters(xpScoped.map((entry) => enrichRow(entry, tagsIndex)))
+  }, [isTimesTab, applyGlobalFilters, xpScoped, tagsIndex])
+
   const analyticsRows = useMemo(() => {
     if (!isTimesTab) return []
     const rowsList = []
     bovespaRows.forEach((entry, index) => rowsList.push(buildTimeAnalyticsRow(entry, 'Bovespa', index)))
     bmfRows.forEach((entry, index) => rowsList.push(buildTimeAnalyticsRow(entry, 'BMF', index)))
     structuredRows.forEach((entry, index) => rowsList.push(buildTimeAnalyticsRow(entry, 'Estruturadas', index)))
-    manualRows.forEach((entry, index) => rowsList.push(buildTimeAnalyticsRow(entry, 'Manual', index)))
+    manualRows.forEach((entry, index) => rowsList.push(buildTimeAnalyticsRow(entry, resolveManualLine(entry), index)))
+
+    const hasXpInInjectedFlows = [bovespaRows, bmfRows, structuredRows, manualRows]
+      .some((list) => list.some((entry) => String(entry?.source || '').trim().toLowerCase() === 'xp-commission'))
+
+    // Fallback: se o pipeline efetivo nao injetar XP, usa base XP direta para manter Times visivel.
+    if (!hasXpInInjectedFlows) {
+      xpRows.forEach((entry, index) => {
+        const line = String(entry?.line || '').trim() || 'Bovespa'
+        rowsList.push(buildTimeAnalyticsRow(entry, line, index))
+      })
+    }
+
     return rowsList
-  }, [isTimesTab, bovespaRows, bmfRows, structuredRows, manualRows])
+  }, [isTimesTab, bovespaRows, bmfRows, structuredRows, manualRows, xpRows])
 
   const teamOptions = useMemo(() => {
     if (!isTimesTab) return []
@@ -713,6 +1197,9 @@ const Tags = () => {
         const profile = assessorProfiles?.[item.profileKey] || {}
         const hasProfileSeniority = hasOwn(profile, 'seniority')
         const hasProfileGoal = hasOwn(profile, 'goalRaw')
+        const hasProfileTeam = hasOwn(profile, 'team')
+        const teamOverride = hasProfileTeam ? String(profile.team || '').trim() : ''
+        const team = teamOverride || item.team
         const seniorityFromTag = tagSeniorityByProfile.get(item.profileKey) || ''
         const seniority = normalizeSeniorityLabel(hasProfileSeniority ? profile.seniority : seniorityFromTag)
         const goalBySeniority = resolveGoalBySeniority(seniority) * apuracaoMonthCount
@@ -724,6 +1211,8 @@ const Tags = () => {
         const gap = goal > 0 ? item.total - goal : item.total
         return {
           ...item,
+          team,
+          originalTeam: item.team,
           goalRaw,
           goal,
           goalBySeniority,
@@ -781,6 +1270,11 @@ const Tags = () => {
     [matrixRows],
   )
 
+  const timesSheetExcludedTeamSet = useMemo(
+    () => new Set(normalizeTimesSheetExcludedTeams(timesSheetExcludedTeams).map((team) => normalizeKey(team))),
+    [timesSheetExcludedTeams],
+  )
+
   const timesSheetSeniorityOptions = useMemo(() => {
     const values = new Set()
     matrixRowsForTable.forEach((row) => values.add(row.seniority || 'Sem nivel'))
@@ -795,11 +1289,58 @@ const Tags = () => {
     const queryKey = normalizeKey(timesSheetQuery)
     return matrixRowsForTable.filter((row) => {
       const seniority = row.seniority || 'Sem nivel'
+      if (timesSheetExcludedTeamSet.has(normalizeKey(row.team))) return false
       if (timesSheetSenioritySet.size && !timesSheetSenioritySet.has(seniority)) return false
       if (!queryKey) return true
       return normalizeKey(`${row.team} ${row.assessor} ${seniority}`).includes(queryKey)
     })
-  }, [matrixRowsForTable, timesSheetQuery, timesSheetSenioritySet])
+  }, [matrixRowsForTable, timesSheetExcludedTeamSet, timesSheetQuery, timesSheetSenioritySet])
+
+  const timesSheetExcludedTeamLabels = useMemo(() => {
+    const labelsByKey = new Map()
+    matrixRowsForTable.forEach((row) => {
+      const team = normalizeTeam(row.team)
+      const teamKey = normalizeKey(team)
+      if (!teamKey || teamKey === MISSING_TEAM_KEY || labelsByKey.has(teamKey)) return
+      labelsByKey.set(teamKey, team)
+    })
+    return normalizeTimesSheetExcludedTeams(timesSheetExcludedTeams)
+      .map((team) => labelsByKey.get(normalizeKey(team)) || team)
+  }, [matrixRowsForTable, timesSheetExcludedTeams])
+
+  const matrixGroupedRowsByTeam = useMemo(() => {
+    const grouped = new Map()
+    matrixFilteredRows.forEach((row) => {
+      const teamKey = normalizeTeam(row.team)
+      const current = grouped.get(teamKey) || {
+        team: teamKey,
+        rows: [],
+        totals: {
+          bovespa: 0,
+          estruturadas: 0,
+          total: 0,
+          goal: 0,
+          gap: 0,
+        },
+      }
+      current.rows.push(row)
+      current.totals.bovespa += row.bovespa
+      current.totals.estruturadas += row.estruturadas
+      current.totals.total += row.total
+      current.totals.goal += row.goal
+      current.totals.gap += row.gap
+      grouped.set(teamKey, current)
+    })
+    return Array.from(grouped.values())
+      .map((group) => ({
+        ...group,
+        totals: {
+          ...group.totals,
+          attainment: group.totals.goal > 0 ? group.totals.total / group.totals.goal : null,
+        },
+      }))
+      .sort((a, b) => a.team.localeCompare(b.team, 'pt-BR'))
+  }, [matrixFilteredRows])
 
   const totalRevenue = useMemo(() => matrixRows.reduce((sum, row) => sum + row.total, 0), [matrixRows])
   const totalGoal = useMemo(() => matrixRows.reduce((sum, row) => sum + resolveGoalContribution(row), 0), [matrixRows])
@@ -838,16 +1379,33 @@ const Tags = () => {
     const map = new Map()
     matrixRows.forEach((row) => {
       const level = row.seniority || 'Sem nivel'
-      const current = map.get(level) || { level, receita: 0, goal: 0, count: 0 }
+      const current = map.get(level) || {
+        level,
+        receita: 0,
+        goal: 0,
+        count: 0,
+        eligibleCount: 0,
+        reachedCount: 0,
+        notReachedCount: 0,
+      }
+      const goal = resolveGoalContribution(row)
       current.receita += row.total
-      current.goal += resolveGoalContribution(row)
+      current.goal += goal
       current.count += 1
+      if (goal > 0) {
+        current.eligibleCount += 1
+        if (row.total >= goal) {
+          current.reachedCount += 1
+        } else {
+          current.notReachedCount += 1
+        }
+      }
       map.set(level, current)
     })
     return Array.from(map.values())
       .map((item) => ({
         ...item,
-        attainment: item.goal > 0 ? item.receita / item.goal : null,
+        attainment: item.eligibleCount > 0 ? item.reachedCount / item.eligibleCount : null,
       }))
       .sort((a, b) => compareSeniorityLabel(a.level, b.level))
   }, [matrixRows])
@@ -919,18 +1477,79 @@ const Tags = () => {
     setTimesSheetSeniorities([])
   }, [])
 
+  const hideTimesSheetTeam = useCallback((teamName) => {
+    const team = normalizeTeam(teamName)
+    const teamKey = normalizeKey(team)
+    if (!teamKey || teamKey === MISSING_TEAM_KEY) return
+    setTimesSheetExcludedTeams((prev) => {
+      const next = normalizeTimesSheetExcludedTeams(prev)
+      if (next.some((item) => normalizeKey(item) === teamKey)) return next
+      return [...next, team]
+    })
+    notify(`${team} removido dos blocos da tabela.`, 'success')
+  }, [notify])
+
+  const restoreTimesSheetTeam = useCallback((teamName) => {
+    const teamKey = normalizeKey(teamName)
+    if (!teamKey) return
+    setTimesSheetExcludedTeams((prev) => normalizeTimesSheetExcludedTeams(prev)
+      .filter((item) => normalizeKey(item) !== teamKey))
+  }, [])
+
+  const restoreAllTimesSheetTeams = useCallback(() => {
+    setTimesSheetExcludedTeams([])
+    notify('Todos os times removidos foram restaurados na tabela.', 'success')
+  }, [notify])
+
+  const _handleFolderSelection = useCallback((files) => {
+    const candidates = filterSpreadsheetCandidates(files)
+    if (!candidates.length) {
+      setSelectedFile(null)
+      notify('Nenhuma planilha .xlsx/.xls valida foi encontrada.', 'warning')
+      return null
+    }
+
+    const preferred = candidates.find((candidate) => {
+      const normalized = normalizeFileName(candidate?.name || '')
+      return normalized.includes('tag') || normalized.includes('vincul')
+    })
+
+    const picked = preferred || candidates[0]
+    setSelectedFile(picked)
+    return picked
+  }, [notify])
+
+  const resolveImportInput = useCallback(async (input) => {
+    if (!input) return null
+    if (input?.source === 'electron' && input?.filePath) {
+      if (!window?.electronAPI?.readFile) return null
+      return window.electronAPI.readFile(input.filePath)
+    }
+    return input
+  }, [])
+
   const handleSync = async (file) => {
-    if (!file) {
+    let targetFile = file || selectedFile || globalFolderMenu.resolvedFile
+    if (!targetFile) targetFile = await globalFolderMenu.refreshFile()
+    if (!targetFile) {
       notify('Selecione o Tags.xlsx.', 'warning')
       return
     }
+    setResult(null)
     setRunning(true)
     try {
-      const parsed = await parseTagsXlsx(file)
+      const importInput = await resolveImportInput(targetFile)
+      if (!importInput) {
+        notify('Nao foi possivel ler o arquivo selecionado.', 'warning')
+        return
+      }
+      const parsed = await parseTagsXlsx(importInput)
       const saved = await saveTags(userKey, parsed)
       const nextPayload = saved || parsed
       setPayload(nextPayload)
       setResult(nextPayload?.stats || parsed.stats || null)
+      setSelectedFile(targetFile)
+      refreshRevenueSnapshot()
       await refreshTags()
       window.dispatchEvent(new CustomEvent('pwr:tags-updated', { detail: { userKey } }))
       notify('Tags importadas com sucesso.', 'success')
@@ -999,7 +1618,9 @@ const Tags = () => {
         level: row.level,
         attainmentPct: row.attainment != null ? row.attainment * 100 : 0,
         attainmentLabel: formatPercent(row.attainment),
-        value: `${formatCurrency(row.receita)} | Obj ${formatCurrency(row.goal || 0)}`,
+        value: row.eligibleCount > 0
+          ? `${row.reachedCount}/${row.eligibleCount} assessores atingiram a meta`
+          : 'Sem meta configurada',
       }))
 
       const reportGapRows = [
@@ -1079,6 +1700,22 @@ const Tags = () => {
     totalRevenue,
   ])
 
+  const handleExportExemplo = useCallback(async () => {
+    try {
+      await exportXlsx({
+        fileName: 'Tags_exemplo.xlsx',
+        sheetName: 'Tags',
+        columns: ['Conta', 'Assessor', 'Broker', 'Time', 'Unidade', 'Senioridade'],
+        rows: [
+          ['12345678', 'Fulano', 'XP', 'Mesa A', 'Porto Alegre', 'Senior'],
+        ],
+      })
+      notify('Planilha de exemplo exportada.', 'success')
+    } catch {
+      notify('Falha ao exportar planilha de exemplo.', 'warning')
+    }
+  }, [notify])
+
   const headerActions = useMemo(() => {
     const actions = [
       {
@@ -1094,6 +1731,14 @@ const Tags = () => {
         onClick: () => handleSwitchTab(TAB_TIMES),
       },
     ]
+    if (activeTab === TAB_TAGS) {
+      actions.push({
+        label: 'Baixar exemplo',
+        icon: 'download',
+        variant: 'btn-secondary',
+        onClick: handleExportExemplo,
+      })
+    }
     if (activeTab === TAB_TIMES) {
       actions.push({
         label: 'Exportar PDF',
@@ -1104,7 +1749,7 @@ const Tags = () => {
       })
     }
     return actions
-  }, [activeTab, handleExportTimesPdf, handleSwitchTab, matrixFilteredRows.length])
+  }, [activeTab, handleExportExemplo, handleExportTimesPdf, handleSwitchTab, matrixFilteredRows.length])
 
   const tagsMeta = useMemo(() => ([
     { label: 'Total vinculos', value: payload?.rows?.length || 0 },
@@ -1194,11 +1839,13 @@ const Tags = () => {
         </div>
         <div className="hierarchy-grid">
           {pagedRows.map((item) => (
-            <div key={`${item.cliente}-${item.assessor}`} className="hierarchy-card">
+            <div
+              key={item.id || item.cliente || 'sem-conta'}
+              className={`hierarchy-card ${pinnedEditedRowId && String(item.id || '') === pinnedEditedRowId ? 'hierarchy-card-highlight' : ''}`.trim()}
+            >
               <div className="hierarchy-tier">
-                <span>Cliente</span>
-                <strong>{item.nomeCliente || item.cliente || '—'}</strong>
-                {item.cliente ? <small className="muted">Codigo {item.cliente}</small> : null}
+                <span>Conta</span>
+                <strong>{item.cliente || '—'}</strong>
               </div>
               <div className="hierarchy-tier">
                 <span>Assessor</span>
@@ -1207,10 +1854,6 @@ const Tags = () => {
               <div className="hierarchy-tier">
                 <span>Broker</span>
                 <strong>{item.broker || '—'}</strong>
-              </div>
-              <div className="hierarchy-tier">
-                <span>Time</span>
-                <strong>{item.time || TEAM_FALLBACK}</strong>
               </div>
             </div>
           ))}
@@ -1252,6 +1895,23 @@ const Tags = () => {
           </div>
         </div>
         <DataTable rows={assessorRows} columns={assessorColumns} emptyMessage="Sem assessores para exibir." />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Override manual por assessor</h3>
+            <p className="muted">Ajuste Broker, Unidade e Time manualmente para refletir nas receitas e no painel de Times.</p>
+          </div>
+          <div className="panel-actions">
+            <span className="muted">{assessorManualRows.length} assessor(es)</span>
+          </div>
+        </div>
+        <DataTable
+          rows={assessorManualRows}
+          columns={assessorManualColumns}
+          emptyMessage="Sem assessores disponiveis para override."
+        />
       </section>
     </>
   )
@@ -1443,7 +2103,7 @@ const Tags = () => {
           <article className="card times-analytic-card">
             <div className="card-head">
               <h3>% Atingimento por Senioridade</h3>
-              <span className="muted">Junior, Pleno e Senior</span>
+              <span className="muted">Assessores que bateram meta vs nao bateram</span>
             </div>
             <div className="times-seniority-list">
               {seniorityPerformance.length ? seniorityPerformance.map((row) => {
@@ -1462,7 +2122,11 @@ const Tags = () => {
                     <div className="times-seniority-track">
                       <span className="times-fill-seniority" style={{ width: `${width}%` }} />
                     </div>
-                    <strong>{formatPercent(row.attainment)}</strong>
+                    <strong title={row.eligibleCount > 0
+                      ? `${row.reachedCount}/${row.eligibleCount} assessores bateram a meta`
+                      : 'Sem meta configurada para esta senioridade'}>
+                      {formatPercent(row.attainment)}
+                    </strong>
                   </div>
                 )
               }) : <p className="muted">Sem dados de senioridade.</p>}
@@ -1537,6 +2201,14 @@ const Tags = () => {
               >
                 Limpar filtros tabela
               </button>
+              <button
+                className="btn btn-secondary"
+                type="button"
+                onClick={restoreAllTimesSheetTeams}
+                disabled={!timesSheetExcludedTeamLabels.length}
+              >
+                Restaurar blocos
+              </button>
             </div>
           </div>
           <div className="times-sheet-filter-grid">
@@ -1558,8 +2230,26 @@ const Tags = () => {
             />
             <div className="times-sheet-count muted">
               {matrixFilteredRows.length} de {matrixRowsForTable.length} assessores
+              {timesSheetExcludedTeamLabels.length ? ` • ${timesSheetExcludedTeamLabels.length} time(s) removido(s)` : ''}
             </div>
           </div>
+          {timesSheetExcludedTeamLabels.length ? (
+            <div className="times-sheet-hidden-bar">
+              <span className="muted">Times removidos dos blocos:</span>
+              <div className="times-sheet-hidden-list">
+                {timesSheetExcludedTeamLabels.map((team) => (
+                  <button
+                    key={`restore-team-${team}`}
+                    className="times-sheet-hidden-chip"
+                    type="button"
+                    onClick={() => restoreTimesSheetTeam(team)}
+                  >
+                    {team} ×
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="times-sheet-wrap">
             <table className="times-sheet">
               <thead>
@@ -1576,41 +2266,93 @@ const Tags = () => {
                 </tr>
               </thead>
               <tbody>
-                {matrixFilteredRows.length ? matrixFilteredRows.map((row) => {
-                  const positiveGap = row.gap >= 0
+                {matrixGroupedRowsByTeam.length ? matrixGroupedRowsByTeam.map((group, groupIndex) => {
+                  const isLastGroup = groupIndex === (matrixGroupedRowsByTeam.length - 1)
                   return (
-                    <tr key={row.id}>
-                      <td>{row.team}</td>
-                      <td>
-                        <select
-                          className="times-cell-select"
-                          value={row.seniority}
-                          onChange={(event) => updateAssessorProfile(row.profileKey, { seniority: event.target.value })}
-                          aria-label={`Senioridade de ${row.assessor}`}
-                        >
-                          {SENIORITY_OPTIONS.map((option) => (
-                            <option key={option || 'none'} value={option}>{option || 'Selecionar'}</option>
-                          ))}
-                        </select>
+                    <Fragment key={group.team}>
+                    <tr key={`${group.team}-header`} className="times-sheet-team-header">
+                      <td colSpan={9}>
+                        <div className="times-sheet-team-head">
+                          <div className="times-sheet-team-head-copy">
+                            <strong>{group.team}</strong>
+                            <span>{group.rows.length} assessor(es)</span>
+                          </div>
+                          <button
+                            className="btn btn-secondary times-sheet-team-remove-btn"
+                            type="button"
+                            onClick={() => hideTimesSheetTeam(group.team)}
+                          >
+                            Remover bloco
+                          </button>
+                        </div>
                       </td>
-                      <td>{row.assessor}</td>
-                      <td>{formatCurrency(row.bovespa)}</td>
-                      <td>{formatCurrency(row.estruturadas)}</td>
-                      <td className="times-cell-strong">{formatCurrency(row.total)}</td>
-                      <td>
-                        <input
-                          className="times-cell-input"
-                          type="text"
-                          inputMode="decimal"
-                          placeholder="Ex: 12500"
-                          value={row.goalRaw}
-                          onChange={(event) => updateAssessorGoal(row.profileKey, event.target.value)}
-                          aria-label={`Objetivo de ${row.assessor}`}
-                        />
-                      </td>
-                      <td className={row.attainment != null && row.attainment >= 1 ? 'times-cell-positive' : 'times-cell-negative'}>{formatPercent(row.attainment)}</td>
-                      <td className={positiveGap ? 'times-cell-positive' : 'times-cell-negative'}>{formatSignedCurrency(row.gap)}</td>
                     </tr>
+                    {group.rows.map((row) => {
+                      const positiveGap = row.gap >= 0
+                      return (
+                        <tr key={row.id}>
+                          <td>
+                            <select
+                              className="times-cell-select"
+                              value={row.team}
+                              onChange={(event) => updateAssessorProfile(row.profileKey, { team: event.target.value })}
+                              aria-label={`Time de ${row.assessor}`}
+                            >
+                              {teamOptions.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                              ))}
+                              {!teamOptions.some((o) => o.value === row.team) && row.team ? (
+                                <option value={row.team}>{row.team}</option>
+                              ) : null}
+                            </select>
+                          </td>
+                          <td>
+                            <select
+                              className="times-cell-select"
+                              value={row.seniority}
+                              onChange={(event) => updateAssessorProfile(row.profileKey, { seniority: event.target.value })}
+                              aria-label={`Senioridade de ${row.assessor}`}
+                            >
+                              {SENIORITY_OPTIONS.map((option) => (
+                                <option key={option || 'none'} value={option}>{option || 'Selecionar'}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td>{row.assessor}</td>
+                          <td>{formatCurrency(row.bovespa)}</td>
+                          <td>{formatCurrency(row.estruturadas)}</td>
+                          <td className="times-cell-strong">{formatCurrency(row.total)}</td>
+                          <td>
+                            <input
+                              className="times-cell-input"
+                              type="text"
+                              inputMode="decimal"
+                              placeholder="Ex: 12500"
+                              value={row.goalRaw}
+                              onChange={(event) => updateAssessorGoal(row.profileKey, event.target.value)}
+                              aria-label={`Objetivo de ${row.assessor}`}
+                            />
+                          </td>
+                          <td className={row.attainment != null && row.attainment >= 1 ? 'times-cell-positive' : 'times-cell-negative'}>{formatPercent(row.attainment)}</td>
+                          <td className={positiveGap ? 'times-cell-positive' : 'times-cell-negative'}>{formatSignedCurrency(row.gap)}</td>
+                        </tr>
+                      )
+                    })}
+                    <tr key={`${group.team}-total`} className="times-sheet-team-total">
+                      <td colSpan={3}>Total do time</td>
+                      <td>{formatCurrency(group.totals.bovespa)}</td>
+                      <td>{formatCurrency(group.totals.estruturadas)}</td>
+                      <td className="times-cell-strong">{formatCurrency(group.totals.total)}</td>
+                      <td>{formatCurrency(group.totals.goal)}</td>
+                      <td className={group.totals.attainment != null && group.totals.attainment >= 1 ? 'times-cell-positive' : 'times-cell-negative'}>{formatPercent(group.totals.attainment)}</td>
+                      <td className={group.totals.gap >= 0 ? 'times-cell-positive' : 'times-cell-negative'}>{formatSignedCurrency(group.totals.gap)}</td>
+                    </tr>
+                    {!isLastGroup ? (
+                      <tr className="times-sheet-team-gap" aria-hidden="true">
+                        <td colSpan={9} />
+                      </tr>
+                    ) : null}
+                  </Fragment>
                   )
                 }) : (
                   <tr>
@@ -1631,7 +2373,7 @@ const Tags = () => {
         title={activeTab === TAB_TIMES ? 'Times' : 'Tags e Vinculos'}
         subtitle={activeTab === TAB_TIMES
           ? 'Painel por equipe com metas e senioridade por assessor.'
-          : 'Hierarquia Cliente -> Assessor -> Broker com visibilidade total.'}
+          : 'Hierarquia Conta -> Assessor -> Broker com visibilidade total.'}
         meta={activeTab === TAB_TIMES ? timesMeta : tagsMeta}
         actions={headerActions}
       />
@@ -1643,6 +2385,17 @@ const Tags = () => {
         running={running}
         result={result}
         accept=".xlsx,.xls"
+        selectedFile={selectedFile || globalFolderMenu.resolvedFile}
+        onSelectedFileChange={setSelectedFile}
+        linkedFileOptions={directoryFilterOptions}
+        linkedFileValue={globalFolderMenu.directoryValue}
+        onLinkedFileChange={(value) => {
+          setSelectedFile(null)
+          globalFolderMenu.onDirectoryChange(value)
+        }}
+        linkedFileLabel="Arquivo importado"
+        linkedFileEmptyMessage={directoryOptionsEmptyMessage}
+        hideLocalPicker
       />
 
       {activeTab === TAB_TIMES ? renderTimesView() : renderTagsView()}

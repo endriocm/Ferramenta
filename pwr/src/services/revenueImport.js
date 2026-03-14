@@ -1,13 +1,15 @@
-﻿import { loadXlsx } from './xlsxLoader'
-import { resolveByClientCode, resolveByClientName } from '../lib/tagResolver'
+﻿import { parseXlsxInWorker } from './xlsxWorkerClient'
+import { resolveByClientCode } from '../lib/tagResolver'
 import { normalizeAssessorName } from '../utils/assessor'
+import { toNumber } from '../utils/number'
+import { mapXpProductCategoryToLine } from './revenueXpCommission'
 
 const normalizeHeader = (value) => String(value || '')
   .trim()
   .toLowerCase()
   .normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '')
-  .replace(/\s+/g, '')
+  .replace(/[^a-z0-9]/g, '')
 
 const normalizeValue = (value) => String(value || '')
   .trim()
@@ -18,28 +20,6 @@ const normalizeValue = (value) => String(value || '')
 const isTotalMarker = (value) => {
   const normalized = normalizeValue(value)
   return normalized === 'total' || normalized === 'totais'
-}
-
-const toNumber = (value) => {
-  if (value == null || value === '') return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const raw = String(value).trim()
-  if (!raw) return null
-  let cleaned = raw.replace(/[^\d,.-]/g, '')
-  if (!cleaned) return null
-  const hasComma = cleaned.includes(',')
-  const hasDot = cleaned.includes('.')
-  if (hasComma && hasDot) {
-    if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
-      cleaned = cleaned.replace(/\./g, '').replace(/,/g, '.')
-    } else {
-      cleaned = cleaned.replace(/,/g, '')
-    }
-  } else if (hasComma) {
-    cleaned = cleaned.replace(/,/g, '.')
-  }
-  const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
 }
 
 const toArrayBuffer = async (input) => {
@@ -86,11 +66,21 @@ const processInChunks = async (rows, chunkSize, { onProgress, isCanceled, onChun
 const parseDate = (value, XLSX) => {
   if (!value) return ''
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10)
-  if (typeof value === 'number' && XLSX?.SSF?.parse_date_code) {
-    const parsed = XLSX.SSF.parse_date_code(value)
-    if (parsed?.y && parsed?.m && parsed?.d) {
-      const date = new Date(parsed.y, parsed.m - 1, parsed.d)
-      return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
+  if (typeof value === 'number') {
+    if (XLSX?.SSF?.parse_date_code) {
+      const parsed = XLSX.SSF.parse_date_code(value)
+      if (parsed?.y && parsed?.m && parsed?.d) {
+        const date = new Date(parsed.y, parsed.m - 1, parsed.d)
+        return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
+      }
+    }
+    // Fallback sem dependencia de XLSX (serial Excel -> data UTC)
+    const serial = Number(value)
+    if (Number.isFinite(serial)) {
+      const baseUtc = Date.UTC(1899, 11, 30)
+      const ms = Math.round(serial * 86400000)
+      const date = new Date(baseUtc + ms)
+      if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10)
     }
   }
   const raw = String(value).trim()
@@ -106,93 +96,44 @@ const parseDate = (value, XLSX) => {
 
 const parseDateBr = (value, XLSX) => parseDate(value, XLSX)
 
-const pickSheetName = (workbook) => {
-  if (!workbook?.SheetNames?.length) return null
-  const preferred = workbook.SheetNames.find((name) => normalizeHeader(name) === 'export')
-  return preferred || workbook.SheetNames[0]
-}
-
-const CELL_REF_REGEX = /^[A-Z]+[0-9]+$/
-
-const resolveSheetRange = (sheet, XLSX) => {
-  const ref = sheet?.['!ref']
-  let maxRow = -1
-  let maxCol = -1
-
-  if (ref) {
-    const decoded = XLSX.utils.decode_range(ref)
-    maxRow = decoded.e.r
-    maxCol = decoded.e.c
-  }
-
-  Object.keys(sheet || {}).forEach((key) => {
-    if (key.startsWith('!')) return
-    if (!CELL_REF_REGEX.test(key)) return
-    const cell = XLSX.utils.decode_cell(key)
-    if (cell.r > maxRow) maxRow = cell.r
-    if (cell.c > maxCol) maxCol = cell.c
-  })
-
-  if (maxRow < 0 || maxCol < 0) {
-    return { sheetRef: ref || '', fullRef: ref || '', rowCount: 0 }
-  }
-
-  const fullRef = XLSX.utils.encode_range({
-    s: { r: 0, c: 0 },
-    e: { r: maxRow, c: maxCol },
-  })
-
-  return {
-    sheetRef: ref || fullRef,
-    fullRef,
-    rowCount: maxRow + 1,
-  }
-}
-
-const isCellNonEmpty = (cell) => {
-  if (cell == null) return false
-  if (typeof cell === 'string') return cell.trim() !== ''
-  return true
-}
-
-const isRowNonEmpty = (row) => {
-  if (!Array.isArray(row)) return isCellNonEmpty(row)
-  return row.some((cell) => isCellNonEmpty(cell))
-}
-
-const estimateExcelRows = (rawRows, headerRows = 1) => {
-  if (!Array.isArray(rawRows) || !rawRows.length) {
-    return { estimatedExcelRows: 0, estimatedDataRows: 0 }
-  }
-  let lastNonEmpty = -1
-  for (let i = rawRows.length - 1; i >= 0; i -= 1) {
-    if (isRowNonEmpty(rawRows[i])) {
-      lastNonEmpty = i
-      break
+const parseDateFlexible = (value, XLSX) => {
+  const base = parseDate(value, XLSX)
+  if (base) return base
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+  const shortMatch = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2})$/)
+  if (shortMatch) {
+    const [, firstRaw, secondRaw, yearRaw] = shortMatch
+    const first = Number(firstRaw)
+    const second = Number(secondRaw)
+    const month = first > 12 && second <= 12 ? second : first
+    const day = first > 12 && second <= 12 ? first : second
+    const year = 2000 + Number(yearRaw)
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const date = new Date(year, month - 1, day)
+      return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
     }
   }
-  const estimatedExcelRows = lastNonEmpty >= 0 ? lastNonEmpty + 1 : 0
-  const estimatedDataRows = Math.max(0, estimatedExcelRows - headerRows)
-  return { estimatedExcelRows, estimatedDataRows }
+  const longMatch = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
+  if (longMatch) {
+    const [, firstRaw, secondRaw, yearRaw] = longMatch
+    const first = Number(firstRaw)
+    const second = Number(secondRaw)
+    const month = first > 12 && second <= 12 ? second : first
+    const day = first > 12 && second <= 12 ? first : second
+    const year = Number(yearRaw)
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const date = new Date(year, month - 1, day)
+      return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
+    }
+  }
+  return ''
 }
 
-const readSheetData = (sheet, XLSX, { headerRows = 1 } = {}) => {
-  const meta = resolveSheetRange(sheet, XLSX)
-  const range = meta.fullRef || undefined
-  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', ...(range ? { range } : {}) })
-  const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false, ...(range ? { range } : {}) })
-  const estimated = estimateExcelRows(rawRows, headerRows)
-  return {
-    rows,
-    rawRows,
-    meta: {
-      ...meta,
-      rawRowCount: rawRows.length,
-      estimatedExcelRows: estimated.estimatedExcelRows,
-      estimatedDataRows: estimated.estimatedDataRows,
-      headerRows,
-    },
-  }
+const pickSheetName = (sheetNames) => {
+  if (!sheetNames?.length) return null
+  const preferred = sheetNames.find((name) => normalizeHeader(name) === 'export')
+  return preferred || sheetNames[0]
 }
 
 const shouldLogImportStats = () => {
@@ -268,15 +209,10 @@ const enrichFromTags = (partial, tagIndex) => {
   }
   if (!tagIndex || !tagIndex.size) return { enriched: false, data: next }
   const resolved = resolveByClientCode(tagIndex, partial.codigoCliente)
-    || resolveByClientName(tagIndex, partial.nomeCliente)
   if (!resolved) return { enriched: false, data: next }
   let enriched = false
   if (!next.codigoCliente && resolved.codigoCliente) {
     next.codigoCliente = resolved.codigoCliente
-    enriched = true
-  }
-  if (!next.nomeCliente && resolved.nomeCliente) {
-    next.nomeCliente = resolved.nomeCliente
     enriched = true
   }
   const resolvedAssessor = normalizeAssessorName(resolved.assessor)
@@ -292,38 +228,30 @@ const enrichFromTags = (partial, tagIndex) => {
     next.time = resolved.time
     enriched = true
   }
+  if (!next.unit && resolved.unit) {
+    next.unit = resolved.unit
+    enriched = true
+  }
+  if (!next.seniority && resolved.seniority) {
+    next.seniority = resolved.seniority
+    enriched = true
+  }
   return { enriched, data: next }
 }
-
-const MAX_DETAIL_ITEMS = 50000
 
 const REJECT_REASON_MESSAGES = {
   header_repeat: 'Linha de cabecalho repetida',
   total_row: 'Linha de total/rodape',
   missing_required: 'Campos obrigatorios ausentes',
   mercado_mismatch: 'Mercado diferente do selecionado',
+  category_unmapped: 'Categoria XP nao mapeada',
 }
 
-const buildDetailsPayload = (rejected, duplicated, { rejectedTruncated, duplicatedTruncated, canceled } = {}) => ({
+const buildDetailsPayload = (rejected, duplicated, { canceled } = {}) => ({
   rejected: Array.isArray(rejected) ? rejected : [],
   duplicated: Array.isArray(duplicated) ? duplicated : [],
   canceled: Boolean(canceled),
-  truncated: {
-    rejected: Boolean(rejectedTruncated),
-    duplicated: Boolean(duplicatedTruncated),
-  },
 })
-
-const buildDetailsWarning = (rejectedTruncated, duplicatedTruncated) => {
-  if (!rejectedTruncated && !duplicatedTruncated) return null
-  const parts = []
-  if (rejectedTruncated) parts.push('rejeitados')
-  if (duplicatedTruncated) parts.push('duplicados')
-  return {
-    code: 'DETAILS_TRUNCATED',
-    message: `Detalhes de ${parts.join(' e ')} limitados a ${MAX_DETAIL_ITEMS} linhas.`,
-  }
-}
 
 export const parseBovespaReceitasFile = async (
   input,
@@ -338,14 +266,12 @@ export const parseBovespaReceitasFile = async (
 ) => {
   const buffer = await toArrayBuffer(input)
   if (!buffer) return { ok: false, error: { code: 'BUFFER_INVALID', message: 'Arquivo invalido.' } }
-  const XLSX = await loadXlsx()
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
-  const sheetName = pickSheetName(workbook)
+  const { sheetNames, sheets } = await parseXlsxInWorker(buffer)
+  const sheetName = pickSheetName(sheetNames)
   if (!sheetName) {
     return { ok: false, error: { code: 'SHEET_NOT_FOUND', message: 'Sheet "Export" nao encontrada.' } }
   }
-  const sheet = workbook.Sheets[sheetName]
-  const { rows, meta } = readSheetData(sheet, XLSX)
+  const { rows, meta } = sheets[sheetName]
   const { headers, headerMap } = buildHeaderMap(rows)
 
   const required = {
@@ -392,28 +318,14 @@ export const parseBovespaReceitasFile = async (
   const entries = []
   const rejectedDetails = []
   const duplicatedDetails = []
-  let rejectedTruncated = false
-  let duplicatedTruncated = false
   const duplicateIndex = new Map()
   const headerRows = meta?.headerRows ?? 1
   const toExcelRowIndex = (index) => index + headerRows + 1
   const tagWarning = (!tagIndex || !tagIndex.size)
     ? { code: 'TAGS_EMPTY', message: 'Tags nao carregadas - enrich desativado.' }
     : null
-  const pushRejected = (item) => {
-    if (rejectedDetails.length >= MAX_DETAIL_ITEMS) {
-      rejectedTruncated = true
-      return
-    }
-    rejectedDetails.push(item)
-  }
-  const pushDuplicated = (item) => {
-    if (duplicatedDetails.length >= MAX_DETAIL_ITEMS) {
-      duplicatedTruncated = true
-      return
-    }
-    duplicatedDetails.push(item)
-  }
+  const pushRejected = (item) => { rejectedDetails.push(item) }
+  const pushDuplicated = (item) => { duplicatedDetails.push(item) }
   const discardTracker = createDiscardTracker()
   const isHeaderRepeat = (values) => {
     const matches = []
@@ -488,7 +400,7 @@ export const parseBovespaReceitasFile = async (
         const volume = toNumber(volumeRaw)
         const tipoCorretagem = normalizeValue(tipoRaw)
         const mercadoValue = normalizeValue(mercadoRaw)
-        const dataISO = parseDate(dataRaw, XLSX)
+        const dataISO = parseDate(dataRaw)
         const basePartial = {
           codigoCliente: conta,
           nomeCliente: String(nomeClienteRaw || '').trim(),
@@ -514,7 +426,7 @@ export const parseBovespaReceitasFile = async (
           tipoCorretagem,
           mercado: mercadoValue,
           data: dataISO,
-          nomeCliente,
+          nomeCliente: '',
           assessor,
           broker,
         }
@@ -580,13 +492,15 @@ export const parseBovespaReceitasFile = async (
           codigoCliente: conta,
           conta,
           data: dataISO,
-          nomeCliente,
+          nomeCliente: '',
           assessor,
           broker,
           corretagem,
+          receitaBrutaBase: Number(corretagem.toFixed(6)),
           volumeNegociado: volume || 0,
           tipoCorretagem,
           mercado: mercadoValue.toUpperCase(),
+          repasse: Number(fatorReceita.toFixed(6)),
           receita: Number(receitaCalculada.toFixed(6)),
           origem: mercadoTarget === 'bmf' ? 'BMF' : 'Bovespa',
           source: 'import',
@@ -605,8 +519,6 @@ export const parseBovespaReceitasFile = async (
       savedRows: entries.length,
     })
     const details = buildDetailsPayload(rejectedDetails, duplicatedDetails, {
-      rejectedTruncated,
-      duplicatedTruncated,
       canceled: true,
     })
     const canceledStats = {
@@ -622,8 +534,6 @@ export const parseBovespaReceitasFile = async (
       warnings: [],
       details,
     }
-    const detailsWarning = buildDetailsWarning(rejectedTruncated, duplicatedTruncated)
-    if (detailsWarning) canceledStats.warnings.push(detailsWarning)
     if (tagWarning) canceledStats.warnings.push(tagWarning)
     return {
       ok: false,
@@ -653,12 +563,8 @@ export const parseBovespaReceitasFile = async (
   })
   const warnings = buildWarningsFromIntegrity(integrity)
   const details = buildDetailsPayload(rejectedDetails, duplicatedDetails, {
-    rejectedTruncated,
-    duplicatedTruncated,
     canceled: false,
   })
-  const detailsWarning = buildDetailsWarning(rejectedTruncated, duplicatedTruncated)
-  if (detailsWarning) warnings.push(detailsWarning)
   if (tagWarning) warnings.push(tagWarning)
   const importStats = {
     sheetRef: meta.sheetRef,
@@ -725,17 +631,15 @@ export const parseStructuredReceitasFile = async (
 ) => {
   const buffer = await toArrayBuffer(input)
   if (!buffer) return { ok: false, error: { code: 'BUFFER_INVALID', message: 'Arquivo invalido.' } }
-  const XLSX = await loadXlsx()
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
-  const sheetName = workbook.SheetNames.find((name) => {
+  const { sheetNames, sheets } = await parseXlsxInWorker(buffer)
+  const sheetName = sheetNames.find((name) => {
     const trimmed = String(name || '').trim()
     return trimmed === 'Operações' || trimmed === 'Operacoes'
   })
   if (!sheetName) {
     return { ok: false, error: { code: 'SHEET_NOT_FOUND', message: 'Sheet "Operações" nao encontrada.' } }
   }
-  const sheet = workbook.Sheets[sheetName]
-  const { rows, meta } = readSheetData(sheet, XLSX)
+  const { rows, meta } = sheets[sheetName]
   const { headers, headerMap } = buildHeaderMap(rows)
 
   const required = {
@@ -779,28 +683,14 @@ export const parseStructuredReceitasFile = async (
   const months = new Set()
   const rejectedDetails = []
   const duplicatedDetails = []
-  let rejectedTruncated = false
-  let duplicatedTruncated = false
   const duplicateIndex = new Map()
   const headerRows = meta?.headerRows ?? 1
   const toExcelRowIndex = (index) => index + headerRows + 1
   const tagWarning = (!tagIndex || !tagIndex.size)
     ? { code: 'TAGS_EMPTY', message: 'Tags nao carregadas - enrich desativado.' }
     : null
-  const pushRejected = (item) => {
-    if (rejectedDetails.length >= MAX_DETAIL_ITEMS) {
-      rejectedTruncated = true
-      return
-    }
-    rejectedDetails.push(item)
-  }
-  const pushDuplicated = (item) => {
-    if (duplicatedDetails.length >= MAX_DETAIL_ITEMS) {
-      duplicatedTruncated = true
-      return
-    }
-    duplicatedDetails.push(item)
-  }
+  const pushRejected = (item) => { rejectedDetails.push(item) }
+  const pushDuplicated = (item) => { duplicatedDetails.push(item) }
   const discardTracker = createDiscardTracker()
   const isHeaderRepeat = (values) => {
     const matches = []
@@ -871,13 +761,13 @@ export const parseStructuredReceitasFile = async (
           continue
         }
 
-        const dataInclusao = parseDateBr(dataRaw, XLSX)
+        const dataInclusao = parseDateBr(dataRaw)
         const comissao = toNumber(comissaoRaw)
         const quantidadeHeader = optional.quantidade.find((key) => headerMap[key])
         const precoHeader = optional.precoCompra.find((key) => headerMap[key])
         const quantidade = quantidadeHeader ? toNumber(row[headerMap[quantidadeHeader]]) : null
         const precoCompra = precoHeader ? toNumber(row[headerMap[precoHeader]]) : null
-        const vencimento = parseDateBr(fixingRaw, XLSX) || ''
+        const vencimento = parseDateBr(fixingRaw) || ''
         const basePartial = {
           codigoCliente: String(codigoRaw || '').trim(),
           nomeCliente: String(nomeClienteRaw || '').trim(),
@@ -901,7 +791,7 @@ export const parseStructuredReceitasFile = async (
           comissao,
           quantidade,
           precoCompra,
-          nomeCliente,
+          nomeCliente: '',
           assessor,
           broker,
         }
@@ -955,9 +845,11 @@ export const parseStructuredReceitasFile = async (
           ativo: normalized.ativo,
           vencimento,
           comissao,
+          comissaoBaseBruta: Number(comissao.toFixed(6)),
+          repasse: 1,
           quantidade: quantidade ?? null,
           precoCompra: precoCompra ?? null,
-          nomeCliente,
+          nomeCliente: '',
           assessor,
           broker,
           origem: 'Estruturadas',
@@ -977,8 +869,6 @@ export const parseStructuredReceitasFile = async (
       savedRows: entries.length,
     })
     const details = buildDetailsPayload(rejectedDetails, duplicatedDetails, {
-      rejectedTruncated,
-      duplicatedTruncated,
       canceled: true,
     })
     const canceledStats = {
@@ -994,8 +884,6 @@ export const parseStructuredReceitasFile = async (
       warnings: [],
       details,
     }
-    const detailsWarning = buildDetailsWarning(rejectedTruncated, duplicatedTruncated)
-    if (detailsWarning) canceledStats.warnings.push(detailsWarning)
     if (tagWarning) canceledStats.warnings.push(tagWarning)
     return {
       ok: false,
@@ -1022,12 +910,8 @@ export const parseStructuredReceitasFile = async (
   })
   const warnings = buildWarningsFromIntegrity(integrity)
   const details = buildDetailsPayload(rejectedDetails, duplicatedDetails, {
-    rejectedTruncated,
-    duplicatedTruncated,
     canceled: false,
   })
-  const detailsWarning = buildDetailsWarning(rejectedTruncated, duplicatedTruncated)
-  if (detailsWarning) warnings.push(detailsWarning)
   if (tagWarning) warnings.push(tagWarning)
   const importStats = {
     sheetRef: meta.sheetRef,
@@ -1084,3 +968,449 @@ export const parseStructuredReceitasFile = async (
   }
 }
 
+const resolveHeaderByAliases = (headerMap, aliases = []) => {
+  return aliases.find((key) => headerMap[key])
+}
+
+const parseClientCode = (value) => String(value || '')
+  .replace(/\D/g, '')
+  .trim()
+
+const normalizeXpLineKey = (line) => {
+  if (line === 'Bovespa') return 'bovespa'
+  if (line === 'BMF') return 'bmf'
+  if (line === 'Estruturadas') return 'estruturadas'
+  return 'other'
+}
+
+export const parseXpCommissionFile = async (
+  input,
+  {
+    onProgress,
+    signal,
+    tagIndex,
+    chunkSize = 500,
+  } = {},
+) => {
+  const buffer = await toArrayBuffer(input)
+  if (!buffer) return { ok: false, error: { code: 'BUFFER_INVALID', message: 'Arquivo invalido.' } }
+  const { sheetNames, sheets } = await parseXlsxInWorker(buffer)
+  const sheetName = sheetNames?.[0]
+  if (!sheetName) {
+    return { ok: false, error: { code: 'SHEET_NOT_FOUND', message: 'Nenhuma planilha encontrada.' } }
+  }
+
+  const { rows, meta } = sheets[sheetName]
+  const { headers, headerMap } = buildHeaderMap(rows)
+
+  const required = {
+    dataReferencia: ['datareferencia', 'data', 'dataoperacao'],
+    produtoCategoria: ['produtocategoriaxp', 'produtocategoria', 'produto', 'categoria'],
+    cliente: ['cliente', 'conta', 'codigocliente', 'codcliente'],
+    comissao: ['comissaoxp', 'comissao'],
+  }
+  const optional = {
+    dataOperacao: ['dataoperacao'],
+    tipoPessoa: ['tipopessoa'],
+    linhaReceita: ['linhareceita'],
+    receitaAi: ['receitaai'],
+    nivel1: ['nivel1'],
+    nivel2: ['nivel2'],
+    nivel3: ['nivel3'],
+    nivel4: ['nivel4'],
+    tipoServico: ['tipodoservico', 'tiposervico'],
+    receitaBruta: ['receitabruta'],
+    receitaLiquida: ['receitaliquida'],
+    repasseXp: ['repassexp', 'repassexppercentual', 'repassexp%'],
+    escritorio: ['escritorio'],
+    senioridade: ['senioridade', 'seniority'],
+    codAiXp: ['codaixp'],
+    codAiLiberta: ['codailiberta'],
+    nomeAi: ['nomeai'],
+    squad: ['squad'],
+    nomeCliente: ['nomecliente', 'nomedocliente', 'razaosocial', 'clientenome'],
+  }
+
+  const requiredHeaders = Object.entries(required).reduce((acc, [key, aliases]) => {
+    acc[key] = resolveHeaderByAliases(headerMap, aliases)
+    return acc
+  }, {})
+  const optionalHeaders = Object.entries(optional).reduce((acc, [key, aliases]) => {
+    acc[key] = resolveHeaderByAliases(headerMap, aliases)
+    return acc
+  }, {})
+
+  const missing = Object.entries(requiredHeaders)
+    .filter(([, value]) => !value)
+    .map(([key]) => key)
+
+  if (missing.length) {
+    return {
+      ok: false,
+      error: {
+        code: 'MISSING_COLUMN',
+        message: 'Colunas obrigatorias ausentes.',
+        details: { missing, headers },
+      },
+    }
+  }
+
+  const rowsRead = rows.length
+  let rowsValid = 0
+  let rowsRejected = 0
+  let duplicatedRows = 0
+  let processedRows = 0
+  let enrichedRows = 0
+  let autoFixedRows = 0
+  let totalCommission = 0
+  const totalsByLine = { bovespa: 0, bmf: 0, estruturadas: 0 }
+  const lineCounts = { bovespa: 0, bmf: 0, estruturadas: 0 }
+  const months = new Set()
+  const entries = []
+  const rejectedDetails = []
+  const duplicatedDetails = []
+  const duplicateIndex = new Map()
+  const headerRows = meta?.headerRows ?? 1
+  const toExcelRowIndex = (index) => index + headerRows + 1
+  const tagWarning = (!tagIndex || !tagIndex.size)
+    ? { code: 'TAGS_EMPTY', message: 'Tags nao carregadas - enrich desativado.' }
+    : null
+
+  const pushRejected = (item) => { rejectedDetails.push(item) }
+  const pushDuplicated = (item) => { duplicatedDetails.push(item) }
+  const discardTracker = createDiscardTracker()
+
+  const isCanceled = () => Boolean(signal?.aborted)
+  const chunkResult = await processInChunks(rows, chunkSize, {
+    onProgress,
+    isCanceled,
+    getProcessed: () => processedRows,
+    onChunk: (allRows, start, end) => {
+      for (let index = start; index < end; index += 1) {
+        if (isCanceled()) return 'cancelled'
+        processedRows += 1
+        const row = allRows[index] || {}
+        const rowIndex = toExcelRowIndex(index)
+
+        const dataRaw = row[headerMap[requiredHeaders.dataReferencia]]
+        const produtoRaw = row[headerMap[requiredHeaders.produtoCategoria]]
+        const clienteRaw = row[headerMap[requiredHeaders.cliente]]
+        const comissaoRaw = row[headerMap[requiredHeaders.comissao]]
+        const dataOperacaoRaw = optionalHeaders.dataOperacao ? row[headerMap[optionalHeaders.dataOperacao]] : ''
+        const tipoPessoaRaw = optionalHeaders.tipoPessoa ? row[headerMap[optionalHeaders.tipoPessoa]] : ''
+        const linhaReceitaRaw = optionalHeaders.linhaReceita ? row[headerMap[optionalHeaders.linhaReceita]] : ''
+        const receitaAiRaw = optionalHeaders.receitaAi ? row[headerMap[optionalHeaders.receitaAi]] : ''
+        const nivel1Raw = optionalHeaders.nivel1 ? row[headerMap[optionalHeaders.nivel1]] : ''
+        const nivel2Raw = optionalHeaders.nivel2 ? row[headerMap[optionalHeaders.nivel2]] : ''
+        const nivel3Raw = optionalHeaders.nivel3 ? row[headerMap[optionalHeaders.nivel3]] : ''
+        const nivel4Raw = optionalHeaders.nivel4 ? row[headerMap[optionalHeaders.nivel4]] : ''
+        const tipoServicoRaw = optionalHeaders.tipoServico ? row[headerMap[optionalHeaders.tipoServico]] : ''
+        const receitaBrutaRaw = optionalHeaders.receitaBruta ? row[headerMap[optionalHeaders.receitaBruta]] : ''
+        const receitaLiquidaRaw = optionalHeaders.receitaLiquida ? row[headerMap[optionalHeaders.receitaLiquida]] : ''
+        const repasseXpRaw = optionalHeaders.repasseXp ? row[headerMap[optionalHeaders.repasseXp]] : ''
+        const escritorioRaw = optionalHeaders.escritorio ? row[headerMap[optionalHeaders.escritorio]] : ''
+        const senioridadeRaw = optionalHeaders.senioridade ? row[headerMap[optionalHeaders.senioridade]] : ''
+        const codAiXpRaw = optionalHeaders.codAiXp ? row[headerMap[optionalHeaders.codAiXp]] : ''
+        const codAiLibertaRaw = optionalHeaders.codAiLiberta ? row[headerMap[optionalHeaders.codAiLiberta]] : ''
+        const nomeAiRaw = optionalHeaders.nomeAi ? row[headerMap[optionalHeaders.nomeAi]] : ''
+        const squadRaw = optionalHeaders.squad ? row[headerMap[optionalHeaders.squad]] : ''
+        const nomeClienteRaw = optionalHeaders.nomeCliente ? row[headerMap[optionalHeaders.nomeCliente]] : ''
+
+        const dataReferencia = parseDateFlexible(dataRaw)
+        const dataOperacao = parseDateFlexible(dataOperacaoRaw)
+        const dataBase = dataOperacao || dataReferencia
+        const receitaLiquida = toNumber(receitaLiquidaRaw)
+        const receitaBruta = toNumber(receitaBrutaRaw)
+        const comissao = toNumber(comissaoRaw) ?? receitaLiquida ?? receitaBruta
+        const line = mapXpProductCategoryToLine(produtoRaw || linhaReceitaRaw)
+        const clienteBase = parseClientCode(clienteRaw)
+        const basePartial = {
+          codigoCliente: clienteBase,
+          nomeCliente: String(nomeClienteRaw || '').trim(),
+          assessor: normalizeAssessorName(String(nomeAiRaw || '').trim(), ''),
+          broker: String(escritorioRaw || '').trim(),
+          time: String(squadRaw || '').trim(),
+          unit: '',
+          seniority: String(senioridadeRaw || '').trim(),
+        }
+        const wasMissingRequired = (!dataBase || !clienteBase || comissao == null)
+        const enrichedResult = enrichFromTags(basePartial, tagIndex)
+        if (enrichedResult.enriched) enrichedRows += 1
+        const enriched = enrichedResult.data || basePartial
+
+        const codigoCliente = parseClientCode(enriched.codigoCliente || clienteBase)
+        const nomeCliente = String(enriched.nomeCliente || '').trim()
+        const assessor = normalizeAssessorName(enriched.assessor || '', '')
+        const broker = String(enriched.broker || '').trim()
+        const time = String(enriched.time || '').trim()
+        const unit = String(enriched.unit || '').trim()
+        const seniority = String(enriched.seniority || '').trim()
+        const produtoCategoria = String(produtoRaw || '').trim()
+        const tipoPessoa = String(tipoPessoaRaw || '').trim()
+        const linhaReceita = String(linhaReceitaRaw || '').trim()
+        const receitaAi = String(receitaAiRaw || '').trim()
+        const nivel1 = String(nivel1Raw || '').trim()
+        const nivel2 = String(nivel2Raw || '').trim()
+        const nivel3 = String(nivel3Raw || '').trim()
+        const nivel4 = String(nivel4Raw || '').trim()
+        const tipoServico = String(tipoServicoRaw || '').trim()
+        const repasseXp = toNumber(repasseXpRaw)
+        const escritorio = String(escritorioRaw || '').trim()
+        const senioridade = String(senioridadeRaw || '').trim()
+        const codAiXp = String(codAiXpRaw || '').trim()
+        const codAiLiberta = String(codAiLibertaRaw || '').trim()
+        const nomeAi = String(nomeAiRaw || '').trim()
+        const squad = String(squadRaw || '').trim()
+        const monthKey = dataBase ? dataBase.slice(0, 7) : ''
+
+        const raw = {
+          dataReferencia: dataRaw,
+          produtoCategoria: produtoRaw,
+          cliente: clienteRaw,
+          comissao: comissaoRaw,
+          dataOperacao: dataOperacaoRaw,
+          linhaReceita: linhaReceitaRaw,
+          receitaAi: receitaAiRaw,
+          tipoServico: tipoServicoRaw,
+          receitaBruta: receitaBrutaRaw,
+          receitaLiquida: receitaLiquidaRaw,
+          repasseXp: repasseXpRaw,
+          senioridade: senioridadeRaw,
+          nomeAi: nomeAiRaw,
+          escritorio: escritorioRaw,
+          squad: squadRaw,
+        }
+
+        const normalized = {
+          data: dataBase,
+          dataOperacao,
+          dataReferencia,
+          produtoCategoria,
+          line,
+          codigoCliente,
+          comissao,
+          receitaLiquida,
+          receitaBruta,
+        }
+
+        if (!line) {
+          rowsRejected += 1
+          recordDiscard(discardTracker, 'category_unmapped', index)
+          pushRejected({
+            rowIndex,
+            reasonCode: 'category_unmapped',
+            reasonMessage: REJECT_REASON_MESSAGES.category_unmapped,
+            raw,
+            normalized,
+          })
+          continue
+        }
+
+        if (!monthKey || !codigoCliente || comissao == null) {
+          rowsRejected += 1
+          recordDiscard(discardTracker, 'missing_required', index)
+          pushRejected({
+            rowIndex,
+            reasonCode: 'missing_required',
+            reasonMessage: REJECT_REASON_MESSAGES.missing_required,
+            raw,
+            normalized,
+          })
+          continue
+        }
+
+        if (wasMissingRequired && monthKey && codigoCliente && comissao != null) {
+          autoFixedRows += 1
+        }
+
+        rowsValid += 1
+        totalCommission += comissao
+        const lineKey = normalizeXpLineKey(line)
+        totalsByLine[lineKey] += comissao
+        lineCounts[lineKey] += 1
+        months.add(monthKey)
+
+        const duplicateKey = [
+          line,
+          codigoCliente,
+          dataBase,
+          produtoCategoria,
+          comissao,
+        ].join('|')
+        if (duplicateIndex.has(duplicateKey)) {
+          duplicatedRows += 1
+          const firstSeenRowIndex = duplicateIndex.get(duplicateKey)
+          pushDuplicated({
+            rowIndex,
+            duplicateKey,
+            firstSeenRowIndex,
+            reasonMessage: firstSeenRowIndex ? `Duplicado (primeira linha ${firstSeenRowIndex})` : 'Duplicado',
+            raw,
+            normalized,
+          })
+        } else {
+          duplicateIndex.set(duplicateKey, rowIndex)
+        }
+
+        entries.push({
+          id: `xp-${index}-${Date.now()}`,
+          data: dataBase,
+          dataReferencia,
+          dataOperacao,
+          mesApuracao: monthKey,
+          line,
+          linhaReceita,
+          produtoCategoria,
+          codigoCliente,
+          conta: codigoCliente,
+          cliente: codigoCliente,
+          nomeCliente: '',
+          tipoPessoa,
+          receitaAi,
+          tipoServico,
+          nivel1,
+          nivel2,
+          nivel3,
+          nivel4,
+          comissao: Number(comissao.toFixed(6)),
+          receitaLiquida: Number((receitaLiquida ?? comissao).toFixed(6)),
+          receitaBruta: Number((receitaBruta ?? comissao).toFixed(6)),
+          repasseXp: repasseXp == null ? null : Number(repasseXp.toFixed(6)),
+          escritorio,
+          senioridade,
+          codAiXp,
+          codAiLiberta,
+          nomeAi,
+          squad,
+          assessor,
+          broker,
+          time,
+          unit,
+          seniority,
+          source: 'xp-commission',
+          importedAt: Date.now(),
+        })
+      }
+      return null
+    },
+  })
+
+  if (chunkResult.canceled) {
+    const integrity = buildIntegrityReport({
+      sheetName,
+      meta,
+      processedRows,
+      validRows: rowsValid,
+      savedRows: entries.length,
+    })
+    const details = buildDetailsPayload(rejectedDetails, duplicatedDetails, {
+      canceled: true,
+    })
+    const canceledStats = {
+      rawRows: rowsRead,
+      processedRows,
+      validRows: rowsValid,
+      savedRows: entries.length,
+      rejectedRows: rowsRejected,
+      duplicatedRows,
+      enrichedRows,
+      autoFixedRows,
+      integrity,
+      warnings: [],
+      details,
+    }
+    if (tagWarning) canceledStats.warnings.push(tagWarning)
+    return {
+      ok: false,
+      error: { code: 'CANCELLED', message: 'Importacao cancelada.' },
+      entries: [],
+      summary: {
+        rowsRead,
+        rowsValid,
+        rowsRejected,
+        totalCommission: Number(totalCommission.toFixed(2)),
+        totalsByLine: {
+          bovespa: Number(totalsByLine.bovespa.toFixed(2)),
+          bmf: Number(totalsByLine.bmf.toFixed(2)),
+          estruturadas: Number(totalsByLine.estruturadas.toFixed(2)),
+        },
+        lineCounts,
+        months: Array.from(months).sort(),
+        sheetUsed: sheetName,
+        stats: canceledStats,
+      },
+    }
+  }
+
+  const integrity = buildIntegrityReport({
+    sheetName,
+    meta,
+    processedRows,
+    validRows: rowsValid,
+    savedRows: entries.length,
+  })
+  const warnings = buildWarningsFromIntegrity(integrity)
+  const details = buildDetailsPayload(rejectedDetails, duplicatedDetails, {
+    canceled: false,
+  })
+  if (tagWarning) warnings.push(tagWarning)
+  const importStats = {
+    sheetRef: meta.sheetRef,
+    sheetRefResolved: meta.fullRef,
+    sheetRows: meta.rowCount,
+    rawRowCount: meta.rawRowCount,
+    rowsRead,
+    processedRows,
+    excelValidCount: rowsValid,
+    importedCount: entries.length,
+    discardedCount: rowsRejected,
+    discardedReasons: discardTracker.counts,
+    discardedReasonsSample: discardTracker.samples,
+    integrity,
+    warnings,
+  }
+
+  const rawRows = importStats.rawRowCount ?? rowsRead
+  if (shouldLogImportStats()) {
+    console.info('[receita-import:xp]', importStats)
+  }
+  if (warnings.length) {
+    console.warn('[receita-import:xp] warnings', warnings)
+  }
+  console.log('[IMPORT][XP] rawRows=', rawRows, 'validRows=', rowsValid, 'savedRows=', entries.length)
+
+  const stats = {
+    rawRows: rowsRead,
+    processedRows,
+    validRows: rowsValid,
+    savedRows: entries.length,
+    rejectedRows: rowsRejected,
+    duplicatedRows,
+    enrichedRows,
+    autoFixedRows,
+    integrity,
+    warnings,
+    details,
+  }
+
+  return {
+    ok: true,
+    entries,
+    summary: {
+      rowsRead,
+      rowsValid,
+      rowsRejected,
+      totalCommission: Number(totalCommission.toFixed(2)),
+      totalsByLine: {
+        bovespa: Number(totalsByLine.bovespa.toFixed(2)),
+        bmf: Number(totalsByLine.bmf.toFixed(2)),
+        estruturadas: Number(totalsByLine.estruturadas.toFixed(2)),
+      },
+      lineCounts,
+      months: Array.from(months).sort(),
+      sheetUsed: sheetName,
+      importStats,
+      stats,
+    },
+  }
+}

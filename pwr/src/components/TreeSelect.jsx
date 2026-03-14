@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icons'
 
 const TreeRow = ({
@@ -55,7 +55,7 @@ const TreeRow = ({
 const TreeSelect = ({
   value = [],
   tree = [],
-  allValues: _allValues = [],
+  allValues = [],
   onChange,
   onDraftChange,
   onCancel,
@@ -71,10 +71,10 @@ const TreeSelect = ({
   const wrapRef = useRef(null)
   const selectAllRef = useRef(null)
 
-  const closeDropdown = (reason) => {
+  const closeDropdown = useCallback((reason) => {
     setOpen(false)
     if (reason === 'cancel') onCancel?.()
-  }
+  }, [onCancel])
 
   useEffect(() => {
     const handleOutside = (event) => {
@@ -90,7 +90,7 @@ const TreeSelect = ({
       document.removeEventListener('mousedown', handleOutside)
       document.removeEventListener('keydown', handleEscape)
     }
-  }, [open])
+  }, [open, closeDropdown])
 
   const summaryLabel = value.length
     ? `${value.length} selecionado${value.length > 1 ? 's' : ''}`
@@ -135,8 +135,9 @@ const TreeSelect = ({
       return []
     })
     const list = collect(filteredTree)
-    return Array.from(new Set(list))
-  }, [filteredTree])
+    if (list.length) return Array.from(new Set(list))
+    return Array.from(new Set(allValues))
+  }, [allValues, filteredTree])
 
   const selectedVisibleCount = useMemo(
     () => visibleValues.reduce((sum, value) => (draft.has(value) ? sum + 1 : sum), 0),
@@ -178,7 +179,9 @@ const TreeSelect = ({
 
   const handleApply = () => {
     const next = Array.from(draft).sort()
-    onChange?.(next)
+    // Se todos estão selecionados, tratar como nenhum selecionado (sem filtro)
+    const allSelected = allValues.length > 0 && allValues.every((val) => draft.has(val))
+    onChange?.(allSelected ? [] : next)
     setOpen(false)
   }
 

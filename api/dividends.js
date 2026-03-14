@@ -35,6 +35,7 @@ const mapWithConcurrency = async (items, limit, mapper) => {
 }
 
 const buildKey = (ticker, from, to) => `${normalizeTicker(ticker)}|${normalizeDateKey(from)}|${normalizeDateKey(to)}`
+const parseBooleanFlag = (value) => value === true || value === '1' || value === 'true'
 
 module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') {
@@ -53,10 +54,14 @@ module.exports = async (req, res) => {
       res.status(400).json({ error: 'Parametros invalidos.' })
       return
     }
-    const debug = req.query?.debug === '1' || req.query?.debug === 'true'
+    const debug = parseBooleanFlag(req.query?.debug)
+    const includeEvents = parseBooleanFlag(req.query?.includeEvents) || debug
     try {
-      const result = await getDividendsResult({ ticker, from, to, includeEvents: debug })
-      res.status(200).json(result)
+      const result = await getDividendsResult({ ticker, from, to, includeEvents })
+      res.status(200).json({
+        key: buildKey(ticker, from, to),
+        ...result,
+      })
     } catch (error) {
       res.status(error?.status || 502).json({
         error: 'Falha ao buscar dividendos.',
@@ -78,7 +83,8 @@ module.exports = async (req, res) => {
       res.status(400).json({ error: 'Lista vazia.' })
       return
     }
-    const debug = body?.debug === true
+    const debug = parseBooleanFlag(body?.debug)
+    const includeEvents = parseBooleanFlag(body?.includeEvents) || debug
     const results = await mapWithConcurrency(requests, 4, async (request) => {
       if (!request?.ticker || !request?.from || !request?.to) {
         return {
@@ -95,7 +101,7 @@ module.exports = async (req, res) => {
           ticker: request.ticker,
           from: request.from,
           to: request.to,
-          includeEvents: debug,
+          includeEvents,
         })
         return {
           key: buildKey(request.ticker, request.from, request.to),

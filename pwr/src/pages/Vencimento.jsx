@@ -11,20 +11,47 @@ import TreeSelect from '../components/TreeSelect'
 import { vencimentos } from '../data/vencimento'
 import { formatCurrency, formatDate, formatNumber } from '../utils/format'
 import { normalizeDateKey } from '../utils/dateKey'
+import { apiFetch } from '../services/apiBase'
 import { fetchYahooMarketData, normalizeYahooSymbol } from '../services/marketData'
-import { exportXlsx } from '../services/exportXlsx'
 import { buildDividendKey, clearDividendsCache, fetchDividend, fetchDividendsBatch } from '../services/dividends'
-import { applyOverridesToOperation, computeBarrierStatus, computeResult, getEffectiveLegs, getLegOverrideKey } from '../services/settlement'
+import { buildBonusKey, clearBonusCache, fetchBonus, fetchBonusesBatch, inferBonusQuantities } from '../services/bonus'
+import {
+  applyOverridesToOperation,
+  computeBarrierStatus,
+  computeResult,
+  getEffectiveLegs,
+  getLegOverrideKey,
+  resolveOperationQuantities,
+} from '../services/settlement'
 import { loadOverrides, saveOverrides, updateOverride } from '../services/overrides'
 import { parseWorkbook, parseWorkbookBuffer } from '../services/excel'
-import { exportReportPdf, exportVencimentosReportPdf } from '../services/pdf'
 import { getCurrentUserKey } from '../services/currentUser'
 import { enrichRow } from '../services/tags'
 import { clearLink, ensurePermission, isValidElectronPath, loadLink, saveLink } from '../services/vencimentoLink'
 import { clearLastImported, loadLastImported, saveLastImported } from '../services/vencimentoCache'
+import { annotateSettlementMarket, mergeRowsPreservingExpired, shouldLoadSettlementClose } from '../services/vencimentoRows'
+import { buildClientFilterMatchSet, buildClientFilterOptions, collectClientFilterTokens, matchesClientFilter } from '../services/clientFilter'
 import { useToast } from '../hooks/useToast'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
 import { debugLog } from '../services/debug'
+import useGlobalFolderMenu from '../hooks/useGlobalFolderMenu'
+import {
+  DADOS_EXPORT_COLUMNS,
+  DADOS_EXPORT_KEYS,
+  DADOS_EXPORT_LABELS,
+  HISTORICO_ORIGIN_VENCIMENTO,
+  buildHistoricalQuoteKey,
+  buildHistoricalRowFromVencimentoRow,
+  fetchHistoricalCloseMap,
+  formatDatePtBr,
+  formatHistoricalMonthLabel,
+  loadHistoricoOperacoesState,
+  normalizeHistoricalMonthKey,
+  recalculateHistoricalWorkbookValues,
+  serializeHistoricalRowForExport,
+  toOptionalNumber,
+  upsertHistoricoMonthlyBatch,
+} from '../services/historicoOperacoes'
 
 const getStatus = (date) => {
   const target = new Date(date)
@@ -46,9 +73,9 @@ const getBarrierBadge = (status) => {
 }
 
 const buildCopySummary = (row) => {
-  const clienteLabel = row.nomeCliente || row.codigoCliente || row.cliente || '-'
+  const clienteLabel = row.codigoCliente || row.cliente || '-'
   return [
-    `Cliente: ${clienteLabel}`,
+    `Conta: ${clienteLabel}`,
     `Ativo: ${row.ativo}`,
     `Estrutura: ${row.estrutura}`,
     `Resultado: ${formatCurrency(row.result.financeiroFinal)}`,
@@ -85,102 +112,205 @@ const toArrayBuffer = (data) => {
   return null
 }
 
-const spotCache = new Map()
 const SPOT_CONCURRENCY = 8
 const PAGE_SIZE = 15
-const EXPORT_COLUMNS = [
-  'ASSESSOR',
-  'BROKER',
-  'CLIENTE',
-  'DATA DE REGISTRO',
-  'ATIVO',
-  'ESTRUTURA',
-  'VALOR DE COMPRA',
-  'DATA DE VENCIMENTO',
-  'QUANTIDADE',
-  'CUSTO UNITÁRIO',
-  'CALL COMPRADA',
-  'CALL VENDIDA',
-  'PUT COMPRADA',
-  'PUT COMPRADA 2',
-  'PUT VENDIDA',
-  'BARREIRA KI',
-  'BARREIRA KO',
-  'SPOT',
-  'GANHO / PREJUÍZO',
-  'FINANCEIRO FINAL',
-  'VENDA DO ATIVO A MERCADO',
-  'LUCRO %',
-  'DÉBITO DIVIDENDOS',
-  'GANHOS NAS OPÇÕES',
-  'GANHO NA PUT',
-  'GANHO NA CALL',
-  'CUPOM',
-  'PAGOU',
+const RESUMO_EXPORT_COLUMNS = [
+  { key: 'chave', label: 'CHAVE' },
+  { key: 'assessor', label: 'ASSESSOR' },
+  { key: 'broker', label: 'BROKER' },
+  { key: 'cliente', label: 'CLIENTE' },
+  { key: 'dataEntrada', label: 'DATA DE ENTRADA' },
+  { key: 'ativo', label: 'ATIVO' },
+  { key: 'estrutura', label: 'ESTRUTURA' },
+  { key: 'dataVencimento', label: 'DATA DE VENCIMENTO' },
+  { key: 'entrou', label: 'ENTROU' },
+  { key: 'dividendos', label: 'DIVIDENDOS' },
+  { key: 'cupom', label: 'CUPOM' },
+  { key: 'financeiroFinal', label: 'FINANCEIRO FINAL' },
+  { key: 'ganhoPrejuizo', label: 'GANHO / PREJUÍZO' },
+  { key: 'lucroPercentual', label: 'LUCRO %' },
 ]
 
-const toOptionalNumber = (value) => {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
+const RESUMO_EXPORT_KEYS = RESUMO_EXPORT_COLUMNS.map((column) => column.key)
+const RESUMO_EXPORT_LABELS = RESUMO_EXPORT_COLUMNS.map((column) => column.label)
+const RESUMO_CURRENCY_KEYS = new Set(['entrou', 'dividendos', 'cupom', 'financeiroFinal', 'ganhoPrejuizo'])
+const RESUMO_PERCENT_KEYS = new Set(['lucroPercentual'])
+const RESUMO_DATE_KEYS = new Set(['dataEntrada', 'dataVencimento'])
+const RESUMO_RESULT_TONE_KEYS = new Set(['financeiroFinal', 'ganhoPrejuizo', 'lucroPercentual'])
+
+const DADOS_CURRENCY_KEYS = new Set([
+  'valorCompra', 'callComprada', 'callVendida', 'putComprada', 'putComprada2',
+  'putVendida', 'barreiraKi', 'barreiraKo', 'spot',
+  'ganhoPrejuizo', 'financeiroFinal', 'vendaAtivoMercado',
+  'debito', 'dividendos', 'ganhosOpcoes', 'ganhoPut', 'ganhoCall', 'cupom', 'pagou',
+])
+const DADOS_PERCENT_KEYS = new Set(['lucroPercentual'])
+const DADOS_DATE_KEYS = new Set(['dataRegistro', 'dataVencimento'])
+const DADOS_RESULT_TONE_KEYS = new Set(['ganhoPrejuizo', 'financeiroFinal', 'lucroPercentual'])
+const DADOS_EXPORT_COL_WIDTHS = [
+  20, 14, 20, 16, 10, 20, 16, 18, 12, 14,
+  14, 14, 14, 14, 14, 14, 14, 12, 18, 18,
+  22, 12, 14, 14, 18, 14, 14, 12, 14,
+]
+
+// Converte "DD/MM/YYYY" para serial de data do Excel (número de dias desde 30/12/1899).
+// Permite que o Excel reconheça a célula como data real e habilite filtro por data.
+const parsePtBrDateToExcelSerial = (text) => {
+  if (!text || typeof text !== 'string') return null
+  const parts = text.split('/')
+  if (parts.length !== 3) return null
+  const d = Number(parts[0])
+  const m = Number(parts[1])
+  const y = Number(parts[2])
+  if (!d || !m || !y || y < 1900) return null
+  const excelEpoch = Date.UTC(1899, 11, 30)
+  const serial = (Date.UTC(y, m - 1, d) - excelEpoch) / 86400000
+  return Number.isFinite(serial) ? serial : null
 }
 
-const resolveStrikeValue = (leg) => {
-  const raw = leg?.strikeAjustado ?? leg?.strikeAdjusted ?? leg?.strike ?? leg?.precoStrike
-  return toOptionalNumber(raw)
+const resolveResumoValorEntrada = (row) => {
+  if (row?.result?.valorEntradaIncomplete) return null
+  return toOptionalNumber(row?.result?.valorEntrada ?? row?.result?.pagou ?? row?.result?.custoTotal)
 }
 
-const pickOptionStrikes = (legs) => {
-  const callsLong = []
-  const callsShort = []
-  const putsLong = []
-  const putsShort = []
-  ;(legs || []).forEach((leg) => {
-    const tipo = String(leg?.tipo || '').toUpperCase()
-    if (tipo !== 'CALL' && tipo !== 'PUT') return
-    const strike = resolveStrikeValue(leg)
-    if (strike == null) return
-    const isShort = String(leg?.side || '').toLowerCase() === 'short' || Number(leg?.quantidade || 0) < 0
-    if (tipo === 'CALL') {
-      if (isShort) callsShort.push(strike)
-      else callsLong.push(strike)
-    }
-    if (tipo === 'PUT') {
-      if (isShort) putsShort.push(strike)
-      else putsLong.push(strike)
-    }
-  })
+const buildResumoExportEntry = (row) => {
+  const lucroPercentual = toOptionalNumber(row?.result?.percent)
+  const entradaKey = normalizeDateKey(row?.dataRegistro) || ''
+  const vencimentoKey = normalizeDateKey(row?.vencimento) || ''
+  const clienteCodigo = String(row?.codigoCliente || row?.cliente || '').replace(/\D/g, '')
+  const chave = [
+    clienteCodigo || String(row?.codigoCliente || row?.cliente || '').trim(),
+    entradaKey.replace(/-/g, ''),
+    String(row?.ativo || '').trim(),
+    String(row?.estrutura || '').trim(),
+    vencimentoKey.replace(/-/g, ''),
+  ]
+    .filter(Boolean)
+    .join('')
   return {
-    callComprada: callsLong[0] ?? null,
-    callVendida: callsShort[0] ?? null,
-    putComprada: putsLong[0] ?? null,
-    putComprada2: putsLong[1] ?? null,
-    putVendida: putsShort[0] ?? null,
+    chave: chave || String(row?.id || '').trim() || `${row?.codigoCliente || ''}-${row?.ativo || ''}-${vencimentoKey}`,
+    assessor: row?.assessor || '',
+    broker: row?.broker || '',
+    cliente: row?.codigoCliente || row?.cliente || '',
+    dataEntrada: formatDatePtBr(entradaKey),
+    ativo: row?.ativo || '',
+    estrutura: row?.estrutura || '',
+    dataVencimento: formatDatePtBr(vencimentoKey),
+    entrou: resolveResumoValorEntrada(row),
+    dividendos: toOptionalNumber(row?.result?.dividends),
+    cupom: toOptionalNumber(row?.result?.cupomTotal),
+    financeiroFinal: toOptionalNumber(row?.result?.financeiroFinal),
+    ganhoPrejuizo: toOptionalNumber(row?.result?.ganho),
+    lucroPercentual,
+    _sortEntrada: entradaKey,
+    _sortVencimento: vencimentoKey,
   }
 }
 
-const resolveBarrierLevels = (legs, hasBarrier = true) => {
-  if (!hasBarrier) return { ki: null, ko: null }
-  let ki = null
-  let ko = null
-  ;(legs || []).forEach((leg) => {
-    if (leg?.barreiraValor == null) return
-    const type = normalizeBarrierTypeInput(leg?.barreiraTipo)
-    const value = toOptionalNumber(leg.barreiraValor)
-    if (value == null) return
-    const isKi = type === 'KI' || type === 'UI'
-    const isKo = type === 'KO' || type === 'UO'
-    if (isKi && ki == null) ki = value
-    if (isKo && ko == null) ko = value
-  })
-  return { ki, ko }
+const compareResumoRows = (left, right) => {
+  const leftVencimento = String(left?._sortVencimento || '')
+  const rightVencimento = String(right?._sortVencimento || '')
+  if (leftVencimento !== rightVencimento) return leftVencimento.localeCompare(rightVencimento)
+
+  const leftEntrada = String(left?._sortEntrada || '')
+  const rightEntrada = String(right?._sortEntrada || '')
+  if (leftEntrada !== rightEntrada) return leftEntrada.localeCompare(rightEntrada)
+
+  const leftAssessor = String(left?.assessor || '')
+  const rightAssessor = String(right?.assessor || '')
+  if (leftAssessor !== rightAssessor) return leftAssessor.localeCompare(rightAssessor, 'pt-BR')
+
+  const leftBroker = String(left?.broker || '')
+  const rightBroker = String(right?.broker || '')
+  if (leftBroker !== rightBroker) return leftBroker.localeCompare(rightBroker, 'pt-BR')
+
+  const leftCliente = String(left?.cliente || '')
+  const rightCliente = String(right?.cliente || '')
+  if (leftCliente !== rightCliente) return leftCliente.localeCompare(rightCliente, 'pt-BR')
+
+  return String(left?.chave || '').localeCompare(String(right?.chave || ''), 'pt-BR')
 }
 
-const buildSpotKey = (row) => {
-  const symbol = normalizeYahooSymbol(row?.ativo)
-  const startDate = normalizeDateKey(row?.dataRegistro)
-  const endDate = normalizeDateKey(row?.vencimento)
-  if (!symbol || !startDate || !endDate) return null
-  return `${symbol}:${startDate}:${endDate}`
+const resolveResumoTone = (value) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return ''
+  if (numeric > 0) return 'positive'
+  if (numeric < 0) return 'negative'
+  return 'neutral'
+}
+
+const resolveToneRgb = (tone) => {
+  if (tone === 'positive') return 'FF137333'
+  if (tone === 'negative') return 'FFB42318'
+  return 'FF374151'
+}
+
+const resolveToneFillRgb = (tone) => {
+  if (tone === 'positive') return 'FFE7F6EC'
+  if (tone === 'negative') return 'FFFBE9EB'
+  return 'FFF3F4F6'
+}
+
+const resolveResumoCellDisplayValue = (entry, key) => {
+  const value = entry?.[key]
+  if (value == null || value === '') return ''
+  if (RESUMO_CURRENCY_KEYS.has(key) || RESUMO_PERCENT_KEYS.has(key)) {
+    return Number.isFinite(Number(value)) ? Number(value) : ''
+  }
+  return value
+}
+
+const resolveResumoCellFormat = (key) => {
+  if (RESUMO_CURRENCY_KEYS.has(key)) return '[$R$-416] #,##0.00'
+  if (RESUMO_PERCENT_KEYS.has(key)) return '0.00%'
+  return ''
+}
+
+const resolveResumoCellTone = (entry, key) => {
+  if (!RESUMO_RESULT_TONE_KEYS.has(key)) return ''
+  return resolveResumoTone(entry?.[key])
+}
+
+const buildResumoPdfRow = (entry) => {
+  const cells = RESUMO_EXPORT_KEYS.map((key) => {
+    if (RESUMO_CURRENCY_KEYS.has(key)) return formatCurrency(entry?.[key] ?? 0)
+    if (RESUMO_PERCENT_KEYS.has(key)) {
+      const value = Number(entry?.[key])
+      return Number.isFinite(value) ? `${(value * 100).toFixed(2).replace('.', ',')}%` : '-'
+    }
+    return String(entry?.[key] ?? '-')
+  })
+  const tones = {}
+  RESUMO_EXPORT_KEYS.forEach((key, index) => {
+    const tone = resolveResumoCellTone(entry, key)
+    if (tone) tones[index] = tone
+  })
+  return {
+    cells,
+    tones,
+  }
+}
+
+const buildDadosExportEntry = (row) => serializeHistoricalRowForExport(buildHistoricalRowFromVencimentoRow(row))
+
+const resolveDadosCellDisplayValue = (entry, key) => {
+  const value = entry?.[key]
+  if (value == null || value === '') return ''
+  if (DADOS_CURRENCY_KEYS.has(key) || DADOS_PERCENT_KEYS.has(key)) {
+    return Number.isFinite(Number(value)) ? Number(value) : ''
+  }
+  return value
+}
+
+const resolveDadosCellFormat = (key) => {
+  if (DADOS_CURRENCY_KEYS.has(key)) return '[$R$-416] #,##0.00'
+  if (DADOS_PERCENT_KEYS.has(key)) return '0.00%'
+  return ''
+}
+
+const resolveDadosCellTone = (entry, key) => {
+  if (!DADOS_RESULT_TONE_KEYS.has(key)) return ''
+  return resolveResumoTone(entry?.[key])
 }
 
 const mapWithConcurrency = async (items, limit, mapper) => {
@@ -265,6 +395,31 @@ const normalizeBarrierTypeInput = (value) => {
   if (raw === 'OUT' || isOut) return 'KO'
   if (raw === 'IN' || isIn) return 'KI'
   return null
+}
+
+const normalizeMatchLabel = (value) => String(value || '')
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .trim()
+
+const isRubiStructureLabel = (value) => normalizeMatchLabel(value).includes('rubi')
+
+const getBarrierDirectionsFromLegs = (legs) => {
+  let hasHigh = false
+  let hasLow = false
+  ;(legs || []).forEach((leg) => {
+    if (leg?.barreiraValor == null) return
+    const type = normalizeBarrierTypeInput(leg?.barreiraTipo)
+    if (type === 'UI' || type === 'UO') hasHigh = true
+    if (type === 'KI' || type === 'KO') hasLow = true
+  })
+  return { hasHigh, hasLow }
+}
+
+const statusHasBarrierDirection = (status, direction) => {
+  const list = Array.isArray(status?.list) ? status.list : []
+  return list.some((item) => item?.direction === direction)
 }
 
 const normalizeOptionSideInput = (value) => {
@@ -588,6 +743,7 @@ const EMPTY_OVERRIDE_DRAFT = {
   low: 'auto',
   manualCouponBRL: '',
   manualOptionsGainBRL: '',
+  manualDividendBRL: '',
   structureEntries: [],
   optionQtyOverride: '',
   optionExpiryDateOverride: '',
@@ -598,6 +754,8 @@ const EMPTY_OVERRIDE_DRAFT = {
   legKey: '',
   legacyBarrierType: false,
   qtyBonus: 0,
+  qtyBaseOverride: '',
+  bonusAutoDisabled: false,
   bonusDate: '',
   bonusNote: '',
 }
@@ -606,9 +764,14 @@ const EMPTY_OVERRIDE_VALUE = {
   schemaVersion: 2,
   high: 'auto',
   low: 'auto',
+  stickyHighHit: false,
+  stickyLowHit: false,
+  stickyHighHitAt: null,
+  stickyLowHitAt: null,
   manualCouponBRL: null,
   manualCouponPct: null,
   manualOptionsGainBRL: null,
+  manualDividendBRL: null,
   optionQtyOverride: null,
   optionExpiryDateOverride: null,
   strikeOverride: null,
@@ -618,8 +781,63 @@ const EMPTY_OVERRIDE_VALUE = {
   legKey: null,
   legacyBarrierType: false,
   qtyBonus: 0,
+  qtyBaseOverride: null,
+  bonusAutoDisabled: false,
   bonusDate: '',
   bonusNote: '',
+}
+
+const applyStickyBarrierHitOverride = (overridesMap, operationId, { high = false, low = false, hitDate = null } = {}) => {
+  if (!operationId) return { overrides: overridesMap, changed: false }
+  const current = overridesMap?.[operationId] || EMPTY_OVERRIDE_VALUE
+  const patch = {}
+  const normalizedHitDate = normalizeDateInput(hitDate)
+
+  if (high && current.stickyHighHit !== true) patch.stickyHighHit = true
+  if (low && current.stickyLowHit !== true) patch.stickyLowHit = true
+
+  if (high && normalizedHitDate && !current.stickyHighHitAt) {
+    patch.stickyHighHitAt = normalizedHitDate
+  }
+  if (low && normalizedHitDate && !current.stickyLowHitAt) {
+    patch.stickyLowHitAt = normalizedHitDate
+  }
+
+  if (!Object.keys(patch).length) return { overrides: overridesMap, changed: false }
+  return {
+    overrides: updateOverride(overridesMap, operationId, patch),
+    changed: true,
+  }
+}
+
+const inferRemovedRubiBarrierHits = ({ previousRows = [], nextRows = [], overridesMap = {}, hitDate = null } = {}) => {
+  if (!Array.isArray(previousRows) || !previousRows.length) {
+    return { overrides: overridesMap, changed: false, inferredCount: 0 }
+  }
+  const nextIds = new Set((nextRows || []).map((row) => row?.id).filter(Boolean))
+  let nextOverrides = overridesMap
+  let changed = false
+  let inferredCount = 0
+
+  previousRows.forEach((row) => {
+    if (!row?.id) return
+    if (nextIds.has(row.id)) return
+    if (!isRubiStructureLabel(row?.estrutura)) return
+    const directions = getBarrierDirectionsFromLegs(row?.pernas)
+    if (!directions.hasHigh && !directions.hasLow) return
+
+    const result = applyStickyBarrierHitOverride(nextOverrides, row.id, {
+      high: directions.hasHigh,
+      low: directions.hasLow,
+      hitDate,
+    })
+    if (!result.changed) return
+    nextOverrides = result.overrides
+    changed = true
+    inferredCount += 1
+  })
+
+  return { overrides: nextOverrides, changed, inferredCount }
 }
 
 const formatMonthName = (year, month) => {
@@ -772,6 +990,48 @@ const buildDividendRequest = (operation, reportDate) => {
   }
 }
 
+const buildBonusRequest = (operation, reportDate) => {
+  const ticker = normalizeYahooSymbol(operation?.ativo)
+  const from = normalizeDateKey(operation?.dataRegistro)
+  const to = normalizeDateKey(reportDate)
+  if (!ticker || !from || !to || from > to) return null
+  return {
+    key: buildBonusKey(ticker, from, to),
+    ticker,
+    from,
+    to,
+  }
+}
+
+const normalizeDividendInfo = (dividend) => {
+  if (!dividend) return null
+  const total = Number(dividend?.total || 0)
+  return {
+    ...dividend,
+    total: Number.isFinite(total) ? total : 0,
+    source: dividend?.source || null,
+    events: Array.isArray(dividend?.events) ? dividend.events : [],
+  }
+}
+
+const normalizeBonusInfo = (bonus, operation) => {
+  if (!bonus) return null
+  const factor = Number(bonus?.factor || 1)
+  const events = Array.isArray(bonus?.events) ? bonus.events : []
+  const currentQty = Number(operation?.quantidadeAtual ?? operation?.quantidade)
+  const inferred = inferBonusQuantities(currentQty, events)
+  return {
+    ...bonus,
+    factor: Number.isFinite(factor) && factor > 0 ? factor : 1,
+    totalPct: Number.isFinite(Number(bonus?.totalPct)) ? Number(bonus.totalPct) : ((Number.isFinite(factor) ? factor : 1) - 1) * 100,
+    source: bonus?.source || null,
+    events,
+    inferredQtyBase: inferred?.canInfer ? inferred.qtyBase : null,
+    inferredQtyBonus: inferred?.canInfer ? inferred.qtyBonus : 0,
+    inferredFactor: inferred?.factor || 1,
+  }
+}
+
 const applyDividendsToMarket = (market, dividend) => {
   if (!dividend) return market
   const total = Number(dividend.total ?? 0)
@@ -781,52 +1041,6 @@ const applyDividendsToMarket = (market, dividend) => {
     dividendsSource: dividend.source || market?.dividendsSource,
     dividendsCached: dividend.cached ?? market?.dividendsCached,
   }
-}
-
-const fetchSpotPrice = async (ticker, { force = false } = {}) => {
-  const key = String(ticker || '').trim().toUpperCase()
-  if (!key) return null
-  if (!force && spotCache.has(key)) return spotCache.get(key)
-  try {
-    const r = await fetch(`/api/spot?symbol=${encodeURIComponent(key)}`)
-    if (!r.ok) return null
-    const data = await r.json()
-    const price = Number(data?.price)
-    if (!Number.isFinite(price)) return null
-    spotCache.set(key, price)
-    return price
-  } catch {
-    return null
-  }
-}
-
-const attachSpotPrices = async (rows) => {
-  if (!Array.isArray(rows) || !rows.length) return rows
-  spotCache.clear()
-  const pendingTickers = Array.from(new Set(
-    rows
-      .filter((row) => row?.ativo)
-      .map((row) => String(row.ativo || '').trim().toUpperCase())
-      .filter(Boolean),
-  ))
-
-  if (!pendingTickers.length) return rows
-
-  const results = await mapWithConcurrency(
-    pendingTickers,
-    SPOT_CONCURRENCY,
-    async (ticker) => [ticker, await fetchSpotPrice(ticker, { force: true })],
-  )
-
-  const priceMap = new Map(results.filter(([, price]) => price != null))
-  if (!priceMap.size) return rows
-
-  return rows.map((row) => {
-    if (!row?.ativo) return row
-    const price = priceMap.get(String(row.ativo || '').trim().toUpperCase())
-    if (price == null) return row
-    return { ...row, spotInicial: price }
-  })
 }
 
 const resolveSpotBase = (operation, market) => {
@@ -888,6 +1102,7 @@ const Vencimento = () => {
   const { notify } = useToast()
   const { selectedBroker, selectedAssessor, clientCodeFilter, setClientCodeFilter, tagsIndex } = useGlobalFilters()
   const [userKey] = useState(() => getCurrentUserKey())
+  const globalFolderMenu = useGlobalFolderMenu('vencimento')
   const [filters, setFilters] = useState({
     search: '',
     broker: [],
@@ -909,6 +1124,9 @@ const Vencimento = () => {
   const [dividendAdjustments, setDividendAdjustments] = useState(new Map())
   const [dividendStatus, setDividendStatus] = useState({ loading: false, error: '' })
   const [dividendsRefreshToken, setDividendsRefreshToken] = useState(0)
+  const [bonusAdjustments, setBonusAdjustments] = useState(new Map())
+  const [bonusStatus, setBonusStatus] = useState({ loading: false, error: '' })
+  const [bonusRefreshToken, setBonusRefreshToken] = useState(0)
   const [linkMeta, setLinkMeta] = useState(null)
   const [cacheMeta, setCacheMeta] = useState(null)
   const [restoreStatus, setRestoreStatus] = useState({ state: 'idle', message: '' })
@@ -918,12 +1136,22 @@ const Vencimento = () => {
   const [isRestoring, setIsRestoring] = useState(false)
   const [isRefreshingAll, setIsRefreshingAll] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
+  const [isExportingDados, setIsExportingDados] = useState(false)
+  const [isPushingHistorico, setIsPushingHistorico] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
-  const fileInputRef = useRef(null)
   const rowCacheRef = useRef(new Map())
   const broadcastRef = useRef(null)
   const tabIdRef = useRef(Math.random().toString(36).slice(2))
   const restoreRef = useRef({ running: false })
+  const stickyBarrierTimerRef = useRef(null)
+  const optionSettlementTimerRef = useRef(null)
+  const overridesRef = useRef(overrides)
+  overridesRef.current = overrides
+  const cacheMetaRef = useRef(cacheMeta)
+  cacheMetaRef.current = cacheMeta
+  const reportDateRef = useRef(reportDate)
+  reportDateRef.current = reportDate
+  const initialRestoreRef = useRef(false)
 
   const folderLabel = useMemo(() => {
     if (pendingFile) {
@@ -940,11 +1168,18 @@ const Vencimento = () => {
     }
     return buildFolderLabel(linkMeta, cacheMeta)
   }, [pendingFile, linkMeta, cacheMeta])
-
-  useEffect(() => {
-    if (!userKey) return
-    setOverrides(loadOverrides(userKey))
-  }, [userKey])
+  const globalDirectoryOptions = useMemo(
+    () => globalFolderMenu.directoryOptions.map((option) => ({
+      value: option.value,
+      label: option.label,
+      description: option.directory?.folderPath || '',
+    })),
+    [globalFolderMenu.directoryOptions],
+  )
+  const globalDirectoryEmptyMessage = useMemo(() => {
+    if (globalFolderMenu.loading) return ''
+    return globalFolderMenu.emptyMessage
+  }, [globalFolderMenu.emptyMessage, globalFolderMenu.loading])
 
   useEffect(() => {
     if (!userKey) return
@@ -1023,13 +1258,13 @@ const Vencimento = () => {
         try {
           const formData = new FormData()
           formData.append('file', file)
-          const response = await fetch('/api/vencimentos/parse', {
+          const response = await apiFetch('/api/vencimentos/parse', {
             method: 'POST',
             body: formData,
-          })
+          }, { retries: 0, timeoutMs: 45000 })
           if (!response.ok) throw new Error('api-failed')
           const data = await response.json()
-          if (!data?.rows) throw new Error('api-invalid')
+          if (!Array.isArray(data?.rows)) throw new Error('api-invalid')
           parsedRows = data.rows
           parseSource = 'api'
         } catch {
@@ -1042,11 +1277,29 @@ const Vencimento = () => {
       }
 
       if (!parsedRows) throw new Error('parse-empty')
-      const withSpot = await attachSpotPrices(parsedRows)
-      debugLog('vencimento.restore.parse', { rows: withSpot.length, source: parseSource })
-      setOperations(withSpot)
+      const previousRows = Array.isArray(cacheMetaRef.current?.rows) ? cacheMetaRef.current.rows : []
+      const currentReportDate = reportDateRef.current
+      let inferredCount = 0
+      setOverrides((prev) => {
+        const result = inferRemovedRubiBarrierHits({
+          previousRows,
+          nextRows: parsedRows,
+          overridesMap: prev,
+          hitDate: currentReportDate,
+        })
+        inferredCount = result.inferredCount || 0
+        return result.changed ? result.overrides : prev
+      })
+      const mergedRows = mergeRowsPreservingExpired({
+        previousRows,
+        nextRows: parsedRows,
+        referenceDate: currentReportDate || new Date(),
+      })
+      debugLog('vencimento.restore.parse', { rows: parsedRows.length, source: parseSource })
+      setMarketMap({})
+      setOperations(mergedRows)
       const storedCache = saveLastImported(userKey, {
-        rows: withSpot,
+        rows: mergedRows,
         fileName,
         importedAt: Date.now(),
         source: parseSource,
@@ -1080,6 +1333,12 @@ const Vencimento = () => {
       }
 
       broadcastUpdate('vencimento-updated', { kind: 'cache' })
+      if (inferredCount > 0 && !silent) {
+        notify(
+          `${inferredCount} rubi(s) sairam do relatorio e foram marcadas como barreira batida no historico.`,
+          'warning',
+        )
+      }
       if (!silent) notify('Planilha vinculada e calculada.', 'success')
       setPendingFile(null)
       return true
@@ -1140,13 +1399,13 @@ const Vencimento = () => {
       }
 
       if (link.source === 'file') {
-        setRestoreStatus({ state: 'idle', message: cacheMeta?.rows?.length ? '' : 'Cache local pronto para uso.' })
+        setRestoreStatus({ state: 'idle', message: cacheMetaRef.current?.rows?.length ? '' : 'Cache local pronto para uso.' })
       }
     } finally {
       restoreRef.current.running = false
       setIsRestoring(false)
     }
-  }, [applyPendingFile, cacheMeta?.rows?.length])
+  }, [applyPendingFile])
 
   const restoreFromStorage = useCallback(async ({ reparse = false } = {}) => {
     if (!userKey) return
@@ -1216,62 +1475,44 @@ const Vencimento = () => {
 
   useEffect(() => {
     if (!userKey) return
+    if (initialRestoreRef.current) return
+    initialRestoreRef.current = true
     restoreFromStorage({ reparse: true })
   }, [restoreFromStorage, userKey])
 
-  useEffect(() => {
-    let active = true
-    const loadMarket = async () => {
-      const next = {}
-      const dividendRequests = operations.map((operation) => buildDividendRequest(operation, reportDate)).filter(Boolean)
-      let dividendMap = new Map()
-      if (dividendRequests.length) {
-        try {
-          const results = await fetchDividendsBatch(dividendRequests.map(({ ticker, from, to }) => ({ ticker, from, to })))
-          dividendMap = new Map(results.filter(Boolean).map((item) => [item.key, item]))
-        } catch {
-          dividendMap = new Map()
+  // Spot nao atualiza automaticamente: apenas pelos botoes de atualizacao manual.
+
+  // Stable fingerprint of override fields that actually affect settlement close requests
+  // (only optionExpiryDate overrides per operation/leg). Avoids re-fetching on unrelated override changes.
+  const overrideExpiryFingerprint = useMemo(() => {
+    const parts = []
+    for (const operation of operations) {
+      const ovr = overrides[operation?.id]
+      if (!ovr) continue
+      const legs = ovr.legs || ovr.structureByLeg
+      if (legs && typeof legs === 'object') {
+        for (const [key, leg] of Object.entries(legs)) {
+          const expiry = leg?.optionExpiryDateOverride ?? leg?.optionExpiryDate ?? leg?.vencimentoOpcaoOverride ?? leg?.vencimentoOpcao
+          if (expiry) parts.push(`${operation.id}:${key}:${expiry}`)
         }
       }
-      for (const operation of operations) {
-        if (!operation.ativo || !operation.dataRegistro || !operation.vencimento) continue
-        const dividendRequest = buildDividendRequest(operation, reportDate)
-        const dividend = dividendRequest ? dividendMap.get(dividendRequest.key) : null
-        try {
-          const market = await fetchYahooMarketData({
-            symbol: operation.ativo,
-            startDate: operation.dataRegistro,
-            endDate: operation.vencimento,
-          })
-          next[operation.id] = applyDividendsToMarket(market, dividend)
-        } catch {
-          const fallback = {
-            close: operation.spotInicial,
-            high: null,
-            low: null,
-            dividendsTotal: 0,
-            lastUpdate: Date.now(),
-            source: 'fallback',
-          }
-          next[operation.id] = applyDividendsToMarket(fallback, dividend)
-        }
-      }
-      if (active) setMarketMap(next)
+      const globalExpiry = ovr.optionExpiryDateOverride ?? ovr.optionExpiryDate
+      if (globalExpiry) parts.push(`${operation.id}:_:${globalExpiry}`)
     }
-    loadMarket()
-    return () => {
-      active = false
-    }
-  }, [operations])
+    return parts.join('|')
+  }, [operations, overrides])
 
   useEffect(() => {
     let active = true
+    if (optionSettlementTimerRef.current) clearTimeout(optionSettlementTimerRef.current)
+    optionSettlementTimerRef.current = setTimeout(() => {
+    const currentOverrides = overridesRef.current
     const loadOptionSettlementCloses = async () => {
       const requests = []
       const marketRequests = new Map()
 
       operations.forEach((operation) => {
-        const override = overrides[operation?.id] || EMPTY_OVERRIDE_VALUE
+        const override = currentOverrides[operation?.id] || EMPTY_OVERRIDE_VALUE
         if (!operation?.id || !operation?.ativo || !operation?.dataRegistro) return
         const startDate = normalizeDateKey(operation?.dataRegistro)
         if (!startDate) return
@@ -1326,10 +1567,12 @@ const Vencimento = () => {
     }
 
     loadOptionSettlementCloses()
+    }, 200)
     return () => {
       active = false
+      if (optionSettlementTimerRef.current) clearTimeout(optionSettlementTimerRef.current)
     }
-  }, [operations, overrides])
+  }, [operations, overrideExpiryFingerprint])
 
   useEffect(() => {
     let active = true
@@ -1373,11 +1616,8 @@ const Vencimento = () => {
         const resultMap = new Map(results.filter(Boolean).map((item) => [item.key, item]))
         const next = new Map()
         requests.forEach((req) => {
-          const item = resultMap.get(req.key)
-          next.set(req.id, {
-            total: Number(item?.total || 0),
-            source: item?.source || null,
-          })
+          const item = normalizeDividendInfo(resultMap.get(req.key))
+          next.set(req.id, item || { total: 0, source: null, events: [] })
         })
         if (active) {
           setDividendAdjustments(next)
@@ -1396,23 +1636,155 @@ const Vencimento = () => {
     }
   }, [dividendsRefreshToken, operations, reportDate])
 
+  useEffect(() => {
+    let active = true
+    const run = async () => {
+      if (!reportDate) {
+        setBonusAdjustments(new Map())
+        setBonusStatus({ loading: false, error: '' })
+        return
+      }
+      clearBonusCache()
+      const requests = operations
+        .map((operation) => {
+          const request = buildBonusRequest(operation, reportDate)
+          if (!request) return null
+          return {
+            id: operation.id,
+            ...request,
+          }
+        })
+        .filter(Boolean)
+
+      if (!requests.length) {
+        setBonusAdjustments(new Map())
+        setBonusStatus({ loading: false, error: '' })
+        return
+      }
+
+      setBonusStatus({ loading: true, error: '' })
+      try {
+        const results = await fetchBonusesBatch(requests.map(({ ticker, from, to }) => ({ ticker, from, to })))
+        const resultMap = new Map(results.filter(Boolean).map((item) => [item.key, item]))
+        const next = new Map()
+        requests.forEach((req) => {
+          const operation = operations.find((item) => item.id === req.id) || null
+          const item = normalizeBonusInfo(resultMap.get(req.key), operation)
+          next.set(req.id, item || {
+            factor: 1,
+            totalPct: 0,
+            source: null,
+            events: [],
+            inferredQtyBase: null,
+            inferredQtyBonus: 0,
+            inferredFactor: 1,
+          })
+        })
+        if (active) {
+          setBonusAdjustments(next)
+          setBonusStatus({ loading: false, error: '' })
+        }
+      } catch {
+        if (active) {
+          setBonusAdjustments(new Map())
+          setBonusStatus({ loading: false, error: 'Falha ao recalcular bonificacoes.' })
+        }
+      }
+    }
+    run()
+    return () => {
+      active = false
+    }
+  }, [bonusRefreshToken, operations, reportDate])
+
+  useEffect(() => {
+    let active = true
+    const referenceDate = new Date()
+    const pendingOperations = operations.filter((operation) => (
+      shouldLoadSettlementClose(operation, marketMap[operation?.id], referenceDate)
+    ))
+
+    if (!pendingOperations.length) return () => {
+      active = false
+    }
+
+    const run = async () => {
+      const updates = await mapWithConcurrency(
+        pendingOperations,
+        SPOT_CONCURRENCY,
+        async (operation) => {
+          try {
+            const market = await fetchYahooMarketData({
+              symbol: operation.ativo,
+              startDate: operation.dataRegistro,
+              endDate: operation.vencimento,
+              includeSeries: true,
+            })
+            const dividendInfo = dividendAdjustments.get(operation.id) || null
+            return {
+              id: operation.id,
+              market: annotateSettlementMarket(
+                operation,
+                applyDividendsToMarket(market, dividendInfo),
+                referenceDate,
+              ),
+            }
+          } catch {
+            return null
+          }
+        },
+      )
+
+      if (!active) return
+
+      setMarketMap((prev) => {
+        let changed = false
+        const next = { ...prev }
+        updates.forEach((update) => {
+          if (!update?.id || !update.market) return
+          next[update.id] = update.market
+          changed = true
+        })
+        return changed ? next : prev
+      })
+    }
+
+    run()
+    return () => {
+      active = false
+    }
+  }, [dividendAdjustments, marketMap, operations])
+
   const enrichedOperations = useMemo(
     () => operations.map((operation) => enrichRow(operation, tagsIndex)),
     [operations, tagsIndex],
   )
-  const brokerOptions = useMemo(() => buildMultiOptions(enrichedOperations.map((item) => item.broker)), [enrichedOperations])
+
+  // Single-pass option extraction from enrichedOperations (replaces 5 separate .map() passes)
+  const { brokerOptions, ativoOptions, assessorOptions, clienteOptions } = useMemo(() => {
+    const brokers = new Set()
+    const ativos = new Set()
+    const assessors = new Set()
+    for (const item of enrichedOperations) {
+      if (item.broker) brokers.add(item.broker)
+      if (item.ativo) ativos.add(item.ativo)
+      if (item.assessor) assessors.add(item.assessor)
+    }
+    const toOpts = (set) => Array.from(set).sort().map((v) => ({ value: v, label: v }))
+    return {
+      brokerOptions: toOpts(brokers),
+      ativoOptions: toOpts(ativos),
+      assessorOptions: toOpts(assessors),
+      clienteOptions: buildClientFilterOptions(enrichedOperations),
+    }
+  }, [enrichedOperations])
+
   const operationsByPeriod = useMemo(() => {
     if (!filters.vencimentos.length) return enrichedOperations
     const set = new Set(filters.vencimentos)
     return enrichedOperations.filter((item) => set.has(normalizeDateKey(item?.vencimento)))
   }, [enrichedOperations, filters.vencimentos])
   const estruturaOptions = useMemo(() => buildMultiOptions(operationsByPeriod.map((item) => item.estrutura)), [operationsByPeriod])
-  const ativoOptions = useMemo(() => buildMultiOptions(enrichedOperations.map((item) => item.ativo)), [enrichedOperations])
-  const assessorOptions = useMemo(() => buildMultiOptions(enrichedOperations.map((item) => item.assessor)), [enrichedOperations])
-  const clienteOptions = useMemo(
-    () => buildMultiOptions(enrichedOperations.map((item) => item.codigoCliente || item.cliente)),
-    [enrichedOperations],
-  )
   const { tree: vencimentoTree, allValues: vencimentoValues } = useMemo(
     () => buildVencimentoTree(enrichedOperations),
     [enrichedOperations],
@@ -1420,27 +1792,59 @@ const Vencimento = () => {
 
   const handleRefreshData = useCallback(async (operation) => {
     try {
+      const referenceDate = new Date()
       const market = await fetchYahooMarketData({
         symbol: operation.ativo,
         startDate: operation.dataRegistro,
         endDate: operation.vencimento,
+        includeSeries: true,
       })
       let dividend = null
       const dividendRequest = buildDividendRequest(operation, reportDate)
       if (dividendRequest) {
         try {
-          dividend = await fetchDividend(dividendRequest)
+          dividend = normalizeDividendInfo(await fetchDividend(dividendRequest))
         } catch {
           dividend = null
         }
+        setDividendAdjustments((prev) => {
+          const next = new Map(prev)
+          next.set(operation.id, dividend || { total: 0, source: null, events: [] })
+          return next
+        })
+      }
+      const bonusRequest = buildBonusRequest(operation, reportDate)
+      if (bonusRequest) {
+        let bonus = null
+        try {
+          bonus = normalizeBonusInfo(await fetchBonus(bonusRequest), operation)
+        } catch {
+          bonus = null
+        }
+        setBonusAdjustments((prev) => {
+          const next = new Map(prev)
+          next.set(operation.id, bonus || {
+            factor: 1,
+            totalPct: 0,
+            source: null,
+            events: [],
+            inferredQtyBase: null,
+            inferredQtyBonus: 0,
+            inferredFactor: 1,
+          })
+          return next
+        })
       }
       const marketWithDividends = applyDividendsToMarket(market, dividend)
-      setMarketMap((prev) => ({ ...prev, [operation.id]: marketWithDividends }))
+      const nextMarket = shouldLoadSettlementClose(operation, null, referenceDate)
+        ? annotateSettlementMarket(operation, marketWithDividends, referenceDate)
+        : marketWithDividends
+      setMarketMap((prev) => ({ ...prev, [operation.id]: nextMarket }))
       notify('Dados atualizados.', 'success')
     } catch (error) {
       notify(formatUpdateError(error), 'warning')
     }
-  }, [notify])
+  }, [notify, reportDate])
 
   const applyDividendAdjustments = useCallback((legs, adjustment) => {
     if (!Array.isArray(legs) || !legs.length) return legs
@@ -1461,33 +1865,48 @@ const Vencimento = () => {
     })
   }, [reportDate])
 
-  const buildRow = useCallback((operation) => {
-    const market = marketMap[operation.id]
-    const dividendInfo = dividendAdjustments.get(operation.id)
-    const override = overrides[operation.id] || EMPTY_OVERRIDE_VALUE
-    const qtyBase = parseQuantity(operation.qtyBase ?? operation.quantidade ?? 0)
-    const qtyAtualRaw = operation.qtyAtual ?? operation.quantidadeAtual
-    const qtyAtualSource = parseQuantity(qtyAtualRaw)
-    const hasQtyAtualSource = qtyAtualRaw != null && qtyAtualSource > 0
-    const overrideBonus = parseQuantity(override.qtyBonus ?? 0)
-    const hasOverrideBonus = overrideBonus > 0
-    const qtyBonus = hasOverrideBonus
-      ? overrideBonus
-      : hasQtyAtualSource
-        ? Math.max(0, qtyAtualSource - qtyBase)
-        : 0
-    const qtyAtual = hasOverrideBonus
-      ? Math.max(0, qtyBase + qtyBonus)
-      : hasQtyAtualSource
-        ? qtyAtualSource
-        : Math.max(0, qtyBase + qtyBonus)
+  // buildRow is now a plain function (not useCallback) — it receives all deps as params
+  // so it does NOT close over marketMap/overrides/etc. This avoids invalidating
+  // the mappedRows memo on every marketMap or overrides reference change.
+  const buildRowDirect = (operation, market, dividendInfo, bonusInfo, override, settlementMap) => {
+    const manualBonus = parseQuantity(override.qtyBonus ?? 0)
+    const manualQtyBase = override.qtyBaseOverride != null && override.qtyBaseOverride !== ''
+      ? parseQuantity(override.qtyBaseOverride)
+      : null
+    const bonusAutoDisabled = override?.bonusAutoDisabled === true
+    const autoBonus = !bonusAutoDisabled
+      ? normalizeBonusInfo(bonusInfo, operation)
+      : null
+    const overrideBonus = manualBonus > 0 ? manualBonus : Number(autoBonus?.inferredQtyBonus || 0)
+    const overrideQtyBase = manualQtyBase != null ? manualQtyBase : (autoBonus?.inferredQtyBase ?? null)
+    const {
+      displayQtyBase: qtyBase,
+      displayQtyAtual: qtyAtual,
+      displayQtyBonus: qtyBonus,
+      settlementQtyBase,
+      settlementQtyAtual,
+      settlementQtyBonus,
+    } = resolveOperationQuantities(operation, overrideBonus, overrideQtyBase)
     const spotBase = resolveSpotBase(operation, market)
     const adjustedLegs = applyDividendAdjustments(operation.pernas, dividendInfo?.total)
     const operationWithSpot = spotBase != null
-      ? { ...operation, spotInicial: spotBase, qtyBase, qtyBonus, qtyAtual, pernas: adjustedLegs }
-      : { ...operation, qtyBase, qtyBonus, qtyAtual, pernas: adjustedLegs }
+      ? {
+        ...operation,
+        spotInicial: spotBase,
+        qtyBase: settlementQtyBase,
+        qtyBonus: settlementQtyBonus,
+        qtyAtual: settlementQtyAtual,
+        pernas: adjustedLegs,
+      }
+      : {
+        ...operation,
+        qtyBase: settlementQtyBase,
+        qtyBonus: settlementQtyBonus,
+        qtyAtual: settlementQtyAtual,
+        pernas: adjustedLegs,
+      }
     const operationEffectiveRaw = applyOverridesToOperation(operationWithSpot, override)
-    const operationEffective = withLegSettlementSpots(operationEffectiveRaw, optionSettlementCloseMap)
+    const operationEffective = withLegSettlementSpots(operationEffectiveRaw, settlementMap)
     const barrierStatus = computeBarrierStatus(operationEffective, market, override)
     const manualCouponBRL = override?.manualCouponBRL != null && Number.isFinite(Number(override.manualCouponBRL))
       ? Number(override.manualCouponBRL)
@@ -1514,9 +1933,17 @@ const Vencimento = () => {
       effectiveLegs,
       dividendAdjustment: dividendInfo?.total || 0,
       dividendSource: dividendInfo?.source || null,
+      dividendEvents: Array.isArray(dividendInfo?.events) ? dividendInfo.events : [],
+      bonusSource: autoBonus?.source || bonusInfo?.source || null,
+      bonusEvents: Array.isArray(autoBonus?.events) ? autoBonus.events : (Array.isArray(bonusInfo?.events) ? bonusInfo.events : []),
+      bonusAutoQtyBase: autoBonus?.inferredQtyBase ?? null,
+      bonusAutoQtyBonus: autoBonus?.inferredQtyBonus ?? 0,
+      bonusAutoFactor: autoBonus?.inferredFactor ?? autoBonus?.factor ?? 1,
+      bonusAutoApplied: !bonusAutoDisabled && ((autoBonus?.inferredQtyBonus || 0) > 0 || autoBonus?.inferredQtyBase != null),
+      bonusAutoDisabled,
       status: getStatus(operation.vencimento),
     }
-  }, [applyDividendAdjustments, dividendAdjustments, marketMap, optionSettlementCloseMap, overrides])
+  }
 
   const mappedRows = useMemo(() => {
     const previousCache = rowCacheRef.current
@@ -1526,6 +1953,8 @@ const Vencimento = () => {
       const overrideRef = overrides[operation.id] || EMPTY_OVERRIDE_VALUE
       const marketRef = marketMap[operation.id] || null
       const dividendRef = dividendAdjustments.get(operation.id) || null
+      const bonusRef = bonusAdjustments.get(operation.id) || null
+      const settlementRef = optionSettlementCloseMap
       const cached = previousCache.get(operation.id)
 
       if (
@@ -1534,18 +1963,22 @@ const Vencimento = () => {
         && cached.overrideRef === overrideRef
         && cached.marketRef === marketRef
         && cached.dividendRef === dividendRef
+        && cached.bonusRef === bonusRef
+        && cached.settlementRef === settlementRef
       ) {
         nextCache.set(operation.id, cached)
         return cached.row
       }
 
-      const row = buildRow(operation)
+      const row = buildRowDirect(operation, marketRef, dividendRef, bonusRef, overrideRef, settlementRef)
       const nextEntry = {
         row,
         operationRef: operation,
         overrideRef,
         marketRef,
         dividendRef,
+        bonusRef,
+        settlementRef,
       }
       nextCache.set(operation.id, nextEntry)
       return row
@@ -1553,29 +1986,128 @@ const Vencimento = () => {
 
     rowCacheRef.current = nextCache
     return rowsList
-  }, [buildRow, dividendAdjustments, enrichedOperations, marketMap, overrides])
+  }, [applyDividendAdjustments, bonusAdjustments, dividendAdjustments, enrichedOperations, marketMap, optionSettlementCloseMap, overrides])
+
+  useEffect(() => {
+    if (!mappedRows.length) return
+    if (stickyBarrierTimerRef.current) clearTimeout(stickyBarrierTimerRef.current)
+    stickyBarrierTimerRef.current = setTimeout(() => {
+      const hitDate = normalizeDateInput(reportDate)
+      setOverrides((prev) => {
+        let next = prev
+        let changed = false
+
+        for (let i = 0; i < mappedRows.length; i++) {
+          const row = mappedRows[i]
+          if (!row?.id || !row?.barrierStatus) continue
+          const currentOvr = next[row.id] || EMPTY_OVERRIDE_VALUE
+          if (currentOvr.stickyHighHit && currentOvr.stickyLowHit) continue
+          const hasHighBarrier = statusHasBarrierDirection(row.barrierStatus, 'high')
+          const hasLowBarrier = statusHasBarrierDirection(row.barrierStatus, 'low')
+          const hitHigh = hasHighBarrier && row.barrierStatus.high === true && !currentOvr.stickyHighHit
+          const hitLow = hasLowBarrier && row.barrierStatus.low === true && !currentOvr.stickyLowHit
+          if (!hitHigh && !hitLow) continue
+
+          const result = applyStickyBarrierHitOverride(next, row.id, {
+            high: hitHigh,
+            low: hitLow,
+            hitDate,
+          })
+          if (!result.changed) continue
+          next = result.overrides
+          changed = true
+        }
+
+        return changed ? next : prev
+      })
+    }, 100)
+    return () => {
+      if (stickyBarrierTimerRef.current) clearTimeout(stickyBarrierTimerRef.current)
+    }
+  }, [mappedRows, reportDate])
 
   const rows = useMemo(() => {
-    const vencimentoSet = new Set(filters.vencimentos)
+    const vencimentoSet = filters.vencimentos.length ? new Set(filters.vencimentos) : null
+    const localBrokerSet = filters.broker.length ? new Set(filters.broker) : null
+    const localAssessorSet = filters.assessores?.length ? new Set(filters.assessores) : null
+    const estruturaSet = filters.estruturas?.length ? new Set(filters.estruturas) : null
+    const ativoSet = filters.ativos?.length ? new Set(filters.ativos) : null
+    const query = filters.search ? filters.search.toLowerCase() : ''
+    const statusKey = filters.status || ''
+    // Single-pass: build availability sets
+    const availableBrokerSet = new Set()
+    const availableAssessorSet = new Set()
+    const availableClientSet = new Set()
+    for (let i = 0; i < mappedRows.length; i++) {
+      const entry = mappedRows[i]
+      const broker = String(entry.broker || '').trim()
+      const assessor = String(entry.assessor || '').trim()
+      if (broker) availableBrokerSet.add(broker)
+      if (assessor) availableAssessorSet.add(assessor)
+      collectClientFilterTokens(entry).forEach((token) => availableClientSet.add(token))
+    }
+    const effectiveBroker = selectedBroker
+      .map((value) => String(value || '').trim())
+      .filter((value) => availableBrokerSet.has(value))
+    const effectiveAssessor = selectedAssessor
+      .map((value) => String(value || '').trim())
+      .filter((value) => availableAssessorSet.has(value))
+    const brokerSet = effectiveBroker.length ? new Set(effectiveBroker) : null
+    const assessorSet = effectiveAssessor.length ? new Set(effectiveAssessor) : null
+    const clientSet = buildClientFilterMatchSet(clientCodeFilter, availableClientSet)
     return mappedRows.filter((entry) => {
-      const query = filters.search.toLowerCase()
-      const searchBase = `${entry.codigoCliente || ''} ${entry.cliente || ''} ${entry.nomeCliente || ''} ${entry.ativo || ''} ${entry.estrutura || ''} ${entry.assessor || ''} ${entry.broker || ''}`.toLowerCase()
-      if (query && !searchBase.includes(query)) return false
-      if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
-      if (selectedAssessor.length && !selectedAssessor.includes(String(entry.assessor || '').trim())) return false
-      if (filters.broker.length && !filters.broker.includes(String(entry.broker || '').trim())) return false
-      if (filters.assessores?.length && !filters.assessores.includes(entry.assessor)) return false
-      if (clientCodeFilter.length) {
-        const clienteMatch = String(entry.codigoCliente || entry.cliente || '').trim()
-        if (!clientCodeFilter.includes(clienteMatch)) return false
+      if (query) {
+        const searchBase = `${entry.codigoCliente || ''} ${entry.cliente || ''} ${entry.ativo || ''} ${entry.estrutura || ''} ${entry.assessor || ''} ${entry.broker || ''}`.toLowerCase()
+        if (!searchBase.includes(query)) return false
       }
-      if (filters.estruturas?.length && !filters.estruturas.includes(entry.estrutura)) return false
-      if (filters.ativos?.length && !filters.ativos.includes(entry.ativo)) return false
-      if (vencimentoSet.size && !vencimentoSet.has(normalizeDateKey(entry.vencimento))) return false
-      if (filters.status && entry.status.key !== filters.status) return false
+      if (brokerSet && !brokerSet.has(String(entry.broker || '').trim())) return false
+      if (assessorSet && !assessorSet.has(String(entry.assessor || '').trim())) return false
+      if (localBrokerSet && !localBrokerSet.has(String(entry.broker || '').trim())) return false
+      if (localAssessorSet && !localAssessorSet.has(entry.assessor)) return false
+      if (clientSet.size && !matchesClientFilter(entry, clientSet)) return false
+      if (estruturaSet && !estruturaSet.has(entry.estrutura)) return false
+      if (ativoSet && !ativoSet.has(entry.ativo)) return false
+      if (vencimentoSet && !vencimentoSet.has(normalizeDateKey(entry.vencimento))) return false
+      if (statusKey && entry.status.key !== statusKey) return false
       return true
     })
   }, [clientCodeFilter, filters, mappedRows, selectedBroker, selectedAssessor])
+
+  const resumoExportRows = useMemo(() => {
+    return rows
+      .map((row) => buildResumoExportEntry(row))
+      .sort(compareResumoRows)
+  }, [rows])
+
+  const dadosExportRows = useMemo(() => rows.map((row) => buildDadosExportEntry(row)), [rows])
+
+  const historicoPushContext = useMemo(() => {
+    const todayKey = normalizeDateKey(new Date().toISOString())
+    const eligibleRows = rows.filter((row) => {
+      const vencimentoKey = normalizeDateKey(row?.vencimento)
+      return Boolean(vencimentoKey && todayKey && vencimentoKey <= todayKey)
+    })
+    const monthKeys = Array.from(new Set(
+      eligibleRows
+        .map((row) => normalizeHistoricalMonthKey(row?.vencimento))
+        .filter(Boolean),
+    ))
+    const monthKey = monthKeys.length === 1 ? monthKeys[0] : ''
+    let disabledReason = ''
+    if (!eligibleRows.length) {
+      disabledReason = 'Nenhuma operacao vencida no recorte atual.'
+    } else if (monthKeys.length > 1) {
+      disabledReason = 'Selecione apenas um mes de vencimento para enviar ao historico.'
+    }
+    return {
+      eligibleRows,
+      monthKeys,
+      monthKey,
+      monthLabel: monthKey ? formatHistoricalMonthLabel(monthKey) : '-',
+      canPush: Boolean(eligibleRows.length && monthKeys.length === 1),
+      disabledReason,
+    }
+  }, [rows])
 
   const pageCount = useMemo(() => Math.max(1, Math.ceil(rows.length / PAGE_SIZE)), [rows.length])
   const paginationItems = useMemo(() => buildPagination(currentPage, pageCount), [currentPage, pageCount])
@@ -1589,15 +2121,25 @@ const Vencimento = () => {
   const pageStart = (currentPage - 1) * PAGE_SIZE
   const visibleRows = useMemo(() => rows.slice(pageStart, pageStart + PAGE_SIZE), [rows, pageStart])
 
+  // O(1) lookup map for syncing modal state with row updates
+  const rowById = useMemo(() => {
+    const map = new Map()
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      if (row?.id) map.set(row.id, row)
+    }
+    return map
+  }, [rows])
+
   useEffect(() => {
     if (!selectedReport) return
-    const updated = rows.find((row) => row.id === selectedReport.id)
+    const updated = rowById.get(selectedReport.id)
     if (updated && updated !== selectedReport) setSelectedReport(updated)
-  }, [rows, selectedReport])
+  }, [rowById, selectedReport])
 
   useEffect(() => {
     if (!selectedOverride) return
-    const updated = rows.find((row) => row.id === selectedOverride.id)
+    const updated = rowById.get(selectedOverride.id)
     if (updated && updated !== selectedOverride) setSelectedOverride(updated)
   }, [rows, selectedOverride])
 
@@ -1625,6 +2167,7 @@ const Vencimento = () => {
               symbol: operation.ativo,
               startDate: operation.dataRegistro,
               endDate: operation.vencimento,
+              includeSeries: true,
             })
             return { id: operation.id, market }
           } catch (error) {
@@ -1634,12 +2177,16 @@ const Vencimento = () => {
       )
       setMarketMap((prev) => {
         const next = { ...prev }
+        const referenceDate = new Date()
         updates.forEach((update) => {
           if (update?.id && update.market) {
             const operation = operationMap.get(update.id)
-              const dividendRequest = operation ? buildDividendRequest(operation, reportDate) : null
+            const dividendRequest = operation ? buildDividendRequest(operation, reportDate) : null
             const dividend = dividendRequest ? dividendMap.get(dividendRequest.key) : null
-            next[update.id] = applyDividendsToMarket(update.market, dividend)
+            const marketWithDividends = applyDividendsToMarket(update.market, dividend)
+            next[update.id] = shouldLoadSettlementClose(operation, null, referenceDate)
+              ? annotateSettlementMarket(operation, marketWithDividends, referenceDate)
+              : marketWithDividends
           }
         })
         return next
@@ -1655,13 +2202,17 @@ const Vencimento = () => {
     } finally {
       setIsRefreshingAll(false)
     }
-  }, [visibleRows, notify])
+  }, [visibleRows, notify, reportDate])
 
   const totals = useMemo(() => {
-    const total = rows.length
-    const criticos = rows.filter((row) => row.status.key === 'critico').length
-    const alertas = rows.filter((row) => row.status.key === 'alerta').length
-    return { total, criticos, alertas }
+    let criticos = 0
+    let alertas = 0
+    for (let i = 0; i < rows.length; i++) {
+      const key = rows[i].status.key
+      if (key === 'critico') criticos++
+      else if (key === 'alerta') alertas++
+    }
+    return { total: rows.length, criticos, alertas }
   }, [rows])
 
   const handleReportClick = useCallback((row) => {
@@ -2018,100 +2569,126 @@ const Vencimento = () => {
     })
   }, [selectedStructureMeta])
 
-  const fetchSpotMapForExport = useCallback(async (rowsToExport) => {
-    const pending = new Map()
-    rowsToExport.forEach((row) => {
-      const spot = resolveSpotBase(row, row.market)
-      if (spot != null) return
-      const symbol = normalizeYahooSymbol(row?.ativo)
-      const startDate = normalizeDateKey(row?.dataRegistro)
-      const endDate = normalizeDateKey(row?.vencimento)
-      if (!symbol || !startDate || !endDate) return
-      const key = `${symbol}:${startDate}:${endDate}`
-      if (!pending.has(key)) {
-        pending.set(key, { key, symbol, startDate, endDate })
-      }
-    })
-    if (!pending.size) return new Map()
-    const results = await mapWithConcurrency(
-      Array.from(pending.values()),
-      SPOT_CONCURRENCY,
-      async (request) => {
-        try {
-          const market = await fetchYahooMarketData({
-            symbol: request.symbol,
-            startDate: request.startDate,
-            endDate: request.endDate,
-          })
-          return [request.key, toOptionalNumber(market?.close)]
-        } catch {
-          return [request.key, null]
-        }
-      },
-    )
-    return new Map(results.filter(([, value]) => value != null))
-  }, [])
+  const handleUseAutoBonus = useCallback(() => {
+    if (!selectedOverride) return
+    const autoQtyBase = Number(selectedOverride?.bonusAutoQtyBase)
+    const autoQtyBonus = Number(selectedOverride?.bonusAutoQtyBonus)
+    if ((!Number.isFinite(autoQtyBase) || autoQtyBase <= 0) && (!Number.isFinite(autoQtyBonus) || autoQtyBonus <= 0)) {
+      return
+    }
+    const latestBonusDate = Array.isArray(selectedOverride?.bonusEvents) && selectedOverride.bonusEvents.length
+      ? [...selectedOverride.bonusEvents]
+        .sort((left, right) => String(left?.dataCom || '').localeCompare(String(right?.dataCom || '')))
+        .at(-1)?.dataCom || ''
+      : ''
+    setOverrideDraft((prev) => ({
+      ...prev,
+      qtyBaseOverride: Number.isFinite(autoQtyBase) && autoQtyBase > 0 ? String(autoQtyBase) : prev.qtyBaseOverride,
+      qtyBonus: Number.isFinite(autoQtyBonus) && autoQtyBonus > 0 ? String(autoQtyBonus) : prev.qtyBonus,
+      bonusAutoDisabled: false,
+      bonusDate: prev.bonusDate || latestBonusDate || '',
+      bonusNote: prev.bonusNote || (selectedOverride?.bonusSource ? `Auto ${selectedOverride.bonusSource}` : 'Auto bonificacao'),
+    }))
+  }, [selectedOverride])
 
   const handleExportXlsx = useCallback(async () => {
     if (isExporting) return
-    if (!mappedRows.length) {
+    if (!resumoExportRows.length) {
       notify('Nenhuma estrutura para exportar.', 'warning')
       return
     }
     setIsExporting(true)
     try {
-      const spotMap = await fetchSpotMapForExport(mappedRows)
-      const rowsToExport = mappedRows.map((row) => {
-        const legs = row.effectiveLegs || row.pernas || []
-        const { callComprada, callVendida, putComprada, putComprada2, putVendida } = pickOptionStrikes(legs)
-        const { ki, ko } = resolveBarrierLevels(row.pernas || legs, Boolean(row?.barrierStatus?.list?.length))
-        const spotKey = buildSpotKey(row)
-        const spotValue = toOptionalNumber(resolveSpotBase(row, row.market) ?? (spotKey ? spotMap.get(spotKey) : null))
-        const valorCompra = row.result?.valorEntradaIncomplete
-          ? null
-          : toOptionalNumber(row.result?.valorEntrada ?? row.result?.pagou ?? row.result?.custoTotal)
-        const lucroPercent = toOptionalNumber(row.result?.percent)
-        const lucroPercentValue = lucroPercent != null ? lucroPercent * 100 : null
-        const gainsOpcoes = row.result?.optionsSuppressed ? null : toOptionalNumber(row.result?.ganhosOpcoes)
-        const ganhoPut = row.result?.optionsSuppressed ? null : toOptionalNumber(row.result?.ganhoPut)
-        const ganhoCall = row.result?.optionsSuppressed ? null : toOptionalNumber(row.result?.ganhoCall)
-        return [
-          row.assessor || '',
-          row.broker || '',
-          row.nomeCliente || row.cliente || row.codigoCliente || '',
-          normalizeDateKey(row.dataRegistro) || '',
-          row.ativo || '',
-          row.estrutura || '',
-          valorCompra ?? '',
-          normalizeDateKey(row.vencimento) || '',
-          toOptionalNumber(row.qtyBase ?? row.quantidade) ?? '',
-          toOptionalNumber(row.custoUnitario) ?? '',
-          callComprada ?? '',
-          callVendida ?? '',
-          putComprada ?? '',
-          putComprada2 ?? '',
-          putVendida ?? '',
-          ki ?? '',
-          ko ?? '',
-          spotValue ?? '',
-          toOptionalNumber(row.result?.ganho) ?? '',
-          toOptionalNumber(row.result?.financeiroFinal) ?? '',
-          toOptionalNumber(row.result?.vendaAtivo) ?? '',
-          lucroPercentValue ?? '',
-          toOptionalNumber(row.result?.dividends) ?? '',
-          gainsOpcoes ?? '',
-          ganhoPut ?? '',
-          ganhoCall ?? '',
-          toOptionalNumber(row.result?.cupomTotal) ?? '',
-          toOptionalNumber(row.result?.pagou) ?? '',
-        ]
-      })
+      const rowsToExport = resumoExportRows.map((entry) => (
+        RESUMO_EXPORT_KEYS.map((key) => resolveResumoCellDisplayValue(entry, key))
+      ))
       const fileDate = new Date().toISOString().slice(0, 10)
+      const { exportXlsx } = await import('../services/exportXlsx')
       const result = await exportXlsx({
-        fileName: `estruturas_export_${fileDate}.xlsx`,
-        sheetName: 'Estruturas',
-        columns: EXPORT_COLUMNS,
+        fileName: `estruturas_resumo_${fileDate}.xlsx`,
+        sheetName: 'Resumo',
+        columns: RESUMO_EXPORT_LABELS,
         rows: rowsToExport,
+        useStyles: true,
+        columnWidths: [40, 24, 18, 20, 16, 12, 24, 16, 14, 14, 12, 16, 16, 12],
+        decorateWorksheet: ({ worksheet, XLSX, firstDataRowIndex }) => {
+          const centerAlignment = { horizontal: 'center', vertical: 'center', wrapText: true }
+          const border = {
+            top: { style: 'thin', color: { rgb: 'FFD9E2EC' } },
+            right: { style: 'thin', color: { rgb: 'FFD9E2EC' } },
+            bottom: { style: 'thin', color: { rgb: 'FFD9E2EC' } },
+            left: { style: 'thin', color: { rgb: 'FFD9E2EC' } },
+          }
+          const buildDataStyle = (fillRgb = 'FFFFFFFF') => ({
+            alignment: centerAlignment,
+            border,
+            fill: { patternType: 'solid', fgColor: { rgb: fillRgb } },
+            font: { color: { rgb: 'FF0F172A' } },
+          })
+          const headerStyle = {
+            ...buildDataStyle('FF0F172A'),
+            font: { bold: true, color: { rgb: 'FFFFFFFF' } },
+          }
+          const buildToneStyle = (tone) => ({
+            ...buildDataStyle(resolveToneFillRgb(tone)),
+            font: { bold: true, color: { rgb: resolveToneRgb(tone) } },
+          })
+
+          const totalRows = rowsToExport.length + 1
+          const totalCols = RESUMO_EXPORT_LABELS.length
+          for (let rowIndex = 0; rowIndex < totalRows; rowIndex += 1) {
+            for (let colIndex = 0; colIndex < totalCols; colIndex += 1) {
+              const ref = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex })
+              const cell = worksheet[ref]
+              if (!cell) continue
+              if (rowIndex === 0) {
+                cell.s = headerStyle
+                continue
+              }
+              const dataFill = rowIndex % 2 === 0 ? 'FFFFFFFF' : 'FFF8FAFD'
+              cell.s = buildDataStyle(dataFill)
+            }
+          }
+
+          RESUMO_EXPORT_KEYS.forEach((key, colIndex) => {
+            const formatMask = resolveResumoCellFormat(key)
+            const isDate = RESUMO_DATE_KEYS.has(key)
+            if (!formatMask && !isDate) return
+            for (let rowIndex = 0; rowIndex < rowsToExport.length; rowIndex += 1) {
+              const excelRow = firstDataRowIndex + rowIndex
+              const ref = XLSX.utils.encode_cell({ r: excelRow, c: colIndex })
+              const cell = worksheet[ref]
+              if (!cell) continue
+              if (isDate) {
+                const serial = parsePtBrDateToExcelSerial(String(cell.v || ''))
+                if (serial != null) {
+                  cell.t = 'n'
+                  cell.v = serial
+                  cell.z = 'DD/MM/YYYY'
+                  delete cell.w
+                }
+              } else {
+                cell.z = formatMask
+              }
+            }
+          })
+
+          for (let rowIndex = 0; rowIndex < resumoExportRows.length; rowIndex += 1) {
+            const source = resumoExportRows[rowIndex]
+            RESUMO_EXPORT_KEYS.forEach((key, colIndex) => {
+              const tone = resolveResumoCellTone(source, key)
+              if (!tone) return
+              const excelRow = firstDataRowIndex + rowIndex
+              const ref = XLSX.utils.encode_cell({ r: excelRow, c: colIndex })
+              const cell = worksheet[ref]
+              if (!cell) return
+              cell.s = buildToneStyle(tone)
+            })
+          }
+
+          const lastColumnRef = XLSX.utils.encode_col(Math.max(RESUMO_EXPORT_LABELS.length - 1, 0))
+          worksheet['!autofilter'] = { ref: `A1:${lastColumnRef}1` }
+        },
       })
       if (!result) {
         notify('Exportacao cancelada.', 'warning')
@@ -2123,10 +2700,172 @@ const Vencimento = () => {
     } finally {
       setIsExporting(false)
     }
-  }, [fetchSpotMapForExport, isExporting, mappedRows, notify])
+  }, [isExporting, notify, resumoExportRows])
 
-  const handleGenerateReport = useCallback(() => {
-    if (!visibleRows.length) {
+  const handleExportDados = useCallback(async () => {
+    if (isExportingDados) return
+    if (!dadosExportRows.length) {
+      notify('Nenhuma estrutura para exportar.', 'warning')
+      return
+    }
+    setIsExportingDados(true)
+    try {
+      const rowsToExport = dadosExportRows.map((entry) => (
+        DADOS_EXPORT_KEYS.map((key) => resolveDadosCellDisplayValue(entry, key))
+      ))
+      const fileDate = new Date().toISOString().slice(0, 10)
+      const { exportXlsx } = await import('../services/exportXlsx')
+      const result = await exportXlsx({
+        fileName: `estruturas_dados_${fileDate}.xlsx`,
+        sheetName: 'Dados',
+        columns: DADOS_EXPORT_LABELS,
+        rows: rowsToExport,
+        useStyles: true,
+        columnWidths: DADOS_EXPORT_COL_WIDTHS,
+        decorateWorksheet: ({ worksheet, XLSX, firstDataRowIndex }) => {
+          const centerAlignment = { horizontal: 'center', vertical: 'center', wrapText: true }
+          const border = {
+            top: { style: 'thin', color: { rgb: 'FFD9E2EC' } },
+            right: { style: 'thin', color: { rgb: 'FFD9E2EC' } },
+            bottom: { style: 'thin', color: { rgb: 'FFD9E2EC' } },
+            left: { style: 'thin', color: { rgb: 'FFD9E2EC' } },
+          }
+          const buildDataStyle = (fillRgb = 'FFFFFFFF') => ({
+            alignment: centerAlignment,
+            border,
+            fill: { patternType: 'solid', fgColor: { rgb: fillRgb } },
+            font: { color: { rgb: 'FF0F172A' } },
+          })
+          const headerStyle = {
+            ...buildDataStyle('FF0F172A'),
+            font: { bold: true, color: { rgb: 'FFFFFFFF' } },
+          }
+          const buildToneStyle = (tone) => ({
+            ...buildDataStyle(resolveToneFillRgb(tone)),
+            font: { bold: true, color: { rgb: resolveToneRgb(tone) } },
+          })
+
+          const totalRows = rowsToExport.length + 1
+          const totalCols = DADOS_EXPORT_LABELS.length
+          for (let rowIndex = 0; rowIndex < totalRows; rowIndex += 1) {
+            for (let colIndex = 0; colIndex < totalCols; colIndex += 1) {
+              const ref = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex })
+              const cell = worksheet[ref]
+              if (!cell) continue
+              if (rowIndex === 0) {
+                cell.s = headerStyle
+                continue
+              }
+              const dataFill = rowIndex % 2 === 0 ? 'FFFFFFFF' : 'FFF8FAFD'
+              cell.s = buildDataStyle(dataFill)
+            }
+          }
+
+          DADOS_EXPORT_KEYS.forEach((key, colIndex) => {
+            const formatMask = resolveDadosCellFormat(key)
+            const isDate = DADOS_DATE_KEYS.has(key)
+            if (!formatMask && !isDate) return
+            for (let rowIndex = 0; rowIndex < rowsToExport.length; rowIndex += 1) {
+              const excelRow = firstDataRowIndex + rowIndex
+              const ref = XLSX.utils.encode_cell({ r: excelRow, c: colIndex })
+              const cell = worksheet[ref]
+              if (!cell) continue
+              if (isDate) {
+                const serial = parsePtBrDateToExcelSerial(String(cell.v || ''))
+                if (serial != null) {
+                  cell.t = 'n'
+                  cell.v = serial
+                  cell.z = 'DD/MM/YYYY'
+                  delete cell.w
+                }
+              } else {
+                cell.z = formatMask
+              }
+            }
+          })
+
+          for (let rowIndex = 0; rowIndex < dadosExportRows.length; rowIndex += 1) {
+            const source = dadosExportRows[rowIndex]
+            DADOS_EXPORT_KEYS.forEach((key, colIndex) => {
+              const tone = resolveDadosCellTone(source, key)
+              if (!tone) return
+              const excelRow = firstDataRowIndex + rowIndex
+              const ref = XLSX.utils.encode_cell({ r: excelRow, c: colIndex })
+              const cell = worksheet[ref]
+              if (!cell) return
+              cell.s = buildToneStyle(tone)
+            })
+          }
+
+          const lastColumnRef = XLSX.utils.encode_col(Math.max(DADOS_EXPORT_LABELS.length - 1, 0))
+          worksheet['!autofilter'] = { ref: `A1:${lastColumnRef}1` }
+        },
+      })
+      if (!result) {
+        notify('Exportacao cancelada.', 'warning')
+        return
+      }
+      notify('Exportacao concluida.', 'success')
+    } catch {
+      notify('Falha ao exportar o XLSX.', 'warning')
+    } finally {
+      setIsExportingDados(false)
+    }
+  }, [isExportingDados, notify, dadosExportRows])
+
+  const handlePushToHistorico = useCallback(async () => {
+    if (isPushingHistorico) return
+    if (!historicoPushContext.canPush) {
+      notify(historicoPushContext.disabledReason || 'Selecione um unico mes vencido para enviar ao historico.', 'warning')
+      return
+    }
+
+    setIsPushingHistorico(true)
+    const pushedAt = new Date().toISOString()
+    const monthKey = historicoPushContext.monthKey
+    try {
+      const currentState = loadHistoricoOperacoesState(userKey)
+      const replaced = Boolean(currentState.monthlyBatches?.[monthKey])
+      const seedRows = historicoPushContext.eligibleRows.map((row) => buildHistoricalRowFromVencimentoRow(row, {
+        origin: HISTORICO_ORIGIN_VENCIMENTO,
+        batchMonth: monthKey,
+        pushedAt,
+      }))
+      const closeMap = await fetchHistoricalCloseMap(seedRows)
+      const frozenRows = seedRows.map((row) => {
+        const quoteKey = buildHistoricalQuoteKey(row)
+        const quote = quoteKey ? closeMap?.[quoteKey] : null
+        return recalculateHistoricalWorkbookValues(row, quote?.close ?? row.spot, {
+          origin: HISTORICO_ORIGIN_VENCIMENTO,
+          batchMonth: monthKey,
+          pushedAt,
+          spotSource: quote?.source || row.spotSource || 'vencimento',
+        })
+      })
+
+      upsertHistoricoMonthlyBatch({
+        monthKey,
+        monthLabel: formatHistoricalMonthLabel(monthKey),
+        origin: HISTORICO_ORIGIN_VENCIMENTO,
+        pushedAt,
+        rows: frozenRows,
+      }, userKey)
+
+      notify(
+        replaced
+          ? `Historico de ${formatHistoricalMonthLabel(monthKey)} substituido com ${formatNumber(frozenRows.length)} operacoes.`
+          : `Historico de ${formatHistoricalMonthLabel(monthKey)} enviado com ${formatNumber(frozenRows.length)} operacoes.`,
+        'success',
+      )
+    } catch (error) {
+      notify(error?.message ? `Falha ao enviar ao historico: ${error.message}` : 'Falha ao enviar ao historico.', 'warning')
+    } finally {
+      setIsPushingHistorico(false)
+    }
+  }, [historicoPushContext, isPushingHistorico, notify, userKey])
+
+  const handleGenerateReport = useCallback(async () => {
+    if (!resumoExportRows.length) {
       notify('Nenhuma linha para gerar o relatorio.', 'warning')
       return
     }
@@ -2145,29 +2884,24 @@ const Vencimento = () => {
       filterItems.push({ label: 'Vencimentos', value: label })
     }
     if (filters.status) filterItems.push({ label: 'Status', value: filters.status })
-    filterItems.push({ label: 'Pagina', value: `${currentPage} / ${pageCount}` })
+    filterItems.push({ label: 'Linhas no recorte', value: formatNumber(resumoExportRows.length) })
 
-    const totalFinanceiro = visibleRows.reduce((sum, row) => sum + (Number(row.result?.financeiroFinal) || 0), 0)
-    const totalGanho = visibleRows.reduce((sum, row) => sum + (Number(row.result?.ganho) || 0), 0)
+    const totalFinanceiro = resumoExportRows.reduce((sum, row) => sum + (Number(row.financeiroFinal) || 0), 0)
+    const totalGanho = resumoExportRows.reduce((sum, row) => sum + (Number(row.ganhoPrejuizo) || 0), 0)
+    const totalEntrou = resumoExportRows.reduce((sum, row) => sum + (Number(row.entrou) || 0), 0)
 
     const summaryItems = [
-      { label: 'Operacoes na pagina', value: formatNumber(visibleRows.length) },
+      { label: 'Operacoes no recorte', value: formatNumber(resumoExportRows.length) },
+      { label: 'Entrou (soma)', value: formatCurrency(totalEntrou) },
       { label: 'Financeiro final (soma)', value: formatCurrency(totalFinanceiro) },
       { label: 'Ganho/Prejuizo (soma)', value: formatCurrency(totalGanho) },
     ]
 
-    const columns = ['Cliente', 'Assessor', 'Broker', 'Ativo', 'Estrutura', 'Vencimento', 'Resultado']
-    const rows = visibleRows.map((row) => [
-      row.nomeCliente || row.cliente || row.codigoCliente || '—',
-      row.assessor || '—',
-      row.broker || '—',
-      row.ativo || '—',
-      row.estrutura || '—',
-      formatDate(row.vencimento),
-      formatCurrency(row.result?.financeiroFinal ?? 0),
-    ])
+    const columns = RESUMO_EXPORT_LABELS
+    const rows = resumoExportRows.map((entry) => buildResumoPdfRow(entry))
 
     const generatedAt = new Date().toLocaleString('pt-BR')
+    const { exportVencimentosReportPdf } = await import('../services/pdf')
     exportVencimentosReportPdf(
       {
         title: 'Relatorio de Vencimentos',
@@ -2177,9 +2911,9 @@ const Vencimento = () => {
         columns,
         rows,
       },
-      `vencimentos_pagina_${currentPage}`,
+      `vencimentos_resumo_${new Date().toISOString().slice(0, 10)}`,
     )
-  }, [clientCodeFilter, currentPage, filters, notify, pageCount, selectedAssessor, selectedBroker, visibleRows])
+  }, [clientCodeFilter, filters, notify, resumoExportRows, selectedAssessor, selectedBroker])
 
   const columns = useMemo(
     () => [
@@ -2195,7 +2929,7 @@ const Vencimento = () => {
       },
       {
         key: 'codigoCliente',
-        label: 'Codigo cliente',
+        label: 'Conta',
         render: (row) => row.codigoCliente || row.cliente || '—',
       },
       {
@@ -2268,7 +3002,7 @@ const Vencimento = () => {
       },
       {
         key: 'vendaAtivo',
-        label: 'Venda do ativo',
+        label: 'Valor de saida',
         render: (row) => formatCurrency(row.result.vendaAtivo),
       },
       {
@@ -2283,7 +3017,11 @@ const Vencimento = () => {
       {
         key: 'debito',
         label: 'Debito',
-        render: (row) => formatCurrency(row.result.debito ?? 0),
+        render: (row) => {
+          const norm = String(row.estrutura || '').trim().toLowerCase()
+          const isRec = norm === 'cupom recorrente' || norm === 'cupom recorrente europeia'
+          return isRec ? <span className="muted">—</span> : formatCurrency(row.result.debito ?? 0)
+        },
       },
       {
         key: 'ganhosOpcoes',
@@ -2398,81 +3136,22 @@ const Vencimento = () => {
     setClientCodeFilter([])
   }, [setClientCodeFilter])
 
-  const handlePickFolder = useCallback(async () => {
+  const handleUseGlobalFolder = useCallback(async () => {
     try {
-      if (window?.electronAPI?.selectFolder) {
-        const meta = await window.electronAPI.selectFolder()
-        if (!meta?.filePath) {
-          notify('Selecao de pasta cancelada.', 'warning')
-          return
-        }
-        const nextPending = { source: 'electron', ...meta }
-        setPendingFile(nextPending)
-        if (isValidElectronPath(meta.folderPath)) {
-          const saved = await saveLink(userKey, {
-            source: 'electron',
-            folderPath: meta.folderPath,
-            fileName: meta.fileName,
-          })
-          if (saved) setLinkMeta(saved)
-          broadcastUpdate('vencimento-updated', { kind: 'link' })
-        }
-        notify('Pasta vinculada. Clique em calcular.', 'success')
+      const resolved = await globalFolderMenu.refreshFile()
+      if (!resolved?.filePath) {
+        notify('Nenhum arquivo importado vinculado para este modulo.', 'warning')
         return
       }
-      if ('showDirectoryPicker' in window) {
-        const handle = await window.showDirectoryPicker()
-        const picked = await pickFileFromDirectoryHandle(handle)
-        if (!picked?.file) {
-          notify('Nenhuma planilha .xlsx encontrada.', 'warning')
-          setPendingFile(null)
-          return
-        }
-        const nextPending = { source: 'browser', handle, ...picked }
-        setPendingFile(nextPending)
-        setPermissionState('granted')
-        const saved = await saveLink(userKey, {
-          source: 'browser',
-          handle,
-          folderName: picked.folderName,
-          fileName: picked.fileName,
-        })
-        if (saved) setLinkMeta(saved)
-        broadcastUpdate('vencimento-updated', { kind: 'link' })
-        notify('Pasta selecionada. Clique em vincular para calcular.', 'success')
-      } else {
-        fileInputRef.current?.click()
-      }
+
+      const nextPending = { source: 'electron', ...resolved }
+      setPendingFile(nextPending)
+      const applied = await applyPendingFile(nextPending, { save: true, silent: false })
+      if (!applied) setPendingFile(null)
     } catch {
-      notify('Selecao de pasta cancelada.', 'warning')
+      notify('Falha ao carregar arquivo importado.', 'warning')
     }
-  }, [broadcastUpdate, notify, userKey])
-
-  const handleFileChange = async (event) => {
-    const files = Array.from(event.target.files || [])
-    const file = pickPreferredFile(files)
-    if (!file) {
-      notify('Selecione um arquivo .xlsx.', 'warning')
-      return
-    }
-    const nextPending = { source: 'file', file, fileName: file.name }
-    setPendingFile(nextPending)
-    const saved = await saveLink(userKey, {
-      source: 'file',
-      fileName: file.name,
-    })
-    if (saved) setLinkMeta(saved)
-    broadcastUpdate('vencimento-updated', { kind: 'link' })
-    notify('Planilha pronta. Clique em vincular para calcular.', 'success')
-  }
-
-  const handleApplyFolder = useCallback(async () => {
-    if (!pendingFile) {
-      notify('Escolha a pasta/planilha antes de vincular.', 'warning')
-      return
-    }
-    await applyPendingFile(pendingFile, { save: true, silent: false })
-  }, [applyPendingFile, notify, pendingFile])
+  }, [applyPendingFile, globalFolderMenu, notify])
 
   const handleReauthorize = useCallback(async () => {
     if (!linkMeta?.handle) {
@@ -2503,12 +3182,14 @@ const Vencimento = () => {
 
   const handleRecalculateDividends = useCallback(() => {
     clearDividendsCache()
+    clearBonusCache()
     setDividendsRefreshToken((prev) => prev + 1)
+    setBonusRefreshToken((prev) => prev + 1)
   }, [])
 
-  const handleExportPdf = (row) => {
+  const handleExportPdf = async (row) => {
     const barrierBadge = getBarrierBadge(row.barrierStatus)
-    const clienteLabel = row.nomeCliente || row.cliente || row.codigoCliente || 'Cliente'
+    const clienteLabel = row.codigoCliente || row.cliente || 'Conta'
     const payload = {
       title: `Relatorio - ${clienteLabel}`,
       header: `${row.ativo} | ${row.estrutura} | ${formatDate(row.vencimento)}`,
@@ -2522,7 +3203,7 @@ const Vencimento = () => {
         { label: 'Financeiro final', value: formatCurrency(row.result.financeiroFinal) },
         { label: 'Ganho/Prejuizo', value: formatCurrency(row.result.ganho) },
         { label: 'Ganho %', value: `${(row.result.percent * 100).toFixed(2)}%` },
-        { label: 'Venda do ativo', value: formatCurrency(row.result.vendaAtivo) },
+        { label: 'Valor de saida', value: formatCurrency(row.result.vendaAtivo) },
         { label: 'Ganho na Call', value: row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhoCall) },
         { label: 'Ganho na Put', value: row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhoPut) },
         { label: 'Ganhos nas opcoes', value: row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhosOpcoes) },
@@ -2545,6 +3226,7 @@ const Vencimento = () => {
         row.manualCouponBRL != null ? 'Cupom manual aplicado.' : null,
       ].filter(Boolean),
     }
+    const { exportReportPdf } = await import('../services/pdf')
     exportReportPdf(payload, `${clienteLabel}_${row.ativo}_${row.vencimento}`)
   }
 
@@ -2575,7 +3257,15 @@ const Vencimento = () => {
           { label: 'Criticos', value: totals.criticos },
         ]}
         actions={[
+          {
+            label: isPushingHistorico ? 'Enviando historico...' : 'Enviar vencidas ao historico',
+            icon: 'upload',
+            variant: 'btn-secondary',
+            onClick: handlePushToHistorico,
+            disabled: isPushingHistorico || !historicoPushContext.canPush,
+          },
           { label: 'Gerar relatorio', icon: 'doc', onClick: handleGenerateReport, disabled: !visibleRows.length },
+          { label: isExportingDados ? 'Exportando...' : 'Exportar dados', icon: 'download', variant: 'btn-secondary', onClick: handleExportDados, disabled: isExportingDados },
           { label: isExporting ? 'Exportando...' : 'Exportar', icon: 'download', variant: 'btn-secondary', onClick: handleExportXlsx, disabled: isExporting },
         ]}
       />
@@ -2584,7 +3274,7 @@ const Vencimento = () => {
         <div className="panel-head">
           <div>
             <h3>Fonte de dados</h3>
-            <p className="muted">Vincule a pasta com a planilha de posicao para atualizar os calculos.</p>
+            <p className="muted">Use o arquivo importado para vincular automaticamente a planilha de posicao.</p>
           </div>
           <div className="panel-actions">
             {showReauthorize ? (
@@ -2593,36 +3283,44 @@ const Vencimento = () => {
                 Reautorizar
               </button>
             ) : null}
-            <button className="btn btn-secondary" type="button" onClick={handlePickFolder} disabled={isBusy}>
-              <Icon name="link" size={16} />
-              {hasLink ? 'Trocar pasta' : 'Vincular pasta'}
-            </button>
             {hasLink ? (
               <button className="btn btn-secondary" type="button" onClick={handleUnlink} disabled={isBusy}>
                 <Icon name="close" size={16} />
                 Desvincular
               </button>
             ) : null}
-            <button
-              className="btn btn-primary"
-              type="button"
-              onClick={handleApplyFolder}
-              disabled={!pendingFile || isBusy}
-            >
-              <Icon name="sync" size={16} />
-              {isBusy ? 'Calculando...' : 'Vincular e calcular'}
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls"
-              onChange={handleFileChange}
-              multiple
-              webkitdirectory="true"
-              directory="true"
-              hidden
-            />
           </div>
+        </div>
+        <div className="sync-folder-filter">
+          <label className="sync-folder-filter-field">
+            <span>Arquivo importado</span>
+            <select
+              className="input"
+              value={globalFolderMenu.directoryValue || ''}
+              onChange={(event) => globalFolderMenu.onDirectoryChange(event.target.value)}
+              disabled={!globalDirectoryOptions.length || globalFolderMenu.loading || isBusy}
+            >
+              {!globalDirectoryOptions.length ? (
+                <option value="">
+                  {globalFolderMenu.loading ? 'Carregando arquivos...' : 'Sem arquivos disponiveis'}
+                </option>
+              ) : null}
+              {globalDirectoryOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="btn btn-secondary"
+            type="button"
+            onClick={handleUseGlobalFolder}
+            disabled={!globalDirectoryOptions.length || globalFolderMenu.loading || isBusy}
+          >
+            Usar arquivo importado
+          </button>
+          {globalDirectoryEmptyMessage ? <div className="muted">{globalDirectoryEmptyMessage}</div> : null}
         </div>
         <div className="muted">{folderLabel}</div>
         {restoreStatus.message ? <div className="muted">{restoreStatus.message}</div> : null}
@@ -2645,14 +3343,15 @@ const Vencimento = () => {
               className="btn btn-secondary"
               type="button"
               onClick={handleRecalculateDividends}
-              disabled={!reportDate || dividendStatus.loading}
+              disabled={!reportDate || dividendStatus.loading || bonusStatus.loading}
             >
               <Icon name="sync" size={16} />
-              {dividendStatus.loading ? 'Recalculando...' : 'Recalcular proventos'}
+              {(dividendStatus.loading || bonusStatus.loading) ? 'Recalculando...' : 'Recalcular proventos e bonificacoes'}
             </button>
           </div>
         </div>
         {dividendStatus.error ? <div className="muted">{dividendStatus.error}</div> : null}
+        {bonusStatus.error ? <div className="muted">{bonusStatus.error}</div> : null}
       </section>
 
       <section className="panel">
@@ -2666,7 +3365,7 @@ const Vencimento = () => {
               <Icon name="search" size={16} />
               <input
                 type="search"
-                placeholder="Buscar cliente, ativo ou estrutura"
+                placeholder="Buscar conta, ativo ou estrutura"
                 value={filters.search}
                 onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
               />
@@ -2709,7 +3408,7 @@ const Vencimento = () => {
             value={clientCodeFilter}
             options={clienteOptions}
             onChange={setClientCodeFilter}
-            placeholder="Codigo do cliente"
+            placeholder="Conta"
             searchable
           />
           <SelectMenu
@@ -2809,9 +3508,23 @@ const Vencimento = () => {
         <div className="panel-head">
           <div>
             <h3>Historico e relatorios</h3>
-            <p className="muted">Exportacao e auditoria em um clique.</p>
+            <p className="muted">Exportacao, auditoria e envio do consolidado mensal em um clique.</p>
           </div>
           <button className="btn btn-secondary" type="button">Gerar CSV</button>
+        </div>
+        <div className="sync-result">
+          <div>
+            <strong>{historicoPushContext.monthLabel}</strong>
+            <span className="muted">Competencia elegivel</span>
+          </div>
+          <div>
+            <strong>{formatNumber(historicoPushContext.eligibleRows.length)}</strong>
+            <span className="muted">Operacoes vencidas no recorte</span>
+          </div>
+          <div>
+            <strong>{historicoPushContext.canPush ? 'Pronto para enviar' : 'Recorte invalido'}</strong>
+            <span className="muted">{historicoPushContext.canPush ? 'O lote substitui o mes atual no historico.' : (historicoPushContext.disabledReason || 'Selecione um unico mes vencido.')}</span>
+          </div>
         </div>
         <div className="history-grid">
           <div className="history-card">
@@ -2843,6 +3556,14 @@ const Vencimento = () => {
         qtyAtual={selectedOverride?.qtyAtual}
         structureMeta={selectedStructureMeta}
         errors={overrideErrors}
+        dividendEvents={selectedOverride?.dividendEvents}
+        autoDividendBRL={selectedOverride?.result?.dividends}
+        dividendSource={selectedOverride?.dividendSource}
+        bonusEvents={selectedOverride?.bonusEvents}
+        autoBonusQty={selectedOverride?.bonusAutoQtyBonus}
+        autoBonusQtyBase={selectedOverride?.bonusAutoQtyBase}
+        bonusSource={selectedOverride?.bonusSource}
+        bonusFactor={selectedOverride?.bonusAutoFactor}
         onClose={() => {
           setSelectedOverride(null)
           setOverrideErrors({})
@@ -2852,6 +3573,7 @@ const Vencimento = () => {
         onReset={handleResetOverride}
         onClearStructureOverrides={handleClearStructureOverrides}
         onUseQtyBase={handleUseQtyBase}
+        onUseAutoBonus={handleUseAutoBonus}
         onAddStructureEntry={handleAddStructureEntry}
         onRemoveStructureEntry={handleRemoveStructureEntry}
         onStructureEntryChange={handleStructureEntryChange}

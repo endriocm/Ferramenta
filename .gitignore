@@ -14,10 +14,14 @@
 **/.parcel-cache/
 **/coverage/
 **/logs/
+**/.next/
 dist_electron/
+tmp/
 
 __archive__/
 legacy/
+meu-projeto-supabase/
+pwr-billing-redirect/
 
 *.log
 *.tmp

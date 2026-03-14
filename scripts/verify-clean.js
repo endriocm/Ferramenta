@@ -14,10 +14,12 @@ const bannedDirNames = new Set([
   '.cache',
   '.turbo',
   '.parcel-cache',
+  '.next',
   'coverage',
   'logs',
   '.vercel',
   '.cache_market_data',
+  'tmp',
   '__archive__',
   'legacy',
 ]);

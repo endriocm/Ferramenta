@@ -1,30 +1,10 @@
 import { normalizeDateKey } from '../utils/dateKey.js'
+import { toNumber as parseNumber } from '../utils/number.js'
 
 const STORAGE_PREFIX = 'pwr.vencimento.overrides.'
 const LEGACY_KEY = 'pwr.vencimento.overrides'
 
 const buildKey = (userKey) => `${STORAGE_PREFIX}${userKey}`
-
-const parseNumber = (value) => {
-  if (value == null || value === '') return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const raw = String(value).trim()
-  if (!raw) return null
-  let cleaned = raw.replace(/[^\d,.-]/g, '')
-  const hasComma = cleaned.includes(',')
-  const hasDot = cleaned.includes('.')
-  if (hasComma && hasDot) {
-    if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
-      cleaned = cleaned.replace(/\./g, '').replace(/,/g, '.')
-    } else {
-      cleaned = cleaned.replace(/,/g, '')
-    }
-  } else if (hasComma) {
-    cleaned = cleaned.replace(/,/g, '.')
-  }
-  const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
-}
 
 const normalizeOptionSide = (value) => {
   if (value == null) return null
@@ -130,6 +110,10 @@ const normalizeOverride = (override) => {
     schemaVersion: 2,
     high: 'auto',
     low: 'auto',
+    stickyHighHit: false,
+    stickyLowHit: false,
+    stickyHighHitAt: null,
+    stickyLowHitAt: null,
     manualCouponBRL: null,
     manualCouponPct: null,
     manualOptionsGainBRL: null,
@@ -145,6 +129,7 @@ const normalizeOverride = (override) => {
     structureByLeg: null,
     legs: null,
     qtyBonus: 0,
+    bonusAutoDisabled: false,
     bonusDate: '',
     bonusNote: '',
   }
@@ -158,6 +143,7 @@ const normalizeOverride = (override) => {
   }
   const manualCouponBRL = parseNumber(merged.manualCouponBRL ?? merged.manualCouponBrl)
   const manualOptionsGainBRL = parseNumber(merged.manualOptionsGainBRL ?? merged.manualOptionsGainBrl)
+  const qtyBaseOverride = parseNumber(merged.qtyBaseOverride ?? merged.quantidadeBaseOverride ?? merged.baseQtyOverride)
   const structureInput = merged.structure && typeof merged.structure === 'object' ? merged.structure : null
   const structureSide = normalizeOptionSide(structureInput?.target?.side ?? structureInput?.side ?? structureInput?.optionSide)
   const structureLegKeyRaw = structureInput?.target?.legKey ?? structureInput?.legKey
@@ -194,6 +180,10 @@ const normalizeOverride = (override) => {
     : null
   const legacyRaw = merged.manualCouponPct ?? merged.cupomManual ?? merged.cupomManualPct
   const legacy = legacyRaw != null && String(legacyRaw).trim() !== '' ? String(legacyRaw).trim() : null
+  const stickyHighHit = merged.stickyHighHit === true
+  const stickyLowHit = merged.stickyLowHit === true
+  const stickyHighHitAt = normalizeDateOverride(merged.stickyHighHitAt ?? merged.barrierHighHitAt)
+  const stickyLowHitAt = normalizeDateOverride(merged.stickyLowHitAt ?? merged.barrierLowHitAt)
   const legacyBarrierType = merged.legacyBarrierType === true
     || (
       !hasSchemaVersion
@@ -228,6 +218,10 @@ const normalizeOverride = (override) => {
     schemaVersion: 2,
     high: normalizeBarrierValue(merged.high),
     low: normalizeBarrierValue(merged.low),
+    stickyHighHit,
+    stickyLowHit,
+    stickyHighHitAt,
+    stickyLowHitAt,
     manualCouponBRL: manualCouponBRL != null ? manualCouponBRL : null,
     manualCouponPct: legacy,
     manualOptionsGainBRL: manualOptionsGainBRL != null ? manualOptionsGainBRL : null,
@@ -242,7 +236,9 @@ const normalizeOverride = (override) => {
     structure,
     structureByLeg,
     legs,
+    qtyBaseOverride: qtyBaseOverride != null ? Math.max(0, qtyBaseOverride) : null,
     qtyBonus: Math.max(0, parseNumber(merged.qtyBonus) || 0),
+    bonusAutoDisabled: merged.bonusAutoDisabled === true,
     bonusDate: merged.bonusDate || '',
     bonusNote: merged.bonusNote || '',
   }

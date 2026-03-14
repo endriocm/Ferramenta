@@ -1,680 +1,615 @@
-# Ferramenta (PWR Endrio) — Resumo Completo do Projeto
+﻿# Ferramenta (PWR Endrio) - PROJECT SUMMARY
 
-> **Propósito deste documento:** Permitir que outra IA entenda o projeto inteiro sem ler nenhum arquivo. Todo detalhe de arquitetura, fluxo, regras de negócio, convenções e dependências está aqui.
-
----
-
-## 1  Visão Geral
-
-"Ferramenta" é uma **aplicação desktop para Windows** feita com **Electron + React**. Ela é usada por um escritório de assessoria de investimentos (PWR Endrio) para:
-
-1. **Importar e consolidar receitas** vindas de planilhas Excel de três origens: Bovespa, BMF e Estruturadas, além de entradas manuais.
-2. **Gerenciar operações estruturadas** (vencimentos): importar posições consolidadas de Excel, buscar cotações de mercado (Yahoo Finance / Brapi), calcular resultado financeiro (payoff de opções, barreiras, cupons, dividendos, bonificação).
-3. **Dashboard analítico** com KPIs, gráficos de receita por mês/dia, ranking de assessores, distribuição por origem.
-4. **Tags de clientes** (código → nome → assessor → broker) via importação de arquivo Tags.xlsx, usada para enriquecer linhas importadas.
-5. **Controle de acesso / billing** com Firebase Auth, Firestore, e pagamentos via Mercado Pago (assinatura anual de R\$499,90).
+> Ultima atualizacao: 2026-03-03
+> Objetivo: servir como resumo tecnico fiel ao codigo atual do repositorio.
 
 ---
 
-## 2  Estrutura do Repositório
+## 1) Visao geral
 
-```
-Ferramenta/                     (raiz — CJS, package.json root)
-├── electron/                   Main process + preload
-│   ├── main.js                 BrowserWindow, IPC handlers, auto-updater
-│   └── preload.js              contextBridge → window.electronAPI
-├── pwr/                        React SPA (ESM, Vite v7)
-│   ├── src/
-│   │   ├── main.jsx            Entry point React
-│   │   ├── App.jsx             Auth + routing + layout
-│   │   ├── Login.jsx           Login (email/pw + Google)
-│   │   ├── SignupWizard.jsx    Cadastro multi-step
-│   │   ├── AccessGate.jsx      Paywall / license key gate
-│   │   ├── firebase.js         Firebase init + callable funcs
-│   │   ├── index.css           CSS completo (2491 linhas, tema escuro)
-│   │   ├── components/         UI genéricos reutilizáveis
-│   │   ├── contexts/           GlobalFilterContext
-│   │   ├── data/               navigation.js, dashboard.js, revenue.js, tags.js, vencimento.js
-│   │   ├── hooks/              useHashRoute, useToast
-│   │   ├── lib/                entitlement, periodTree, tagResolver, tagsStore, reprocessRejected
-│   │   ├── pages/              Dashboard, Revenue*, Vencimento, Tags, admin/*, account/*, billing/*
-│   │   ├── services/           Toda lógica de I/O, parsers, caches, storage
-│   │   └── utils/              dateKey, format
-│   ├── vite.config.js          proxy /api → localhost:4170
-│   └── package.json            react 19, vite 7
-├── server/                     Express dev server (porta 4170)
-│   └── index.js                Routes: /api/health, /api/quotes, /api/dividends,
-│                                /api/vencimentos/parse, /api/receitas/*/import
-├── api/                        Vercel Serverless Functions (prod)
-│   ├── health.js               GET → { ok: true }
-│   ├── quotes.js               GET → cotação (Brapi fallback Yahoo)
-│   ├── dividends.js            GET/POST → dividendos (batch via POST)
-│   └── lib/
-│       ├── bovespaParser.js    Parser Excel Bovespa/BMF
-│       ├── estruturadasParser.js  Parser Excel Estruturadas
-│       └── dividends.js        Provider chain: StatusInvest → Brapi → Yahoo
-├── functions/                  Firebase Cloud Functions v2
-│   ├── index.js                7 funções (checkout MP, admin CRUD, webhook)
-│   └── package.json            firebase-functions 4, mercadopago 2
-├── scripts/
-│   ├── release-win.ps1         Bump version + build + upload Vercel Blob
-│   ├── publish-updates.ps1     Upload artefatos pro Blob
-│   ├── cleanup-blob-updates.mjs  Limpa versões antigas no Blob
-│   ├── clean.js / verify-clean.js
-│   └── atualiza_vencimentos_e_mark.py
-├── docs/
-│   └── ARCHITECTURE.md         Resumo curto de arquitetura
-├── firebase.json               Config: functions source, firestore rules, emulator port 5001
-├── firestore.rules             Regras: users, entitlements, mpPayments
-├── vercel.json                 { "framework": "vite" }
-├── .firebaserc                 { "projects": { "default": "pwr-endrio" } }
-└── package.json                Root: electron-builder config, scripts, deps
-```
+"Ferramenta" e um app desktop (Electron + React) para operacao de mesa e acompanhamento comercial.
+Hoje o produto nao e apenas importador de receita/vencimento: ele inclui automacao HubXP, automacao Outlook,
+calendarios de resultados/proventos, gerador de cards com OCR, sincronizacao global de arquivos e painel analitico.
+
+Principais blocos funcionais:
+
+1. Receita:
+- Bovespa
+- BMF
+- Estruturadas
+- Comissao XP (com sobreposicao mensal global)
+- Receita Manual
+- Receita Consolidada (complemento por meses faltantes)
+
+2. Operacao:
+- Vencimento de estruturas
+- Batimento de barreira (base + diario)
+- Projecao de vencimento
+- Historico de operacoes
+- Clientes operando
+- Gap comercial (meta vs producao)
+- Antecipacao (analise vs CDI)
+
+3. Automacao:
+- HubXP Central de Ordens
+- HubXP Apuracao Bovespa
+- HubXP fluxo manual gravavel/replay
+- Outlook (sessao, monitor de inbox por regras, envio por conta)
+
+4. Ferramentas:
+- Calendario de resultados (BR + EUA)
+- Calendario de proventos
+- Gerador de cards (payoff/destaque/consolidador) + OCR
+- Right Tool Rail (resultados semanais, calculadora, HP12C, fee liquido)
+
+5. Plataforma:
+- Auth Firebase + AccessGate
+- Billing Mercado Pago (Cloud Functions)
+- Auto-update desktop via S3
+- API embarcada no Electron (Express) + funcoes serverless em /api
 
 ---
 
-## 3  Stack Tecnológica
+## 2) Estrutura do repositorio
 
-| Camada | Tecnologia | Versão |
-|--------|-----------|--------|
-| Desktop shell | Electron | 33.2.1 |
-| Packaging | electron-builder (NSIS) | 24.13.3 |
-| Auto-update | electron-updater + Vercel Blob Storage | 6.1.7 |
-| Frontend | React | 19.2.0 |
-| Bundler | Vite | 7.2.4 |
-| Auth | Firebase Auth (email/pw + Google) | — |
-| Database | Cloud Firestore | — |
-| Backend functions | Firebase Cloud Functions v2 | 4.5.0 |
-| Pagamento | Mercado Pago SDK | 2.0.0 |
-| Excel I/O | SheetJS (xlsx) — CDN no browser, npm no server | 0.20.3 (CDN) / 0.18.5 (npm) |
-| API dev | Express + multer | 4.19 |
-| API prod | Vercel Serverless Functions | — |
-| CSS | CSS puro (index.css, 2491 linhas), tema dark | — |
-| Routing | Hash-based custom hook (`useHashRoute`) | — |
-| Storage local | localStorage + IndexedDB (tags) + Electron native files | — |
-
----
-
-## 4  Electron — Main Process (`electron/main.js`)
-
-### 4.1  Janela
-- `BrowserWindow` 1300×820, `minWidth` 900, `minHeight` 600, fundo `#0b0f17`.
-- Carrega `pwr/dist/index.html` (build) ou `VITE_DEV_SERVER_URL` (dev).
-- Preload: `electron/preload.js` expõe `window.electronAPI`.
-
-### 4.2  DevTools Debug
-- Se `process.env.OPEN_DEVTOOLS === '1'`: abre DevTools detached ao iniciar e registra atalhos F12 / Ctrl+Shift+I para toggle.
-
-### 4.3  IPC Handlers
-
-| Canal | Direção | Descrição |
-|-------|---------|-----------|
-| `app:getVersion` | invoke | Retorna `app.getVersion()` |
-| `select-folder` / `resolve-folder` | invoke | Dialog de pasta |
-| `read-file` / `save-file` | invoke | Lê/grava arquivo no disco |
-| `storage:get/set/remove` | invoke | Persistência em JSON no `userData`. Keys permitidas: `pwr.receita.bovespa`, `pwr.receita.bmf`, `pwr.receita.estruturadas`, `pwr.receita.manual`, `pwr.market.cache` |
-| `config:get/set/selectWorkDir` | invoke | Config persistida em `userData/config.json`: `workDir`, `updateBaseUrl`, `license`, `auth` |
-| `updates:*` | invoke/on | Auto-updater: check, download, install, getStatus, getUrls, setUrl, resetUrl. Eventos: `onStatus`, `onProgress`, `onState` |
-
-### 4.4  Auto-Updater
-- Provider: `generic`, URL base: `https://xeo22it86oecxkxw.public.blob.vercel-storage.com/updates/win/`.
-- Artefatos publicados: `latest.yml`, `Ferramenta Setup X.Y.Z.exe`, `.blockmap`, `Ferramenta Setup Latest.exe` (link fixo).
-- Scripts: `release-win.ps1` faz bump → build → cleanup blob → upload.
-
----
-
-## 5  Frontend React (`pwr/src/`)
-
-### 5.1  Entry Point & Auth Flow
-
-```
-main.jsx → StrictMode → App.jsx
+```text
+Ferramenta/
+|- electron/
+|  |- main.js
+|  |- preload.js
+|
+|- pwr/
+|  |- src/
+|  |  |- App.jsx
+|  |  |- routeRegistry.js
+|  |  |- components/
+|  |  |- contexts/
+|  |  |- pages/
+|  |  |- services/
+|  |  |- lib/
+|  |  |- utils/
+|  |  |- workers/
+|  |- package.json
+|
+|- server/
+|  |- index.js
+|  |- runtimeApp.js
+|  |- hubxpOrders.js
+|  |- outlookMail.js
+|
+|- api/
+|  |- health.js
+|  |- quotes.js
+|  |- dividends.js
+|  |- cdi.js
+|  |- earnings-calendar.js
+|  |- spot.js
+|  |- receitas/*/import.js
+|  |- vencimentos/parse.js
+|  |- lib/*
+|
+|- functions/
+|  |- index.js
+|
+|- docs/
+|  |- ARCHITECTURE.md
+|  |- HUBXP_FLOW_DEV.md
+|  |- PERFORMANCE.md
+|  |- PROJECT_SUMMARY.md
+|
+|- scripts/
+|  |- release-win.ps1
+|  |- publish-updates-aws.mjs
+|  |- release-summary.mjs
 ```
 
-`App.jsx`:
-1. `onAuthStateChanged` — monitora usuário Firebase.
-2. Se não logado → `<Login />`.
-3. Se logado → `<AccessGate />` verifica entitlement (admin passa direto).
-4. Se autorizado → shell: `<Sidebar />` + `<Topbar />` + página lazy por rota.
+---
 
-### 5.2  Routing (Hash-based)
+## 3) Stack principal
 
-Hook `useHashRoute()` lê `window.location.hash` (ex: `#/receita/bovespa`). Não usa react-router.
-
-Rotas disponíveis:
-
-| Hash | Página | Descrição |
-|------|--------|-----------|
-| `#/` | Dashboard | KPIs, gráficos, rankings |
-| `#/receita/estruturadas` | RevenueStructured | Import Excel estruturadas |
-| `#/receita/bovespa` | RevenueBovespa | Import Excel bovespa |
-| `#/receita/bmf` | RevenueBmf | Import Excel BMF |
-| `#/receita/manual` | RevenueManual | Entradas manuais |
-| `#/vencimento` | Vencimento | Gestão de operações estruturadas |
-| `#/tags` | Tags | Hierarquia cliente→assessor→broker |
-| `#/account/access` | AccessStatus | Status da assinatura |
-| `#/admin/access` | AdminAccess | Painel admin |
-| `#/billing/success` | BillingSuccess | Pós-pagamento OK |
-| `#/billing/pending` | BillingPending | Pagamento pendente |
-| `#/billing/failure` | BillingFailure | Pagamento falhou |
-
-### 5.3  Contexto Global de Filtros (`GlobalFilterContext`)
-
-Provê filtros compartilhados entre todas as páginas:
-
-- `selectedBroker` (array) — filtro de broker
-- `selectedAssessor` (array) — filtro de assessor
-- `clientCodeFilter` (array) — filtro de código de cliente
-- `apuracaoMonths` — `{ all: boolean, months: string[] }` — meses de apuração
-- `brokerOptions`, `assessorOptions`, `apuracaoOptions` — computados dos dados carregados
-- `selectedClientCodes` — computado da interseção de filtros
-
-Rebuild dos dados: quando receita muda, recalcula opções de broker/assessor/meses usando `buildTagIndex()`.
-
-### 5.4  Navegação (`data/navigation.js`)
-
-Seções do sidebar:
-- **Visão Geral**: Dashboard
-- **Receitas**: Estruturadas, Bovespa, BMF, Manual
-- **Operações**: Vencimento
-- **Configurações**: Tags
-
-### 5.5  Componentes UI
-
-| Componente | Descrição |
-|-----------|-----------|
-| `Sidebar` | Navegação lateral com seções, marca PWR Endrio, `DesktopControls` no footer |
-| `Topbar` | Breadcrumbs, título, filtros globais (MultiSelect de broker/assessor/apuração), menu de conta (logout, criar senha, admin) |
-| `DataTable` | Tabela genérica com colunas/render customizado |
-| `SyncPanel` | Painel de importação: file picker, stepper animado, progress bar, resultados (importados/duplicados/rejeitados/avisos), export CSV de rejeitados/duplicados, reprocessar rejeitados |
-| `Modal` | Overlay com ESC para fechar |
-| `ReportModal` | Modal detalhado de operação: resultado, barreiras, pernas, componentes, warnings |
-| `OverrideModal` | Modal para override manual de barreiras (alta/baixa), cupom manual, bonificação |
-| `PageHeader` | Título + subtítulo + meta + actions |
-| `MultiSelect` | Dropdown multi-seleção com busca e "selecionar tudo" |
-| `TreeSelect` | Dropdown hierárquico (árvore) com checkboxes |
-| `SelectMenu` | Dropdown single-select com busca |
-| `Badge` | Pill colorida (cyan/green/amber/red/violet) |
-| `Icon` | SVG icons inline (grid, layers, trend, pulse, pen, clock, link, user, search, eye, sliders, filter, sync, download, upload, plus, doc, spark, menu, close, arrow-up, arrow-down, info, warning, check, x) |
-| `ToastProvider` | Sistema de toast notifications via contexto |
-| `DesktopControls` | Controle de atualização do app (check/download/install) no sidebar footer |
-
-### 5.6  Design System (CSS)
-
-- **Tema:** Dark mode exclusivo, fundo `#070b0f` com gradientes radiais (cyan, violet, amber).
-- **Fontes:** Manrope (body), Syne (display), Space Mono (mono).
-- **Cores:** `--cyan: #28f2e6`, `--violet: #a66bff`, `--amber: #ffb454`, `--blue: #4da3ff`, `--green: #34f5a4`, `--red: #ff4d6d`.
-- **Layout:** CSS Grid (`sidebar 260px | main`), flex para pages. Responsivo com media queries para mobile.
-- **Componentes CSS:** `.panel`, `.data-table`, `.badge`, `.btn`, `.select-wrap`, `.modal-overlay`, `.toast-stack`, `.progress-bar`, `.sync-panel`, `.chart-*`, etc.
+- Desktop shell: Electron 33
+- Frontend: React 19 + Vite 7
+- Backend local: Express (porta 4170)
+- Automacao browser: Playwright / playwright-core
+- Auth/DB: Firebase Auth + Firestore
+- Billing: Firebase Functions + Mercado Pago
+- Excel: xlsx + xlsx-js-style + parser em Web Worker
+- OCR: Windows OCR nativo (via Electron IPC) com fallback Tesseract.js
+- Deploy web API: Vercel serverless (/api)
+- Auto-update desktop: electron-updater + bucket S3
 
 ---
 
-## 6  Páginas — Fluxos de Negócio
+## 4) Electron (main + preload)
 
-### 6.1  Dashboard (`pages/Dashboard.jsx`)
+### Main process (`electron/main.js`)
 
-- **Dados:** Carrega receita estruturada (`loadStructuredRevenue()`), bovespa e BMF (`loadRevenueByType()`), receita manual. Filtra por `apuracaoMonths` e tags (broker/assessor/client).
-- **KPIs:** Total Estruturadas, Total Bovespa, Total BMF, soma total.
-- **Gráficos:** Barras de receita mensal (ou diário se 1 mês selecionado), distribuição por origem (Estruturadas / Bovespa / BMF / Manual).
-- **Rankings:** Top 7 assessores por receita; top 7 brokers por receita.
-- **Métricas extras:** Clientes únicos, assessores ativos.
+Responsabilidades atuais:
 
-### 6.2  Revenue Pages (Bovespa / BMF / Estruturadas)
+1. Janela principal + carregamento UI (dev/prod)
+2. Inicializacao de API embarcada Express (`server/runtimeApp`)
+3. Canal de runtime para UI descobrir estado/base URL da API local
+4. IPC para:
+- arquivos/pastas (`select-import-folder`, `scan-import-folder`, `list-folder-files`, etc.)
+- leitura/grava de arquivos (`read-file`, `save-file`, `save-pdf`)
+- clipboard imagem
+- OCR por imagem
+- storage nativo por chave
+- config (`config:get`, `config:set`, `config:selectWorkDir`)
+- updates (`updates:*`)
 
-Todas seguem o mesmo padrão:
-1. **SyncPanel** para selecionar arquivo Excel e importar.
-2. Parser no server (`/api/receitas/*/import`) ou client-side (`services/revenueImport.js`) normaliza linhas.
-3. Dedup por chave composta (codigoCliente + data + corretagem + volume para Bovespa/BMF; codigoCliente + dataEntrada + ativo + estrutura + comissão para Estruturadas).
-4. Enriquecimento com tags (assessor, broker, nomeCliente).
-5. Persistência em `localStorage` (chave por userKey: `pwr.receita.bovespa.{userKey}`).
-6. **DataTable** com paginação, busca, filtros globais.
-7. Exportar rejeitados/duplicados como CSV.
-8. Reprocessar rejeitados (re-enriquecer com tags atualizadas).
+5. Auto-update
+- base padrao: bucket S3 (`ferramenta-updates-937506434821`)
+- scripts de release e publicacao AWS
 
-**Fórmulas de receita:**
-- Bovespa: `corretagem × 0.9335 × 0.8285` (fator de receita)
-- BMF: `corretagem × 0.9435 × 0.8285`
-- Estruturadas: campo `comissao` direto do Excel
+### Preload (`electron/preload.js`)
 
-### 6.3  RevenueManual (`pages/RevenueManual.jsx`)
+Expõe `window.electronAPI` com:
+- `app`, `openExternal`
+- `selectFolder`/`selectImportFolder`/`scanImportFolder`
+- `readFile`/`saveFile`/`savePdf`
+- `clipboard.writeImageDataUrl`
+- `ocr.readImageDataUrl`
+- `storage.get/set/remove/getMultiple`
+- `config.get/set/selectWorkDir`
+- `runtime.getApiState/getApiBaseUrl/onApiReady`
+- `updates.getStatus/check/download/install/...`
 
-- Exibe entradas manuais persistidas em `pwr.receita.manual.{userKey}`.
-- Permite deletar linhas.
-- Enriquece com tags para exibição.
-
-### 6.4  Vencimento (`pages/Vencimento.jsx`) — ~1959 linhas
-
-**Fluxo principal:**
-1. **Import:** SyncPanel com upload de Excel (posição consolidada). Parse via `services/excel.js` (`parseWorkbook`).
-2. **Dados carregados:** Cache em `pwr.vencimento.cache.{userKey}` com timestamp.
-3. **Cotação de mercado:** Para cada ativo, busca preço atual via `/api/quotes` (Brapi → Yahoo fallback). Cache local de 30min (`services/marketData.js`).
-4. **Dividendos:** Busca dividendos ex-data no período da operação via `/api/dividends`. Batch POST com concorrência controlada.
-5. **Barreiras:** `computeBarrierStatus()` verifica se high/low do mercado atingiram barreiras das pernas. Suporta override manual (auto/hit/nohit).
-6. **Resultado:** `computeResult()` calcula: venda do ativo, ganho em calls/puts (intrínseco), cupom (fixo ou recorrente, com regras de meses), bonificação, dividendos, rebates, custo total, ganho líquido, percentual.
-7. **Overrides:** `services/overrides.js` persiste barreiras manuais, cupom manual, bonificação qty/data/nota por `{userKey}.{operationId}`.
-8. **Export:** PDF (via `services/pdf.js` — popup de impressão), Excel (via `services/exportXlsx.js`).
-9. **ReportModal:** Exibe detalhes completos de uma operação.
-10. **OverrideModal:** Edita batimento manual.
-
-**Regras de cálculo (settlement.js):**
-
-- **Barrier check:** Compara `market.high` / `market.low` contra cada barreira. Tipo KO (knock-out) ou KI (knock-in). Se bateu → `optionsSuppressed: true` para KO.
-- **Option payoff:** Call long = `max(0, spot - strike) × qty`. Call short = `- max(0, spot - strike) × qty`. Put long = `max(0, strike - spot) × qty`. Put short = `- max(0, strike - spot) × qty`.
-- **Cupom:** Pode ser fixo (`cupomFixoBRL`) ou recorrente (`cupomRecorrente`). Recorrente conta meses de registro até vencimento. Fórmula: `cupomRecorrente × meses × quantidade`.
-- **Booster:** Se `boosterFactor` existe, multiplica `qty × boosterFactor` e recalcula.
-- **Valor de entrada:** Soma ponderada de stock, options, puts com custo unitário.
-- **Dividendo:** Integrado via `dividendTotalBRL`, somado ao resultado.
-
-### 6.5  Tags (`pages/Tags.jsx`)
-
-- Import de `Tags.xlsx` com colunas: Código do cliente, Nome do cliente, Assessor, Broker (+ opcionais).
-- Persistência: IndexedDB via `lib/tagsStore.js` (database `pwr-tags`, store `tags`).
-- Funções: `buildTagIndex()` cria Map de código → { nomeCliente, assessor, broker }. `enrichRow()` adiciona tags a uma linha de receita.
-- Grid: exibe hierarquia, com busca, paginação, e tabela de agregação por assessor.
-
-### 6.6  AccessStatus (`pages/account/AccessStatus.jsx`)
-
-- Mostra status da entitlement do Firestore (`entitlements/{uid}`).
-- Exibe: plano, status, data de expiração, dias restantes.
-- Botão "Renovar / Estender" chama `createAnnualCheckoutLink()` → redireciona para checkout Mercado Pago.
-
-### 6.7  AdminAccess (`pages/admin/AdminAccess.jsx`)
-
-- Somente admins (`isAdmin === true` no doc `users/{uid}`).
-- Buscar usuário por email (`adminFindUserByEmail`).
-- Ver entitlement e pagamentos (`adminGetUserAccess`).
-- Conceder acesso por N dias (`adminGrantAccess`).
-- Revogar acesso (`adminRevokeAccess`).
-- Reprocessar pagamento (`adminReprocessPayment`).
-
-### 6.8  Billing Pages
-
-- **BillingSuccess:** Ouve `onSnapshot` na entitlement para confirmar ativação pós-pagamento.
-- **BillingPending / BillingFailure:** Mensagens estáticas com link para voltar.
+Tambem habilita zoom via `Ctrl + wheel`.
 
 ---
 
-## 7  Services (Lógica de Negócio)
+## 5) Frontend (React)
 
-### 7.1  `services/revenueImport.js`
+### 5.1 Shell e arquitetura de navegacao
 
-Parser massivo de Excel para receitas Bovespa/BMF/Estruturadas.
-- **Chunked processing:** Processa N linhas por vez com `requestAnimationFrame` para não travar a UI.
-- **Dedup:** Gera chave de dedup por tipo (ex: `bovespa: codigoCliente|data|corretagem|volume`).
-- **Validação:** Colunas obrigatórias por tipo. Rejeita linhas sem campos essenciais.
-- **Normalização:** Datas (dd/MM/yyyy → ISO), números (vírgula/ponto BR), strings trimmed.
-- **Enriquecimento:** Cruza com `buildTagIndex()` para adicionar assessor/broker/nomeCliente.
-- **Integrity check:** Hash SHA-like do estado para verificar consistência.
-- **Progress callback:** Reporta progresso via `onProgress({ processed, total })`.
-- **Cancel support:** Via `AbortSignal` ou flag `canceled`.
+- Roteamento hash custom (`useHashRoute`) sem react-router
+- Registro central de rotas em `routeRegistry.js`
+- Lazy loading por rota + prefetch em idle
+- `KeepAlive` para cache de paginas (evita remount caro)
+- `RightToolRail` persistente na lateral direita
 
-### 7.2  `services/excel.js`
+### 5.2 Contextos globais
 
-Parser da planilha de posição consolidada (vencimentos).
-- Detecta layout "posição consolidada" (colunas Tipo1, QuantidadeAtiva1, etc.) ou layout genérico.
-- Parse de até 4 pernas por operação (Call/Put/Stock com strike, barreira, rebate).
-- Normaliza datas, números, códigos de cliente.
-- Duas estratégias: `parsePosicaoConsolidada()` e fallback genérico com `parseLegs()` / `parseColumnLegs()`.
+- `GlobalFilterContext`: broker/assessor/cliente/apuracao
+- `HubxpContext`: sessao HubXP, credenciais e status compartilhado
+- `OutlookContext`: sessao Outlook, monitoramento, regras, template, historico
 
-### 7.3  `services/settlement.js`
+### 5.3 Rotas funcionais atuais
 
-Motor de cálculo financeiro:
-
-```
-computeBarrierStatus(operation, market)
-  → { high: bool|null, low: bool|null, list: Barrier[] }
-
-computeResult(operation, market, options)
-  → { vendaAtivo, ganhoCall, ganhoPut, ganhosOpcoes, cupomTotal,
-      rebateTotal, dividends, custoTotal, financeiroFinal, ganho, percent,
-      valorEntrada, valorEntradaComponents, optionsSuppressed }
-```
-
-### 7.4  `services/marketData.js`
-
-- Busca cotação via `/api/quotes?symbol=X&start=Y&end=Z`.
-- Cache em memória com TTL de 30 minutos.
-- Retorna: `{ close, high, low, dividendsTotal, source }`.
-
-### 7.5  `services/dividends.js`
-
-- Busca dividendos via `/api/dividends`.
-- Suporta batch POST (`{ requests: [{ ticker, from, to }] }`).
-- Cache local por chave ticker|from|to.
-
-### 7.6  `services/tags.js`
-
-- `loadTags(userKey)` — carrega do IndexedDB.
-- `saveTags(userKey, rows)` — persiste no IndexedDB.
-- `clearTags(userKey)` — limpa.
-- `buildTagIndex(tags)` — Map<codigoCliente, { nomeCliente, assessor, broker }>.
-- `enrichRow(row, tagIndex)` — adiciona assessor/broker/nomeCliente à row.
-- `parseTagsFile(file)` — parse do Tags.xlsx.
-
-### 7.7  `services/nativeStorage.js`
-
-- `isDesktop()` — detecta se roda no Electron (via `window.electronAPI`).
-- `nativeGet(key)` / `nativeSet(key, value)` / `nativeRemove(key)` — bridge para IPC do Electron.
-- Keys whitelist: `pwr.receita.bovespa`, `pwr.receita.bmf`, `pwr.receita.estruturadas`, `pwr.receita.manual`, `pwr.market.cache`.
-
-### 7.8  `services/revenueStore.js`
-
-- CRUD de receita em localStorage por userKey.
-- `loadRevenueByType(type, userKey)` — `localStorage.getItem('pwr.receita.{type}.{userKey}')`.
-- `saveRevenueByType(type, userKey, data)` — `localStorage.setItem(...)`.
-- Merge inteligente: não sobrescreve se já existe (usa dedup keys).
-
-### 7.9  `services/revenueStructured.js`
-
-Igual ao revenueStore mas para receita estruturada:
-- Chave: `pwr.receita.estruturadas.{userKey}`.
-- `loadStructuredRevenue(userKey)`, `saveStructuredRevenue(userKey, data)`, `clearStructuredRevenue(userKey)`.
-
-### 7.10  `services/overrides.js`
-
-- Persiste overrides por operação em localStorage: `pwr.vencimento.overrides.{userKey}`.
-- Formato: `{ [operationId]: { high: 'auto'|'hit'|'nohit', low: 'auto'|'hit'|'nohit', manualCouponBRL: number|null, qtyBonus: number, bonusDate: string, bonusNote: string } }`.
-
-### 7.11  `services/exportXlsx.js`
-
-- Gera arquivo XLSX a partir de array de rows.
-- Usa SheetJS dinâmico (carregado via CDN).
-
-### 7.12  `services/pdf.js`
-
-- Gera PDF via popup de impressão do browser.
-- Monta HTML do relatório e chama `window.print()`.
-
-### 7.13  `services/xlsxLoader.js`
-
-- Carrega SheetJS dinamicamente de `https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs`.
-- Singleton com cache.
-
-### 7.14  `services/currentUser.js`
-
-- `getCurrentUserKey()` — retorna UID do Firebase Auth ou key do localStorage.
-- Usado como namespace para isolar dados de diferentes usuários.
-
-### 7.15  `services/debug.js`
-
-- Helpers de debug: `debugLog()`, `debugWarn()`, `debugTable()`.
-- Ativos somente em `import.meta.env.DEV`.
-
-### 7.16  `services/apuracao.js`
-
-- Extrai meses de apuração disponíveis a partir dos dados importados.
-
-### 7.17  `services/vencimentoCache.js`
-
-- Cache de vencimentos importados em localStorage: `pwr.vencimento.cache.{userKey}`.
-- Formato: `{ rows, fileName, timestamp }`.
-
-### 7.18  `services/vencimentoLink.js`
-
-- Persiste link/configuração de vencimento: `pwr.vencimento.link.{userKey}`.
+- `/` Dashboard
+- `/times` Times (aba Times dentro de Tags)
+- `/cards` Gerador de cards
+- `/importacao` Catalogo central de planilhas
+- `/vinculos` Vinculos por modulo + Sync All
+- `/receita/estruturadas`
+- `/receita/bovespa`
+- `/receita/bmf`
+- `/receita/comissao-xp`
+- `/receita/manual`
+- `/receita/consolidado`
+- `/vencimento`
+- `/batimento-barreira`
+- `/projecao-vencimento`
+- `/historico-operacoes`
+- `/clientes-operando`
+- `/gap`
+- `/antecipacao`
+- `/central-ordens` (HubXP)
+- `/apuracao-bovespa` (HubXP)
+- `/calendario-resultados`
+- `/calendario-proventos`
+- `/outlook`
+- `/tags`
+- `/account/access`
+- `/admin/access`
+- `/billing/success|pending|failure`
 
 ---
 
-## 8  Lib (Utilitários de Domínio)
+## 6) Modulos de negocio (detalhe por dominio)
 
-### 8.1  `lib/entitlement.js`
-- `getExpiryDate(entitlement)` — retorna Date de expiração.
-- `isEntitlementValid(entitlement)` — verifica se não expirou.
+### 6.1 Receita
 
-### 8.2  `lib/tagResolver.js`
-- `normalizeClientCode(code)` — trim, uppercase.
-- `resolveTag(code, tagIndex)` — busca tag por código normalizado.
+#### 6.1.1 Bovespa e BMF (`RevenueMarket`)
 
-### 8.3  `lib/periodTree.js`
-- `buildPeriodTree(dates)` — constrói árvore Ano → Mês para o TreeSelect.
+- Wrapper por mercado:
+  - Bovespa fator: `0.9335 * 0.8285`
+  - BMF fator: `0.9435 * 0.8285`
+- Import via arquivo vinculado/catalogado
+- Filtro por periodo, broker, assessor, conta e texto
+- Reprocessamento de rejeitados
+- Edicao de corretagem/receita na grade
+- Integracao com override da Comissao XP
 
-### 8.4  `lib/tagsStore.js`
-- Wrapper IndexedDB: database `pwr-tags`, object store `tags`.
-- `getTagsFromDB(userKey)`, `saveTagsToDB(userKey, rows)`, `clearTagsFromDB(userKey)`.
+#### 6.1.2 Estruturadas (`RevenueStructured`)
 
-### 8.5  `lib/reprocessRejected.js`
-- Pega linhas rejeitadas, re-enriquece com tags atualizadas, retorna as que agora são válidas.
+- Import de relatorio estruturadas
+- Consolida e exibe com filtros globais
+- Integracao com override da Comissao XP
 
----
+#### 6.1.3 Comissao XP (`RevenueXpCommission`)
 
-## 9  Utils
+- Import de relatorio XP
+- Mapeia linhas para Bovespa/BMF/Estruturadas
+- Persiste dataset dedicado (`pwr.receita.xp`)
+- Controle global de sobreposicao mensal (`pwr.receita.xp.override`)
 
-### 9.1  `utils/format.js`
-- `formatCurrency(value)` → `R$ 1.234,56`.
-- `formatNumber(value)` → `1.234,56`.
-- `formatDate(isoDate)` → `dd/mm/aaaa`.
-- `formatPercent(value)` → `12,34%`.
+#### 6.1.4 Receita Consolidada (`RevenueConsolidated`)
 
-### 9.2  `utils/dateKey.js`
-- `toDateKey(date)` → `YYYY-MM-DD`.
-- `parseISO(str)` → Date.
-- `monthKey(isoDate)` → `YYYY-MM`.
+- Import de planilha de consolidado bruto
+- Complementa apenas meses ausentes (nao substitui base inteira)
+- Gera resumo de meses importados/ignorados
 
----
+#### 6.1.5 Receita Manual
 
-## 10  Server — Express Dev API (`server/index.js`)
-
-Porta: `4170` (var `PORT`).
-
-| Endpoint | Método | Descrição |
-|----------|--------|-----------|
-| `/api/health` | GET | `{ ok: true }` |
-| `/api/quotes` | GET | Cotação: tenta Brapi (BR tickers) → fallback Yahoo Finance v8. Retorna `{ symbol, close, high, low, dividendsTotal, source }` |
-| `/api/dividends` | GET | Dividendos de um ticker (provider chain: StatusInvest → Brapi → Yahoo) |
-| `/api/vencimentos/parse` | POST (multipart) | Recebe Excel, retorna array de operações parseadas |
-| `/api/receitas/estruturadas/import` | POST (multipart) | Parse Excel de receitas estruturadas |
-| `/api/receitas/bovespa/import` | POST (multipart) | Parse Excel de receitas Bovespa |
-| `/api/receitas/bmf/import` | POST (multipart) | Parse Excel de receitas BMF |
-
-### Providers de Cotação (ordem de tentativa):
-1. **Brapi** (`brapi.dev/api/quote/{ticker}`) — tickers BR, precisa de `BRAPI_TOKEN`.
-2. **Yahoo Finance** (`query1.finance.yahoo.com/v8/finance/chart/{ticker}`) — fallback.
-
-### Providers de Dividendos (ordem de tentativa, BR):
-1. **StatusInvest** — scraping HTML de `statusinvest.com.br/{acoes|bdrs|fundos-imobiliarios}/{ticker}`.
-2. **Brapi** — `brapi.dev/api/quote/{ticker}?dividends=true`.
-3. **Yahoo Finance** — eventos de dividendos do endpoint de chart.
+- Lancamentos manuais com persistencia local
+- Usada tambem como destino de alguns fluxos automaticos (HubXP)
 
 ---
 
-## 11  API Vercel Serverless (`api/`)
+### 6.2 Operacao
 
-Mesma lógica do Express, mas como serverless functions na Vercel:
-- `api/health.js` — health check.
-- `api/quotes.js` — cotação (Brapi → Yahoo).
-- `api/dividends.js` — dividendos (GET single ou POST batch com concurrency 4).
-- `api/lib/dividends.js` — toda a lógica de providers, cache (6h TTL), normalização.
-- `api/lib/bovespaParser.js` — parser Excel Bovespa/BMF.
-- `api/lib/estruturadasParser.js` — parser Excel Estruturadas.
+#### 6.2.1 Vencimento
 
----
+- Parse de planilha de posicao consolidada (layout flexivel)
+- Cotacao spot/high/low e series via `/api/quotes`
+- Calculo financeiro em `services/settlement`
+- Overrides manuais de barreira/cupom/bonus
+- Export XLSX/PDF
+- Cache de import por usuario
 
-## 12  Firebase Cloud Functions (`functions/index.js`)
+#### 6.2.2 Batimento de barreira
 
-**Projeto Firebase:** `pwr-endrio` (us-central1).
+- Entrada de base + diario
+- Busca mercado historico por ativo
+- Detecta batimento de alta/baixa por intervalo
+- Mantem estado versionado por operacao
+- Gera notificacoes consumidas no Topbar
 
-**⚠️ STATUS: NUNCA FORAM DEPLOYED (até o momento da escrita deste doc).**
+#### 6.2.3 Projecao de vencimento
 
-### Funções:
+- Reusa dados/base de vencimento
+- Projeta entradas por mes, broker e estrutura
+- Graficos com filtros e agregacoes
 
-| Nome | Tipo | Secrets | Descrição |
-|------|------|---------|-----------|
-| `createAnnualCheckoutLink` | onCall | MP_ACCESS_TOKEN | Cria preferência de checkout Mercado Pago. Preço: `ANNUAL_PRICE_BRL` (env). Redirect URLs: `APP_BASE_URL/billing/{success,failure,pending}`. Salva intent em `mpPayments/{pref.id}` |
-| `mercadoPagoWebhook` | onRequest | MP_ACCESS_TOKEN, MP_WEBHOOK_SECRET | Recebe notificação de pagamento. Valida assinatura HMAC-SHA256. Se `status === 'approved'`: cria/atualiza entitlement por 365 dias. Salva em `mpPayments/{payment.id}` e `entitlements/{uid}` |
-| `adminFindUserByEmail` | onCall | — | Busca UID por email via Firebase Admin Auth |
-| `adminGetUserAccess` | onCall | — | Retorna entitlement + últimos 20 pagamentos do usuário |
-| `adminGrantAccess` | onCall | — | Concede entitlement por N dias (default 365) |
-| `adminRevokeAccess` | onCall | — | Revoga entitlement (`status: 'revoked'`) |
-| `adminReprocessPayment` | onCall | MP_ACCESS_TOKEN | Re-busca pagamento no MP e reprocessa |
+#### 6.2.4 Historico de operacoes
 
-### Env Vars necessárias:
-- `ANNUAL_PRICE_BRL` — preço da assinatura anual (ex: `499.90`)
-- `APP_BASE_URL` — URL base do app (ex: `https://pwr-endrio.vercel.app`)
-- `MP_ACCESS_TOKEN` — secret do Mercado Pago
-- `MP_WEBHOOK_SECRET` — secret do webhook MP (para validação HMAC)
+- Import de consolidacoes historicas por planilha
+- Recalculo por spot de vencimento
+- Uso de `computeResult` com ajuste de dividendos informados
 
----
+#### 6.2.5 Clientes operando
 
-## 13  Firestore — Coleções e Regras
+- Mapa de atividade por janela (ultimos 6 meses)
+- Score por recorrencia e status de atividade
+- Persistencia de estado de filtros/sort
 
-### Coleções:
+#### 6.2.6 Gap
 
-| Coleção | Documento | Campos principais |
-|---------|-----------|-------------------|
-| `users` | `{uid}` | `email`, `displayName`, `isAdmin`, `createdAt` |
-| `entitlements` | `{uid}` | `status` (`active`/`revoked`/`expired`), `plan` (`annual`), `grantedAt`, `expiresAt`, `grantedBy`, `mpPaymentId` |
-| `licenseKeys` | `{key}` | `maxUses`, `usedBy[]`, `durationDays`, `active` |
-| `mpPayments` | `{paymentId}` | `uid`, `status`, `amount`, `createdAt`, `processedAt`, `preference_id`, dados do MP |
-| `accessAudits` | `{auto}` | Logs de auditoria de acesso |
+- Gap comercial por assessor
+- Simulacao por produto (tipo de operacao e fee)
+- Integra metas/senioridade e blocos de objetivo
 
-### Regras (`firestore.rules`):
+#### 6.2.7 Antecipacao
 
-- `users/{uid}`: owner lê; owner cria (sem se tornar admin); admin full.
-- `entitlements/{uid}`: owner lê; admin escreve.
-- `mpPayments/{paymentId}`: apenas admin lê/escreve.
+- Import parser dedicado (`antecipacaoParser`)
+- Calcula status de saida e comparativo contra CDI
+- Busca CDI via `/api/cdi`
+- Export analitico
 
 ---
 
-## 14  Fluxo de Pagamento (Mercado Pago)
+### 6.3 Tags, times e organizacao de dados
 
-1. Usuário clica "Renovar / Estender" em `AccessStatus.jsx` ou `AccessGate.jsx`.
-2. Frontend chama `createAnnualCheckoutLink()` (Firebase callable).
-3. Cloud Function cria preferência no MP com redirect URLs e metadata (`{ uid, email }`).
-4. Salva intent em Firestore `mpPayments/{preferenceId}`.
-5. Usuário é redirecionado para checkout do Mercado Pago.
-6. Após pagamento, MP chama webhook `mercadoPagoWebhook`.
-7. Webhook valida assinatura HMAC, busca dados do pagamento na API MP.
-8. Se aprovado: cria entitlement de 365 dias, atualiza `mpPayments`, auditoria.
-9. Frontend em `BillingSuccess` ouve `onSnapshot` na entitlement para confirmar ativação.
+#### Tags e vinculos (`/tags` e `/times`)
 
----
+- Import de Tags.xlsx
+- Enriquecimento de linhas por codigo cliente
+- Tabelas/visoes de times
+- Goals por senioridade
 
-## 15  Fluxo de Acesso (Entitlement / License Key)
+#### Importacao (`/importacao`)
 
-`AccessGate.jsx`:
-1. Verifica se usuário é admin → acesso direto.
-2. Carrega entitlement do Firestore (`entitlements/{uid}`).
-3. Se válido (`isEntitlementValid()`) → acesso ao app.
-4. Se não tem entitlement: oferece duas opções:
-   a. **License Key:** Digita chave → busca em `licenseKeys/{key}` → se válida e não esgotada, cria entitlement.
-   b. **Pagamento anual:** Chama `createAnnualCheckoutLink()` → redirect para MP.
+- Seleciona pasta raiz
+- Varredura recursiva de planilhas
+- Catalogo versionado por usuario
+
+#### Vinculos e sincronizacao (`/vinculos`)
+
+- Vincula arquivo por modulo/role
+- "Sincronizar tudo" roda importadores em sequencia
+- Mostra progresso e resultado por modulo
 
 ---
 
-## 16  Persistência de Dados — Resumo
+### 6.4 HubXP e Outlook
 
-| Dado | Storage | Chave |
-|------|---------|-------|
-| Receita Bovespa | localStorage | `pwr.receita.bovespa.{userKey}` |
-| Receita BMF | localStorage | `pwr.receita.bmf.{userKey}` |
-| Receita Estruturadas | localStorage | `pwr.receita.estruturadas.{userKey}` |
-| Receita Manual | localStorage | `pwr.receita.manual.{userKey}` |
-| Tags (clientes) | IndexedDB | db `pwr-tags`, store `tags`, key `{userKey}` |
-| Vencimentos cache | localStorage | `pwr.vencimento.cache.{userKey}` |
-| Vencimentos overrides | localStorage | `pwr.vencimento.overrides.{userKey}` |
-| Vencimento link | localStorage | `pwr.vencimento.link.{userKey}` |
-| Market cache | localStorage/native | `pwr.market.cache` |
-| Filtros globais | localStorage | `pwr.filters.{userKey}` |
-| Config Electron | arquivo JSON | `userData/config.json` |
-| Native storage | arquivos JSON | `userData/{key}.json` |
-| Usuário/Entitlement | Firestore | `users/{uid}`, `entitlements/{uid}` |
-| Pagamentos | Firestore | `mpPayments/{id}` |
+#### Central de Ordens (HubXP)
+
+- Sessao Playwright compartilhada
+- Login + OTP
+- Coleta ordens com filtros e paginacao
+- Resultado com analise/status e graficos
+- Pode gerar lote de receita manual a partir da coleta
+
+#### Apuracao Bovespa (HubXP)
+
+- Processa contas (manual ou por arquivo)
+- Extrai dados de Notas de Negociacao
+- Parametros de concorrencia/tentativas
+- Abort de processo em execucao
+- Suporte a fluxo gravado (`useRecordedFlow`)
+
+#### HubXP Flow DEV
+
+- Gravar fluxo manual (`/flow/record/start|stop`)
+- Consultar (`/flow/:jobId`), limpar, importar e replay
+- Replay em modo `prepare_filters` com validacao ate clique em Filtrar
+- Fallback automatico para fluxo padrao quando replay falha
+
+#### Outlook
+
+- Sessao Outlook web dedicada por usuario
+- Monitoramento de inbox por regras (sender/subject)
+- Poll de eventos incremental por `afterSeq`
+- Envio por conta com template
+- Resolucao de email cliente via HubXP (`/api/hubxp/clients/resolve`)
+- Notificacao desktop + feed de notificacoes no Topbar
 
 ---
 
-## 17  Build & Deploy
+### 6.5 Ferramentas de mercado e cards
 
-### Dev:
+#### Calendario de resultados
+
+- BR + EUA
+- Fonte principal Yahoo quoteSummary
+- Enriquecimento por scraping multi-fonte (Investidor10, StatusInvest, EarningsHub, Investing)
+- Cache local e chunking por simbolos
+
+#### Calendario de proventos
+
+- Agenda por data-com
+- JCP e dividendos
+- Consumo de `/api/dividends` (GET/POST batch)
+
+#### Gerador de cards
+
+- Layouts: payoff, destaque, consolidador
+- Templates de estrategia + tabela de payoff
+- Import por OCR de imagem (Windows OCR/Tesseract)
+- Busca dados de empresa (`companyProfile`)
+- Export PNG/PDF e copiar para clipboard
+
+#### Right Tool Rail
+
+- Resultado da semana (atalho calendario)
+- Calculadora padrao
+- HP12C (registradores financeiros)
+- Calculadora de fee liquido estruturadas
+
+---
+
+## 7) Backend Express local (`server/runtimeApp.js`)
+
+### 7.1 Endpoints core
+
+- `GET /api/health`
+- `GET /api/cdi`
+- `GET /api/dividends`
+- `GET /api/earnings-calendar`
+- `GET /api/spot`
+- `GET /api/quotes`
+- `POST /api/vencimentos/parse`
+- `POST /api/receitas/estruturadas/import`
+- `POST /api/receitas/bovespa/import`
+- `POST /api/receitas/bmf/import`
+
+### 7.2 Endpoints HubXP
+
+- `POST /api/hubxp/orders/start`
+- `POST /api/hubxp/orders/otp`
+- `POST /api/hubxp/orders/fetch`
+- `GET /api/hubxp/orders/results/:jobId`
+- `GET /api/hubxp/orders/status/:jobId`
+- `POST /api/hubxp/orders/cleanup`
+
+Flow gravado:
+- `POST /api/hubxp/flow/record/start`
+- `POST /api/hubxp/flow/record/stop`
+- `GET /api/hubxp/flow/:jobId`
+- `POST /api/hubxp/flow/clear`
+- `POST /api/hubxp/flow/import`
+- `POST /api/hubxp/flow/replay`
+
+Apuracao:
+- `POST /api/hubxp/apuracao/bovespa/fetch`
+- `POST /api/hubxp/apuracao/bovespa/abort`
+- `GET /api/hubxp/apuracao/bovespa/results/:jobId`
+
+Lookup cliente:
+- `POST /api/hubxp/clients/resolve`
+
+### 7.3 Endpoints Outlook
+
+- `POST /api/outlook/session/start`
+- `GET /api/outlook/session/status/:jobId`
+- `POST /api/outlook/session/cleanup`
+- `POST /api/outlook/monitor/start`
+- `POST /api/outlook/monitor/stop`
+- `GET /api/outlook/monitor/events/:jobId`
+- `POST /api/outlook/send/accounts`
+
+---
+
+## 8) API serverless (`api/`)
+
+Funcoes ativas:
+
+- `api/health.js`
+- `api/quotes.js`
+- `api/dividends.js`
+- `api/cdi.js`
+- `api/earnings-calendar.js`
+- `api/spot.js`
+- `api/receitas/estruturadas/import.js`
+- `api/receitas/bovespa/import.js`
+- `api/receitas/bmf/import.js`
+- `api/vencimentos/parse.js`
+
+Bibliotecas em `api/lib`:
+- parsers de receita
+- providers de dividendos
+- CDI
+- earnings calendar + scraper
+
+---
+
+## 9) Firebase Functions (`functions/index.js`)
+
+Exports atuais:
+
+- `createAnnualCheckoutLink` (onCall)
+- `adminFindUserByEmail` (onCall)
+- `adminGetUserAccess` (onCall)
+- `getMyAccessStatus` (onCall)
+- `adminGrantAccess` (onCall)
+- `adminRevokeAccess` (onCall)
+- `adminReprocessPayment` (onCall)
+- `mercadoPagoWebhook` (onRequest)
+
+Secrets/params usados:
+- `MP_ACCESS_TOKEN`
+- `MP_WEBHOOK_SECRET_TEST`
+- `MP_WEBHOOK_SECRET_PROD`
+- `ANNUAL_PRICE_BRL`
+- `APP_BASE_URL`
+
+---
+
+## 10) Persistencia de dados
+
+### 10.1 Local (browser/electron)
+
+- Receita:
+  - `pwr.receita.bovespa`
+  - `pwr.receita.bmf`
+  - `pwr.receita.estruturadas`
+  - `pwr.receita.manual`
+  - `pwr.receita.xp`
+  - `pwr.receita.xp.override`
+
+- Operacao:
+  - `pwr.vencimento.cache.{userKey}`
+  - `pwr.vencimento.overrides.{userKey}`
+  - `pwr.vencimento.link.{userKey}`
+  - `pwr.barrier-hit.state.{userKey}`
+  - `pwr.antecipacao.state.{userKey}`
+  - `pwr.historico-operacoes.state.{userKey}`
+
+- Importacao:
+  - `pwr.import.catalog.{userKey}`
+  - `pwr.import.bindings.{userKey}`
+  - `pwr.global.folder.{userKey}`
+  - `pwr.global.folder.mapping.{userKey}.*`
+
+- Automacao:
+  - `pwr.hubxp.job_id.{userKey}`
+  - `pwr.hubxp.credentials.{userKey}`
+  - `pwr.outlook.*.{userKey}` (job, credentials, rules, template, history, monitor, notified)
+
+- UI:
+  - filtros globais
+  - tema (`pwr.theme.palette.{userKey}`)
+  - estado de paginas
+  - sidebar collapse
+
+### 10.2 IndexedDB
+
+- Tags (`pwr-tags`)
+- Handle de pasta global (File System Access API) para ambiente browser
+
+### 10.3 Firestore
+
+- `users`
+- `entitlements`
+- `licenseKeys`
+- `mpPayments`
+- `accessAudits`
+
+---
+
+## 11) Integracoes externas
+
+- Mercado:
+  - Yahoo Finance
+  - Brapi
+  - StatusInvest
+  - Banco Central (CDI)
+
+- Scraping de agenda de resultados:
+  - Investidor10
+  - StatusInvest
+  - EarningsHub
+  - Investing.com
+
+- Automacao browser:
+  - HubXP
+  - Outlook Web
+
+- Billing:
+  - Mercado Pago
+
+---
+
+## 12) Build, dev e release
+
+Comandos raiz principais:
+
 ```bash
-npm run dev:api      # Express em localhost:4170
-npm run dev:ui       # Vite em localhost:5173 (proxy /api → 4170)
-npm run dev:electron # Electron apontando para Vite dev server
+npm run dev:api
+npm run dev:ui
+npm run dev:electron
+npm run build:ui
+npm run build:electron
+npm run release:summary
+npm run release:win
 ```
 
-### Build Desktop:
-```bash
-npm run build:electron   # build:ui + electron-builder --win --x64
-```
-Saída: `dist_electron/Ferramenta Setup X.Y.Z.exe`
+Observacoes:
 
-### Release Desktop:
-```powershell
-.\scripts\release-win.ps1 -Bump patch  # bump version, build, upload Blob
-```
-
-### Deploy API (Vercel):
-Push para repo → Vercel detecta `vercel.json` com framework vite e deploys serverless em `/api/*`.
-
-### Deploy Functions (Firebase):
-```bash
-cd functions && npm run deploy   # firebase deploy --only functions
-```
-⚠️ Requer: `.firebaserc` apontando para `pwr-endrio`, secrets configurados no Firebase.
+- Electron inclui UI build + server + libs de parser no pacote final.
+- Publicacao de update usa provider `generic` apontando para bucket S3.
+- Script de release valida prerequisitos de bucket/credenciais.
 
 ---
 
-## 18  Variáveis de Ambiente
+## 13) Estado tecnico atual (resumo rapido)
 
-### `pwr/.env` (Vite):
-```
-VITE_FIREBASE_API_KEY=...
-VITE_FIREBASE_AUTH_DOMAIN=...
-VITE_FIREBASE_PROJECT_ID=pwr-endrio
-VITE_FIREBASE_STORAGE_BUCKET=...
-VITE_FIREBASE_MESSAGING_SENDER_ID=...
-VITE_FIREBASE_APP_ID=...
-```
-
-### `functions/.env.local`:
-```
-ANNUAL_PRICE_BRL=499.90
-APP_BASE_URL=http://localhost:5173   (precisa ser URL de produção para deploy)
-```
-
-### `functions/.secret.local`:
-```
-MP_ACCESS_TOKEN=               (precisa ser preenchido)
-MP_WEBHOOK_SECRET=             (precisa ser preenchido)
-```
-
-### `server/`:
-```
-PORT=4170 (default)
-DEBUG_RECEITAS=1 (opcional, loga stats)
-BRAPI_TOKEN=... (para API de dividendos/cotação)
-```
-
-### Electron:
-```
-OPEN_DEVTOOLS=1     (abre DevTools ao iniciar)
-VITE_DEV_SERVER_URL=http://localhost:5173  (dev mode)
-```
+- Projeto com escopo amplo e bastante funcionalidade local-first.
+- Forte dependencia de APIs/scraping externo (mercado e calendarios).
+- Fluxos HubXP/Outlook dependem de estabilidade de UI externa e Playwright.
+- Persistencia principal ainda concentrada em localStorage + arquivos locais.
+- Existe instrumentacao/performance docs e parser em Web Worker para reduzir travamento de UI.
 
 ---
 
-## 19  Convenções do Código
+## 14) Diferencas relevantes em relacao a resumos antigos
 
-- **Linguagem:** JavaScript puro (sem TypeScript). ESM no `pwr/`, CJS na raiz/server/api/functions.
-- **React:** Functional components only. Hooks. `memo()` em DataTable.
-- **State:** Sem Redux/Zustand. Tudo via useState/useContext + localStorage/IndexedDB.
-- **Routing:** Hash-based custom hook, sem react-router.
-- **CSS:** Single file (index.css), sem CSS modules, sem styled-components. Classes BEM-like.
-- **Naming:** camelCase para variáveis/funções. PascalCase para componentes. Nomes em inglês no código, labels em português na UI.
-- **Formatação:** Sem Prettier config explícito. ESLint configurado no pwr/.
-- **Imports:** Relativos (`../services/tags`). Sem aliases.
-- **Error handling:** try/catch com fallback silencioso na maioria dos services. Toast notifications para erros visíveis ao usuário.
-- **Sem testes unitários formais.** Existe `pwr/scripts/tests.js` mas é básico.
+Este resumo ja inclui funcionalidades que nao estavam no documento antigo:
 
----
-
-## 20  Pontos de Atenção / Estado Atual
-
-1. **Cloud Functions NÃO estão deployed.** O botão "Renovar / Estender" retorna 404 porque `createAnnualCheckoutLink` não existe no Firebase ainda. É preciso configurar `APP_BASE_URL`, `MP_ACCESS_TOKEN`, `MP_WEBHOOK_SECRET` e fazer `firebase deploy --only functions`.
-
-2. **SheetJS dual load:** O server usa `xlsx` do npm (0.18.5) e o frontend carrega dinamicamente do CDN (0.20.3). Versões diferentes podem causar inconsistências.
-
-3. **localStorage como banco principal** de receitas pode atingir o limite de ~5-10MB em browsers/Electron para grandes volumes de dados.
-
-4. **Providers de cotação/dividendos** dependem de APIs externas (Yahoo, Brapi, StatusInvest) que podem mudar ou bloquear scraping.
-
-5. **Auto-updater** depende de Vercel Blob Storage estar acessível e do `latest.yml` estar atualizado.
+- HubXP completo (Central Ordens + Apuracao + Flow gravado/replay + lookup clientes)
+- Outlook (monitor e envio)
+- Importacao central + Vinculos + Sync All
+- Comissao XP e sobreposicao global
+- Receita Consolidada
+- Batimento de barreira
+- Projecao de vencimento
+- Historico de operacoes
+- Clientes operando
+- Gap
+- Antecipacao com CDI
+- Calendarios de resultados e proventos
+- Right Tool Rail (calculadoras e agenda semanal)
+- Auto-update em S3 (nao mais foco em Blob antigo)

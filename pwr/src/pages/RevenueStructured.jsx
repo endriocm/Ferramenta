@@ -9,9 +9,12 @@ import { buildDateTree, buildMonthLabel, getMonthKey, normalizeDateKey } from '.
 import { reprocessRejected } from '../lib/reprocessRejected'
 import { getTagIndex } from '../lib/tagsStore'
 import { useToast } from '../hooks/useToast'
+import useImportedFileBinding from '../hooks/useImportedFileBinding'
 import { useGlobalFilters } from '../contexts/GlobalFilterContext'
+import { readImportedFileAsArrayBuffer } from '../services/importCatalog'
 import { enrichRow } from '../services/tags'
 import { loadStructuredRevenue, saveStructuredRevenue } from '../services/revenueStructured'
+import { loadManualRevenue, loadManualRevenueByOrigin, saveRevenueList } from '../services/revenueStore'
 import { exportXlsx } from '../services/exportXlsx'
 import { parseStructuredReceitasFile } from '../services/revenueImport'
 import MultiSelect from '../components/MultiSelect'
@@ -20,6 +23,9 @@ import { getCurrentUserKey } from '../services/currentUser'
 import { loadLastImported } from '../services/vencimentoCache'
 import { buildEstruturadasDashboard, buildVencimentoIndex } from '../services/estruturadasDashboard'
 import { filterByApuracaoMonths } from '../services/apuracao'
+import { getRepasseRate, listRepasseMonths, parseRepasseInput, setRepasseRate } from '../services/revenueRepasse'
+import { buildEffectiveStructuredEntries, isXpRevenueEntry } from '../services/revenueXpCommission'
+import { toNumber } from '../utils/number'
 
 const normalizeFileName = (name) => String(name || '')
   .toLowerCase()
@@ -35,12 +41,28 @@ const filterSpreadsheetCandidates = (files) => {
     })
 }
 
+const loadStructuredWithManual = () => {
+  return [
+    ...loadStructuredRevenue(),
+    ...loadManualRevenueByOrigin('estruturadas'),
+  ]
+}
+
+const toRounded = (value, digits = 6) => {
+  if (!Number.isFinite(value)) return 0
+  const factor = 10 ** digits
+  return Math.round(value * factor) / factor
+}
+
+const isManualEntry = (entry) => String(entry?.source || '').trim().toLowerCase() === 'manual'
+
 const RevenueStructured = () => {
   const { notify } = useToast()
+  const importBinding = useImportedFileBinding('estruturadas')
   const { selectedBroker, tagsIndex, apuracaoMonths } = useGlobalFilters()
   const [userKey] = useState(() => getCurrentUserKey())
   const [filters, setFilters] = useState({ search: '', cliente: [], assessor: [], ativo: [], estrutura: [], broker: [] })
-  const [entries, setEntries] = useState(() => loadStructuredRevenue())
+  const [entries, setEntries] = useState(() => loadStructuredWithManual())
   const [dateFilterEnabled, setDateFilterEnabled] = useState(false)
   const [dateFilterSelection, setDateFilterSelection] = useState([])
   const [dateFilterApplied, setDateFilterApplied] = useState([])
@@ -52,6 +74,10 @@ const RevenueStructured = () => {
   const [selectedFile, setSelectedFile] = useState(null)
   const [fileCandidates, setFileCandidates] = useState([])
   const [isPickerOpen, setIsPickerOpen] = useState(false)
+  const [repasseMonth, setRepasseMonth] = useState('')
+  const [repasseInput, setRepasseInput] = useState('')
+  const [editingComissao, setEditingComissao] = useState({ id: '', value: '' })
+  const [xpTick, setXpTick] = useState(0)
   const [lastSyncAt, setLastSyncAt] = useState(() => {
     try {
       return localStorage.getItem('pwr.receita.estruturadas.lastSyncAt') || ''
@@ -71,16 +97,11 @@ const RevenueStructured = () => {
     }
   }, [])
 
-  const buildMultiOptions = (values) => {
-    const unique = Array.from(new Set(values.filter((value) => value != null && value !== '')))
-      .map((value) => String(value).trim())
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b, 'pt-BR'))
-    return unique.map((value) => ({ value, label: value }))
-  }
-
-
-  const baseEntries = entries
+  const baseEntries = useMemo(() => buildEffectiveStructuredEntries(entries), [entries, xpTick])
+  const repasseMonthOptions = useMemo(
+    () => listRepasseMonths(entries.map((entry) => ({ dataEntrada: entry.dataEntrada || entry.data }))),
+    [entries],
+  )
   const apuracaoEntries = useMemo(
     () => filterByApuracaoMonths(baseEntries, apuracaoMonths, (entry) => entry.dataEntrada),
     [baseEntries, apuracaoMonths],
@@ -107,7 +128,10 @@ const RevenueStructured = () => {
     return buildMonthLabel(resolvedPeriodKey)
   }, [dateFilterEnabled, resolvedPeriodKey])
 
-  const effectiveDays = dateFilterEnabled ? dateFilterApplied : []
+  const effectiveDays = useMemo(
+    () => (dateFilterEnabled ? dateFilterApplied : []),
+    [dateFilterApplied, dateFilterEnabled],
+  )
 
   const totalMes = useMemo(() => {
     if (!effectiveDays.length) {
@@ -124,26 +148,29 @@ const RevenueStructured = () => {
     [apuracaoEntries, tagsIndex],
   )
 
-  const brokerOptions = useMemo(
-    () => buildMultiOptions(enrichedEntries.map((entry) => entry.broker)),
-    [enrichedEntries],
-  )
-  const clienteOptions = useMemo(
-    () => buildMultiOptions(enrichedEntries.map((entry) => entry.codigoCliente)),
-    [enrichedEntries],
-  )
-  const assessorOptions = useMemo(
-    () => buildMultiOptions(enrichedEntries.map((entry) => entry.assessor)),
-    [enrichedEntries],
-  )
-  const ativoOptions = useMemo(
-    () => buildMultiOptions(enrichedEntries.map((entry) => entry.ativo)),
-    [enrichedEntries],
-  )
-  const estruturaOptions = useMemo(
-    () => buildMultiOptions(enrichedEntries.map((entry) => entry.estrutura)),
-    [enrichedEntries],
-  )
+  // Single-pass option extraction (replaces 5 separate .map() passes)
+  const { brokerOptions, clienteOptions, assessorOptions, ativoOptions, estruturaOptions } = useMemo(() => {
+    const brokers = new Set()
+    const clientes = new Set()
+    const assessors = new Set()
+    const ativos = new Set()
+    const estruturas = new Set()
+    for (const entry of enrichedEntries) {
+      if (entry.broker) brokers.add(entry.broker)
+      if (entry.codigoCliente) clientes.add(entry.codigoCliente)
+      if (entry.assessor) assessors.add(entry.assessor)
+      if (entry.ativo) ativos.add(entry.ativo)
+      if (entry.estrutura) estruturas.add(entry.estrutura)
+    }
+    const toOpts = (set) => Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR')).map((v) => ({ value: v, label: v }))
+    return {
+      brokerOptions: toOpts(brokers),
+      clienteOptions: toOpts(clientes),
+      assessorOptions: toOpts(assessors),
+      ativoOptions: toOpts(ativos),
+      estruturaOptions: toOpts(estruturas),
+    }
+  }, [enrichedEntries])
 
   const periodTree = useMemo(
     () => buildDateTree(enrichedEntries, (entry) => entry?.dataEntrada),
@@ -195,7 +222,7 @@ const RevenueStructured = () => {
     return enrichedEntries
       .filter((entry) => {
         const query = filters.search.toLowerCase()
-        if (query && !`${entry.codigoCliente || ''} ${entry.nomeCliente || ''} ${entry.assessor || ''} ${entry.broker || ''} ${entry.ativo || ''} ${entry.estrutura || ''}`.toLowerCase().includes(query)) return false
+        if (query && !`${entry.codigoCliente || ''} ${entry.assessor || ''} ${entry.broker || ''} ${entry.ativo || ''} ${entry.estrutura || ''}`.toLowerCase().includes(query)) return false
         if (selectedBroker.length && !selectedBroker.includes(String(entry.broker || '').trim())) return false
         if (filters.broker.length && !filters.broker.includes(String(entry.broker || '').trim())) return false
         if (filters.cliente.length && !filters.cliente.includes(String(entry.codigoCliente || '').trim())) return false
@@ -236,19 +263,186 @@ const RevenueStructured = () => {
     setDateFilterApplied([])
   }, [apuracaoMonths])
 
+  useEffect(() => {
+    if (!repasseMonthOptions.length) {
+      setRepasseMonth('')
+      setRepasseInput('')
+      return
+    }
+    setRepasseMonth((current) => {
+      if (current && repasseMonthOptions.includes(current)) return current
+      return repasseMonthOptions[repasseMonthOptions.length - 1]
+    })
+  }, [repasseMonthOptions])
+
+  useEffect(() => {
+    if (!repasseMonth) {
+      setRepasseInput('')
+      return
+    }
+    const currentRate = getRepasseRate('estruturadas', repasseMonth, null)
+    setRepasseInput(currentRate == null ? '' : String(currentRate).replace('.', ','))
+  }, [repasseMonth])
+
+  useEffect(() => {
+    const handleRepasseUpdated = () => setEntries(loadStructuredWithManual())
+    window.addEventListener('pwr:repasse-updated', handleRepasseUpdated)
+    return () => window.removeEventListener('pwr:repasse-updated', handleRepasseUpdated)
+  }, [])
+
+  useEffect(() => {
+    const handleReceitaUpdate = () => {
+      setEntries(loadStructuredWithManual())
+      setXpTick((prev) => prev + 1)
+    }
+    window.addEventListener('pwr:receita-updated', handleReceitaUpdate)
+    return () => window.removeEventListener('pwr:receita-updated', handleReceitaUpdate)
+  }, [])
+
+  const handleStartComissaoEdit = useCallback((row) => {
+    if (!row?.id) return
+    if (isXpRevenueEntry(row)) {
+      notify('Linhas da comissao XP devem ser editadas no modulo de Comissao XP.', 'warning')
+      return
+    }
+    const currentValue = Number(row.comissao)
+    const draft = Number.isFinite(currentValue)
+      ? String(currentValue).replace('.', ',')
+      : ''
+    setEditingComissao({ id: row.id, value: draft })
+  }, [notify])
+
+  const handleCancelComissaoEdit = useCallback(() => {
+    setEditingComissao({ id: '', value: '' })
+  }, [])
+
+  const handleSaveComissao = useCallback((row) => {
+    if (!row?.id) return
+    if (isXpRevenueEntry(row)) {
+      notify('Linhas da comissao XP devem ser editadas no modulo de Comissao XP.', 'warning')
+      return
+    }
+    const parsed = toNumber(editingComissao.value)
+    if (parsed == null || parsed < 0) {
+      notify('Informe uma comissao valida.', 'warning')
+      return
+    }
+    const comissao = toRounded(parsed, 6)
+    const patchEntry = (entry) => ({
+      ...entry,
+      comissao,
+      comissaoBaseBruta: comissao,
+      corretagem: comissao,
+      receita: comissao,
+      valor: comissao,
+    })
+    let updated = false
+    if (isManualEntry(row)) {
+      const manualEntries = loadManualRevenue()
+      const nextManual = manualEntries.map((entry) => {
+        if (entry?.id !== row.id) return entry
+        updated = true
+        return patchEntry(entry)
+      })
+      if (!updated) {
+        notify('Nao foi possivel localizar a linha para atualizar.', 'warning')
+        return
+      }
+      saveRevenueList('manual', nextManual)
+    } else {
+      const structuredEntries = loadStructuredRevenue()
+      const nextStructured = structuredEntries.map((entry) => {
+        if (entry?.id !== row.id) return entry
+        updated = true
+        return patchEntry(entry)
+      })
+      if (!updated) {
+        notify('Nao foi possivel localizar a linha para atualizar.', 'warning')
+        return
+      }
+      saveStructuredRevenue(nextStructured)
+    }
+    setEditingComissao({ id: '', value: '' })
+    setEntries(loadStructuredWithManual())
+    notify('Comissao atualizada com sucesso.', 'success')
+  }, [editingComissao.value, notify])
+
   const columns = useMemo(
     () => [
-      { key: 'codigoCliente', label: 'Codigo cliente', render: (row) => row.codigoCliente || '—' },
-      { key: 'nomeCliente', label: 'Nome do cliente', render: (row) => row.nomeCliente || row.cliente || '—' },
+      { key: 'codigoCliente', label: 'Conta', render: (row) => row.codigoCliente || '—' },
       { key: 'assessor', label: 'Assessor', render: (row) => row.assessor || '—' },
       { key: 'broker', label: 'Broker', render: (row) => row.broker || '—' },
       { key: 'dataEntrada', label: 'Data de entrada', render: (row) => formatDate(row.dataEntrada) },
       { key: 'estrutura', label: 'Estrutura' },
       { key: 'ativo', label: 'Ativo' },
       { key: 'vencimento', label: 'Vencimento', render: (row) => formatDate(row.vencimento) },
-      { key: 'comissao', label: 'Comissao', render: (row) => formatCurrency(row.comissao) },
+      {
+        key: 'comissao',
+        label: 'Comissao',
+        exportValue: (row) => row.comissao,
+        render: (row) => {
+          const isEditing = editingComissao.id === row.id
+          const xpLocked = isXpRevenueEntry(row)
+          if (isEditing) {
+            return (
+              <div className="revenue-edit-cell">
+                <input
+                  className="revenue-edit-input"
+                  type="text"
+                  inputMode="decimal"
+                  value={editingComissao.value}
+                  onChange={(event) => setEditingComissao((prev) => ({ ...prev, value: event.target.value }))}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      handleSaveComissao(row)
+                    }
+                    if (event.key === 'Escape') {
+                      event.preventDefault()
+                      handleCancelComissaoEdit()
+                    }
+                  }}
+                />
+                <div className="revenue-edit-actions">
+                  <button
+                    className="icon-btn ghost revenue-edit-action"
+                    type="button"
+                    onClick={() => handleSaveComissao(row)}
+                    aria-label="Salvar comissao"
+                  >
+                    <Icon name="check" size={14} />
+                  </button>
+                  <button
+                    className="icon-btn ghost revenue-edit-action"
+                    type="button"
+                    onClick={handleCancelComissaoEdit}
+                    aria-label="Cancelar edicao de comissao"
+                  >
+                    <Icon name="x" size={14} />
+                  </button>
+                </div>
+              </div>
+            )
+          }
+          return (
+            <div className="revenue-edit-cell">
+              <span>{formatCurrency(row.comissao)}</span>
+              <button
+                className="icon-btn ghost revenue-edit-action"
+                type="button"
+                onClick={() => handleStartComissaoEdit(row)}
+                aria-label="Editar comissao"
+                disabled={xpLocked}
+                title={xpLocked ? 'Linha vinda da comissao XP' : 'Editar comissao'}
+              >
+                <Icon name="pen" size={14} />
+              </button>
+            </div>
+          )
+        },
+      },
     ],
-    [],
+    [editingComissao.id, editingComissao.value, handleCancelComissaoEdit, handleSaveComissao, handleStartComissaoEdit],
   )
 
   
@@ -279,6 +473,35 @@ const RevenueStructured = () => {
       rows: rowsToExport,
     })
   }, [columns, notify, pagedRows, resolvedPeriodKey])
+
+  const handleApplyRepasse = useCallback(() => {
+    if (!repasseMonth) {
+      notify('Selecione o mes para aplicar o repasse.', 'warning')
+      return
+    }
+    const parsed = parseRepasseInput(repasseInput)
+    if (!(parsed > 0)) {
+      notify('Repasse invalido. Exemplo: 0,800', 'warning')
+      return
+    }
+    const applied = setRepasseRate('estruturadas', repasseMonth, parsed)
+    if (!applied) {
+      notify('Nao foi possivel salvar o repasse.', 'warning')
+      return
+    }
+    setEntries(loadStructuredWithManual())
+    notify(`Repasse ${String(parsed.toFixed(3)).replace('.', ',')} aplicado em ${buildMonthLabel(repasseMonth)}.`, 'success')
+  }, [notify, repasseInput, repasseMonth])
+
+  const resolveGlobalTargetFile = useCallback(async () => {
+    const target = importBinding.selectedFile || await importBinding.refreshFromCatalog()
+    if (target) setSelectedFile(target)
+    return target
+  }, [importBinding.selectedFile, importBinding.refreshFromCatalog])
+
+  useEffect(() => {
+    void resolveGlobalTargetFile()
+  }, [resolveGlobalTargetFile])
 
 const handleFolderSelection = useCallback((files) => {
     const candidates = filterSpreadsheetCandidates(files)
@@ -351,8 +574,8 @@ const handleFolderSelection = useCallback((files) => {
       const processedCount = result.processedCount || 0
       const nextEntries = recoveredEntries.length ? [...entries, ...recoveredEntries] : entries
       if (recoveredEntries.length) {
-        setEntries(nextEntries)
         saveStructuredRevenue(nextEntries)
+        setEntries(loadStructuredWithManual())
       }
 
       const prevResult = syncResult || {}
@@ -412,7 +635,9 @@ const handleFolderSelection = useCallback((files) => {
 
   const handleSync = useCallback(async (file) => {
     if (syncing) return
-    const targetFile = file || selectedFile
+    let targetFile = file || selectedFile
+    const globalTarget = await resolveGlobalTargetFile()
+    if (globalTarget) targetFile = globalTarget
     const attemptId = `${Date.now()}-${Math.random()}`
     toastLockRef.current = attemptId
     const notifyOnce = (message, tone) => {
@@ -421,10 +646,11 @@ const handleFolderSelection = useCallback((files) => {
       notify(message, tone)
     }
     if (!targetFile) {
-      notifyOnce('Selecione a pasta com a planilha Operacoes.', 'warning')
+      notifyOnce('Selecione um arquivo importado de Estruturadas.', 'warning')
       return
     }
-    const name = targetFile.name.toLowerCase()
+    const fileName = String(targetFile?.name || targetFile?.fileName || '')
+    const name = fileName.toLowerCase()
     if (!name.endsWith('.xlsx') && !name.endsWith('.xls')) {
       notifyOnce('Formato invalido. Use .xlsx.', 'warning')
       return
@@ -435,11 +661,20 @@ const handleFolderSelection = useCallback((files) => {
     const controller = new AbortController()
     abortRef.current = controller
     try {
+      let parserInput = targetFile
+      if (targetFile?.source === 'electron') {
+        parserInput = await readImportedFileAsArrayBuffer(targetFile)
+        if (!parserInput) {
+          notifyOnce('Nao foi possivel ler o arquivo importado.', 'warning')
+          return
+        }
+      }
+
       if (debugEnabled) {
-        console.info('[receita-estruturadas] sync:start', { name: targetFile.name, size: targetFile.size })
+        console.info('[receita-estruturadas] sync:start', { name: fileName || '-', size: targetFile?.size })
       }
       const tagIndex = await getTagIndex()
-      const result = await parseStructuredReceitasFile(targetFile, {
+      const result = await parseStructuredReceitasFile(parserInput, {
         signal: controller.signal,
         tagIndex,
         onProgress: ({ processed, rawRows, progress }) => {
@@ -485,8 +720,8 @@ const handleFolderSelection = useCallback((files) => {
         return
       }
       const nextEntries = Array.isArray(result.entries) ? result.entries : []
-      setEntries(nextEntries)
       saveStructuredRevenue(nextEntries)
+      setEntries(loadStructuredWithManual())
       const stats = result.summary || {}
       const finalStats = stats.stats || {}
       const monthFromStats = stats.months?.[stats.months.length - 1] || ''
@@ -554,7 +789,7 @@ const handleFolderSelection = useCallback((files) => {
       setSyncing(false)
       abortRef.current = null
     }
-  }, [dateFilterEnabled, debugEnabled, notify, resolvedPeriodKey, selectedFile, syncing])
+  }, [dateFilterEnabled, debugEnabled, notify, resolveGlobalTargetFile, resolvedPeriodKey, selectedFile, syncing])
 
   return (
     <div className="page">
@@ -574,7 +809,7 @@ const handleFolderSelection = useCallback((files) => {
 
       <SyncPanel
         label="Sincronizacao Estruturadas"
-        helper="Selecione a pasta com a planilha Operacoes para validar e consolidar."
+        helper="Use um arquivo ja importado no catalogo central."
         onSync={handleSync}
         onCancel={handleCancelSync}
         onReprocessRejected={handleReprocessRejected}
@@ -585,10 +820,17 @@ const handleFolderSelection = useCallback((files) => {
         result={syncResult}
         progress={syncProgress.progress}
         progressInfo={syncProgress.total ? { processed: syncProgress.processed, total: syncProgress.total } : null}
-        directory
-        selectedFile={selectedFile}
+        selectedFile={selectedFile || importBinding.selectedFile}
         onSelectedFileChange={setSelectedFile}
-        onFileSelected={handleFolderSelection}
+        linkedFileOptions={importBinding.options}
+        linkedFileValue={importBinding.value}
+        onLinkedFileChange={(value) => {
+          setSelectedFile(null)
+          importBinding.setValue(value)
+        }}
+        linkedFileLabel="Arquivo importado"
+        linkedFileEmptyMessage={importBinding.emptyMessage}
+        hideLocalPicker
       />
 
       <Modal
@@ -622,6 +864,39 @@ const handleFolderSelection = useCallback((files) => {
             <p className="muted">Resumo baseado no recorte filtrado da tabela.</p>
           </div>
         </div>
+        <div className="repasse-toolbar">
+          <label className="repasse-field">
+            <span>Mes do repasse</span>
+            <select
+              className="input"
+              value={repasseMonth}
+              onChange={(event) => setRepasseMonth(event.target.value)}
+              disabled={!repasseMonthOptions.length}
+            >
+              {!repasseMonthOptions.length ? <option value="">Sem meses</option> : null}
+              {repasseMonthOptions.map((monthKey) => (
+                <option key={monthKey} value={monthKey}>
+                  {buildMonthLabel(monthKey)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="repasse-field">
+            <span>Repasse</span>
+            <input
+              className="input"
+              type="text"
+              inputMode="decimal"
+              placeholder="0,800"
+              value={repasseInput}
+              onChange={(event) => setRepasseInput(event.target.value)}
+            />
+          </label>
+          <button className="btn btn-secondary" type="button" onClick={handleApplyRepasse}>
+            Aplicar repasse
+          </button>
+        </div>
+        <p className="repasse-help">Use decimal em proporcao: 0,800 = 80,0%.</p>
         <div className="kpi-grid">
           <div className="card kpi-card">
             <div className="kpi-label">CPFs unicos</div>
@@ -685,7 +960,7 @@ const handleFolderSelection = useCallback((files) => {
               <Icon name="search" size={16} />
               <input
                 type="search"
-                placeholder="Buscar cliente, ativo ou assessor"
+                placeholder="Buscar conta, ativo ou assessor"
                 value={filters.search}
                 onChange={(event) => setFilters((prev) => ({ ...prev, search: event.target.value }))}
               />
@@ -715,7 +990,7 @@ const handleFolderSelection = useCallback((files) => {
             value={filters.cliente}
             options={clienteOptions}
             onChange={(value) => setFilters((prev) => ({ ...prev, cliente: value }))}
-            placeholder="Codigo cliente"
+            placeholder="Conta"
           />
           <MultiSelect
             value={filters.assessor}

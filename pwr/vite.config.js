@@ -5,7 +5,11 @@ import react from '@vitejs/plugin-react'
 export default defineConfig(({ command }) => ({
   base: command === 'build' ? './' : '/',
   plugins: [react()],
+  worker: {
+    format: 'es',
+  },
   build: {
+    target: 'chrome120',        // Electron 33 = Chromium 130; avoid unnecessary polyfills
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -13,7 +17,11 @@ export default defineConfig(({ command }) => ({
 
           if (/[\\/]firebase[\\/]/.test(id)) return 'vendor-firebase'
           if (/[\\/]xlsx[\\/]/.test(id)) return 'vendor-xlsx'
-          if (/[\\/]jspdf[\\/]|[\\/]html-to-image[\\/]/.test(id)) return 'vendor-export'
+          if (/[\\/]jspdf[\\/]/.test(id)) return 'vendor-jspdf'
+          if (/[\\/]html-to-image[\\/]/.test(id)) return 'vendor-html2img'
+          if (/[\\/]html2canvas[\\/]/.test(id)) return 'vendor-html2canvas'
+          if (/[\\/]dompurify[\\/]/.test(id)) return 'vendor-dompurify'
+          if (/[\\/]pdfjs-dist[\\/]/.test(id)) return 'vendor-pdfjs'
           return undefined
         },
       },

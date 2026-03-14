@@ -1,19 +1,28 @@
+/* eslint-disable react-refresh/only-export-components */
 import {
   createContext,
+  startTransition,
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
 } from 'react'
 import { getCurrentUserKey } from '../services/currentUser'
-import { buildTagIndex, loadTags } from '../services/tags'
+import { buildTagIndex, loadAssessorOverrides, loadTags } from '../services/tags'
 import { debugLog } from '../services/debug'
 import { loadRevenueList, loadManualRevenue } from '../services/revenueStore'
 import { loadStructuredRevenue } from '../services/revenueStructured'
 import { collectMonthsFromEntries, formatMonthLabel } from '../services/apuracao'
 import { normalizeAssessorName } from '../utils/assessor'
+import {
+  buildEffectiveBmfEntries,
+  buildEffectiveBovespaEntries,
+  buildEffectiveStructuredEntries,
+  loadXpRevenue,
+} from '../services/revenueXpCommission'
 
 const STORAGE_PREFIX = 'pwr.filters.'
 const BROADCAST_KEY = 'pwr.filters.broadcast'
@@ -34,6 +43,31 @@ const normalizeList = (value) => {
   }
   const normalized = normalizeValue(value)
   return normalized ? [normalized] : []
+}
+
+const normalizeBrokerToken = (value) => {
+  const raw = normalizeValue(value)
+  if (!raw) return ''
+  const compact = raw
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, '')
+  if (!compact || compact === '-' || compact === '--') return '--'
+  if (compact === 'sembroker' || compact === 'semcorretora' || compact === 'cotizador') return '--'
+  return raw
+}
+
+const normalizeBrokerList = (value) => {
+  const seen = new Set()
+  const normalized = []
+  normalizeList(value).forEach((item) => {
+    const broker = normalizeBrokerToken(item)
+    if (!broker || seen.has(broker)) return
+    seen.add(broker)
+    normalized.push(broker)
+  })
+  return normalized
 }
 
 const normalizeAssessorList = (value) => normalizeList(value)
@@ -57,22 +91,69 @@ const parseStored = (raw) => {
   }
 }
 
+const readStoredFilters = (userKey) => {
+  if (!userKey || typeof window === 'undefined') return null
+  return parseStored(localStorage.getItem(buildKey(userKey)))
+}
+
+const collectApuracaoOptions = () => {
+  const structured = buildEffectiveStructuredEntries(loadStructuredRevenue())
+  const bovespa = buildEffectiveBovespaEntries(loadRevenueList('bovespa'))
+  const bmf = buildEffectiveBmfEntries(loadRevenueList('bmf'))
+  const manual = loadManualRevenue()
+  const xp = loadXpRevenue()
+  const months = new Set()
+  collectMonthsFromEntries(structured, (entry) => entry.dataEntrada).forEach((key) => months.add(key))
+  collectMonthsFromEntries(bovespa, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
+  collectMonthsFromEntries(bmf, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
+  collectMonthsFromEntries(manual, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
+  collectMonthsFromEntries(xp, (entry) => entry.data).forEach((key) => months.add(key))
+  const sorted = Array.from(months).sort()
+  return sorted.map((key) => ({ value: key, label: formatMonthLabel(key) }))
+}
+
 const GlobalFilterContext = createContext(null)
 
 export const GlobalFilterProvider = ({ children }) => {
   const [userKey] = useState(() => getCurrentUserKey())
-  const [selectedBroker, setSelectedBroker] = useState([])
-  const [selectedAssessor, setSelectedAssessor] = useState([])
-  const [clientCodeFilter, setClientCodeFilter] = useState([])
-  const [apuracaoMonths, setApuracaoMonths] = useState({ all: true, months: [] })
+  const initialStored = readStoredFilters(userKey)
+  const [selectedBroker, setSelectedBrokerState] = useState(() => normalizeBrokerList(initialStored?.broker))
+  const [selectedAssessor, setSelectedAssessor] = useState(() => normalizeAssessorList(initialStored?.assessor))
+  const [clientCodeFilter, setClientCodeFilter] = useState(() => normalizeList(initialStored?.clientCode))
+  const [apuracaoMonths, setApuracaoMonths] = useState(() => normalizeApuracao(initialStored?.apuracao))
   const [apuracaoOptions, setApuracaoOptions] = useState([])
   const [tagsPayload, setTagsPayload] = useState(null)
+  const [assessorOverrides, setAssessorOverrides] = useState({})
+  const senderId = useId()
   const channelRef = useRef(null)
-  const senderRef = useRef(Math.random().toString(36).slice(2))
-  const loadedRef = useRef(false)
+  const loadedRef = useRef(true)
   const applyingRemoteRef = useRef(false)
+  const filterPersistTimerRef = useRef(null)
 
-  const tagsIndex = useMemo(() => buildTagIndex(tagsPayload), [tagsPayload])
+  // Defer expensive apuracao computation to idle time after first paint
+  useEffect(() => {
+    let cancelled = false
+    const compute = () => {
+      if (cancelled) return
+      const result = collectApuracaoOptions()
+      if (!cancelled) {
+        startTransition(() => {
+          setApuracaoOptions(result)
+        })
+      }
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(compute, { timeout: 2000 })
+      return () => { cancelled = true; window.cancelIdleCallback(id) }
+    }
+    const id = setTimeout(compute, 60)
+    return () => { cancelled = true; clearTimeout(id) }
+  }, [])
+
+  const tagsIndex = useMemo(
+    () => buildTagIndex(tagsPayload, { assessorOverrides }),
+    [tagsPayload, assessorOverrides],
+  )
   const brokerOptions = useMemo(() => {
     const base = tagsIndex?.brokers || []
     return base.map((item) => ({ value: item, label: item }))
@@ -82,86 +163,95 @@ export const GlobalFilterProvider = ({ children }) => {
     return base.map((item) => ({ value: item, label: item }))
   }, [tagsIndex])
 
+  const setSelectedBroker = useCallback((valueOrUpdater) => {
+    setSelectedBrokerState((current) => {
+      const raw = typeof valueOrUpdater === 'function' ? valueOrUpdater(current) : valueOrUpdater
+      const normalized = normalizeBrokerList(raw)
+      if (
+        normalized.length === current.length
+        && normalized.every((item, index) => item === current[index])
+      ) {
+        return current
+      }
+      return normalized
+    })
+  }, [])
+
   const refreshApuracaoOptions = useCallback(() => {
-    const structured = loadStructuredRevenue()
-    const bovespa = loadRevenueList('bovespa')
-    const bmf = loadRevenueList('bmf')
-    const manual = loadManualRevenue()
-    const months = new Set()
-    collectMonthsFromEntries(structured, (entry) => entry.dataEntrada).forEach((key) => months.add(key))
-    collectMonthsFromEntries(bovespa, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
-    collectMonthsFromEntries(bmf, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
-    collectMonthsFromEntries(manual, (entry) => entry.data || entry.dataEntrada).forEach((key) => months.add(key))
-    const sorted = Array.from(months).sort()
-    setApuracaoOptions(sorted.map((key) => ({ value: key, label: formatMonthLabel(key) })))
+    startTransition(() => {
+      setApuracaoOptions(collectApuracaoOptions())
+    })
   }, [])
 
   const refreshTags = useCallback(async () => {
     if (!userKey) return
     const loaded = await loadTags(userKey)
+    const overrides = loadAssessorOverrides(userKey)
     setTagsPayload(loaded)
+    setAssessorOverrides(overrides)
   }, [userKey])
 
   useEffect(() => {
-    refreshTags()
-    refreshApuracaoOptions()
-  }, [refreshTags, refreshApuracaoOptions])
+    if (!userKey) return undefined
+    let cancelled = false
+    loadTags(userKey)
+      .then((loaded) => {
+        if (!cancelled) {
+          setTagsPayload(loaded)
+          setAssessorOverrides(loadAssessorOverrides(userKey))
+        }
+      })
+      .catch(() => {
+        // noop
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [userKey])
 
   const applyRemote = useCallback((payload) => {
     if (!payload) return
     applyingRemoteRef.current = true
-    setSelectedBroker(normalizeList(payload.broker))
+    setSelectedBroker(normalizeBrokerList(payload.broker))
     setSelectedAssessor(normalizeAssessorList(payload.assessor))
     setClientCodeFilter(normalizeList(payload.clientCode))
     setApuracaoMonths(normalizeApuracao(payload.apuracao))
     setTimeout(() => {
       applyingRemoteRef.current = false
     }, 0)
-  }, [])
-
-  useEffect(() => {
-    if (!userKey) return
-    const stored = parseStored(localStorage.getItem(buildKey(userKey)))
-    if (stored) {
-      setSelectedBroker(normalizeList(stored.broker))
-      setSelectedAssessor(normalizeAssessorList(stored.assessor))
-      setClientCodeFilter(normalizeList(stored.clientCode))
-      setApuracaoMonths(normalizeApuracao(stored.apuracao))
-    }
-    loadedRef.current = true
-  }, [userKey])
+  }, [setSelectedBroker])
 
   useEffect(() => {
     if (!userKey || !loadedRef.current || applyingRemoteRef.current) return
     const payload = {
       version: STORAGE_VERSION,
-      broker: normalizeList(selectedBroker),
+      broker: normalizeBrokerList(selectedBroker),
       assessor: normalizeAssessorList(selectedAssessor),
       clientCode: normalizeList(clientCodeFilter),
       apuracao: normalizeApuracao(apuracaoMonths),
       updatedAt: Date.now(),
     }
-    try {
-      localStorage.setItem(buildKey(userKey), JSON.stringify(payload))
-    } catch {
-      // noop
-    }
-    const broadcastPayload = {
-      ...payload,
-      userKey,
-      sender: senderRef.current,
-    }
-    if (channelRef.current) {
-      channelRef.current.postMessage(broadcastPayload)
-    } else {
+    if (filterPersistTimerRef.current) clearTimeout(filterPersistTimerRef.current)
+    filterPersistTimerRef.current = setTimeout(() => {
+      filterPersistTimerRef.current = null
       try {
-        localStorage.setItem(BROADCAST_KEY, JSON.stringify(broadcastPayload))
+        localStorage.setItem(buildKey(userKey), JSON.stringify(payload))
       } catch {
         // noop
       }
-    }
-    debugLog('filters.change', { broker: payload.broker, clientCode: payload.clientCode })
-  }, [selectedAssessor, selectedBroker, clientCodeFilter, apuracaoMonths, userKey])
+      const broadcastPayload = { ...payload, userKey, sender: senderId }
+      if (channelRef.current) {
+        channelRef.current.postMessage(broadcastPayload)
+      } else {
+        try {
+          localStorage.setItem(BROADCAST_KEY, JSON.stringify(broadcastPayload))
+        } catch {
+          // noop
+        }
+      }
+      debugLog('filters.change', { broker: payload.broker, clientCode: payload.clientCode })
+    }, 300)
+  }, [selectedAssessor, selectedBroker, clientCodeFilter, apuracaoMonths, senderId, userKey])
 
   useEffect(() => {
     if (!userKey) return
@@ -170,7 +260,7 @@ export const GlobalFilterProvider = ({ children }) => {
       channelRef.current = channel
       channel.onmessage = (event) => {
         const payload = event?.data
-        if (!payload || payload.sender === senderRef.current) return
+        if (!payload || payload.sender === senderId) return
         if (payload.userKey !== userKey) return
         applyRemote(payload)
       }
@@ -180,7 +270,7 @@ export const GlobalFilterProvider = ({ children }) => {
       if (!event?.key) return
       if (event.key === BROADCAST_KEY) {
         const payload = parseStored(event.newValue)
-        if (!payload || payload.sender === senderRef.current) return
+        if (!payload || payload.sender === senderId) return
         if (payload.userKey !== userKey) return
         applyRemote(payload)
         return
@@ -209,7 +299,7 @@ export const GlobalFilterProvider = ({ children }) => {
         channelRef.current = null
       }
     }
-  }, [applyRemote, refreshTags, userKey])
+  }, [applyRemote, refreshTags, senderId, userKey])
 
   useEffect(() => {
     const handleReceitaUpdate = () => refreshApuracaoOptions()
@@ -234,7 +324,7 @@ export const GlobalFilterProvider = ({ children }) => {
       tagsIndex,
       refreshTags,
     }),
-    [userKey, selectedBroker, selectedAssessor, clientCodeFilter, apuracaoMonths, apuracaoOptions, brokerOptions, assessorOptions, tagsIndex, refreshTags],
+    [userKey, selectedBroker, setSelectedBroker, selectedAssessor, clientCodeFilter, apuracaoMonths, apuracaoOptions, brokerOptions, assessorOptions, tagsIndex, refreshTags],
   )
 
   return (

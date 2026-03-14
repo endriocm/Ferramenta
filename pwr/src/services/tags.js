@@ -1,11 +1,13 @@
-import { debugLog } from './debug'
-import { loadXlsx } from './xlsxLoader'
-import { normalizeAssessorName } from '../utils/assessor'
+import { debugLog } from './debug.js'
+import { parseXlsxInWorker } from './xlsxWorkerClient.js'
+import { normalizeAssessorName } from '../utils/assessor.js'
+import { normalizeClientCode } from '../lib/tagResolver.js'
 
-const TAGS_VERSION = 2
+const TAGS_VERSION = 3
 const TAGS_DB_NAME = 'pwr-tags'
 const TAGS_STORE = 'tags'
 const TAGS_DB_VERSION = 1
+const ASSESSOR_OVERRIDE_PREFIX = 'pwr.tags.assessor-overrides.'
 const memoryCache = new Map()
 
 const normalizeKey = (value) => String(value || '')
@@ -31,6 +33,39 @@ const normalizeTeamLabel = (value) => {
   const raw = normalizeValue(value)
   if (!raw || raw === '0') return ''
   return raw.replace(/\s+/g, ' ')
+}
+
+const BROKER_UNKNOWN = '--'
+const INVALID_BROKER_KEYS = new Set([
+  '',
+  '-',
+  '--',
+  '0',
+  'sembroker',
+  'semcorretora',
+  'naoinformado',
+  'naoidentificado',
+  'naoaplicavel',
+  'cotizador',
+])
+
+const normalizeBrokerKey = (value) => normalizeKey(normalizeValue(value))
+
+export const normalizeBrokerLabel = (value, fallback = BROKER_UNKNOWN) => {
+  const raw = normalizeValue(value)
+  if (!raw || raw === '0') return fallback
+  const compact = normalizeBrokerKey(raw)
+  if (!compact || INVALID_BROKER_KEYS.has(compact)) return fallback
+  return raw.replace(/\s+/g, ' ')
+}
+
+const resolveBrokerFromCatalog = (value, brokerCatalog) => {
+  const normalized = normalizeBrokerLabel(value, BROKER_UNKNOWN)
+  if (normalized === BROKER_UNKNOWN) return BROKER_UNKNOWN
+  if (!(brokerCatalog instanceof Map) || !brokerCatalog.size) return normalized
+  const key = normalizeTagKey(normalized)
+  if (!key) return BROKER_UNKNOWN
+  return brokerCatalog.get(key) || BROKER_UNKNOWN
 }
 
 export const normalizeUnitLabel = (value) => {
@@ -99,6 +134,62 @@ const normalizeTagKey = (value) => {
   return normalizeKey(raw)
 }
 
+export const normalizeAssessorOverrideKey = (value) => {
+  const assessor = normalizeAssessorName(value, '')
+  if (!assessor) return ''
+  return normalizeKey(assessor)
+}
+
+const normalizeAssessorOverrideEntry = (value, keyHint = '') => {
+  const source = value && typeof value === 'object' ? value : {}
+  const assessor = normalizeAssessorName(source.assessor || keyHint, '')
+  if (!assessor) return null
+  const broker = normalizeBrokerLabel(source.broker, '')
+  const time = normalizeTeamLabel(source.time || source.team)
+  const unit = normalizeUnitLabel(source.unit || source.unidade)
+  return {
+    assessor,
+    broker,
+    time,
+    unit,
+  }
+}
+
+const normalizeAssessorOverrideMap = (value) => {
+  if (!value || typeof value !== 'object') return {}
+  const normalized = {}
+  Object.entries(value).forEach(([rawKey, rawValue]) => {
+    const entry = normalizeAssessorOverrideEntry(rawValue, rawKey)
+    if (!entry) return
+    const key = normalizeAssessorOverrideKey(entry.assessor || rawKey)
+    if (!key) return
+    if (!entry.broker && !entry.time && !entry.unit) return
+    normalized[key] = entry
+  })
+  return normalized
+}
+
+const buildAssessorOverrideStorageKey = (userKey) => `${ASSESSOR_OVERRIDE_PREFIX}${userKey || 'anon'}`
+
+const buildClientLookupKeys = (value) => {
+  const keys = []
+  const normalizedCode = normalizeClientCode(value)
+  if (normalizedCode) keys.push(normalizedCode)
+  const compact = normalizeTagKey(value)
+  if (compact && !keys.includes(compact)) keys.push(compact)
+  return keys
+}
+
+const resolveByLookupKeys = (map, keys) => {
+  if (!map || !Array.isArray(keys) || !keys.length) return null
+  for (const key of keys) {
+    if (!key) continue
+    const value = map.get(key)
+    if (value) return value
+  }
+  return null
+}
+
 const looksLikeCode = (value) => {
   const raw = normalizeValue(value)
   if (!raw) return false
@@ -108,15 +199,14 @@ const looksLikeCode = (value) => {
 const normalizeTagRow = (row, index = 0) => {
   if (!row || typeof row !== 'object') return null
   const cliente = normalizeValue(row.cliente)
-  const nomeCliente = normalizeValue(row.nomeCliente)
-  const key = normalizeTagKey(row.id || cliente || nomeCliente || `row-${index}`)
+  if (!cliente) return null
+  const key = normalizeTagKey(row.id || cliente || `row-${index}`)
   if (!key) return null
   return {
     id: key,
     cliente,
     assessor: normalizeAssessorName(normalizeLabel(row.assessor, 'Sem assessor'), 'Sem assessor'),
-    broker: normalizeLabel(row.broker, 'Sem broker'),
-    nomeCliente,
+    broker: normalizeBrokerLabel(row.broker, BROKER_UNKNOWN),
     time: normalizeTeamLabel(row.time),
     unit: normalizeUnitLabel(row.unit || row.unidade),
     seniority: normalizeSeniorityLabel(row.seniority || row.senioridade),
@@ -221,13 +311,10 @@ const deletePayload = async (userKey) => {
 export const parseTagsXlsx = async (input) => {
   const buffer = await toArrayBuffer(input)
   if (!buffer) throw new Error('buffer-invalid')
-  const XLSX = await loadXlsx()
-  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true })
-  const sheetName = workbook.SheetNames?.find((name) => normalizeKey(name) === 'planilha1') || workbook.SheetNames?.[0]
+  const { sheetNames, sheets } = await parseXlsxInWorker(buffer)
+  const sheetName = sheetNames?.find((name) => normalizeKey(name) === 'planilha1') || sheetNames?.[0]
   if (!sheetName) throw new Error('sheet-missing')
-  const sheet = workbook.Sheets[sheetName]
-  const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
-  const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+  const { rows, rawRows } = sheets[sheetName]
   const rowOffset = rawRows.length > rows.length ? 1 : 0
 
   const parsedRows = []
@@ -246,7 +333,7 @@ export const parseTagsXlsx = async (input) => {
       normalizeLabel(getValue(normalizedRow, ASSESSOR_KEYS, fallbackRow[1]), 'Sem assessor'),
       'Sem assessor',
     )
-    const broker = normalizeLabel(getValue(normalizedRow, BROKER_KEYS, fallbackRow[2]), 'Sem broker')
+    const broker = normalizeBrokerLabel(getValue(normalizedRow, BROKER_KEYS, fallbackRow[2]), BROKER_UNKNOWN)
     const nomeCliente = normalizeValue(getValue(normalizedRow, NOME_CLIENTE_KEYS, fallbackRow[3]))
     const time = normalizeTeamLabel(getValue(normalizedRow, TIME_KEYS, fallbackRow[4]))
     const unitFallback = fallbackRow.length > 6 ? fallbackRow[5] : null
@@ -255,12 +342,12 @@ export const parseTagsXlsx = async (input) => {
     const seniority = normalizeSeniorityLabel(getValue(normalizedRow, SENIORITY_KEYS, seniorityFallback))
 
     if (isHeaderRow(cliente, assessor, broker, nomeCliente)) return
-    if (!cliente && !nomeCliente) {
+    if (!cliente) {
       stats.rejeitados += 1
       return
     }
 
-    const key = normalizeTagKey(cliente || nomeCliente)
+    const key = normalizeTagKey(cliente)
     if (!key) {
       stats.rejeitados += 1
       return
@@ -270,14 +357,13 @@ export const parseTagsXlsx = async (input) => {
       return
     }
     seen.add(key)
-    if (assessor === 'Sem assessor' || broker === 'Sem broker') stats.avisos += 1
+    if (assessor === 'Sem assessor' || broker === BROKER_UNKNOWN) stats.avisos += 1
 
     parsedRows.push({
       id: key,
       cliente: cliente || '',
       assessor,
       broker,
-      nomeCliente: nomeCliente || '',
       time,
       unit,
       seniority,
@@ -324,33 +410,95 @@ export const clearTags = async (userKey) => {
   await deletePayload(userKey)
 }
 
-export const buildTagIndex = (payload) => {
+export const loadAssessorOverrides = (userKey) => {
+  if (!userKey || typeof window === 'undefined') return {}
+  const key = buildAssessorOverrideStorageKey(userKey)
+  const raw = window.localStorage.getItem(key)
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return normalizeAssessorOverrideMap(parsed)
+  } catch {
+    return {}
+  }
+}
+
+export const saveAssessorOverrides = (userKey, overrides) => {
+  if (!userKey || typeof window === 'undefined') return null
+  const key = buildAssessorOverrideStorageKey(userKey)
+  const normalized = normalizeAssessorOverrideMap(overrides)
+  try {
+    window.localStorage.setItem(key, JSON.stringify(normalized))
+    return normalized
+  } catch {
+    return null
+  }
+}
+
+export const buildTagIndex = (payload, options = {}) => {
   const rows = Array.isArray(payload?.rows) ? payload.rows : []
+  const assessorOverrides = normalizeAssessorOverrideMap(options?.assessorOverrides)
+  const assessorOverrideMap = new Map(Object.entries(assessorOverrides))
+  const brokerCatalog = new Map()
+  rows.forEach((row) => {
+    const broker = normalizeBrokerLabel(row?.broker, BROKER_UNKNOWN)
+    if (broker === BROKER_UNKNOWN) return
+    const key = normalizeTagKey(broker)
+    if (key && !brokerCatalog.has(key)) brokerCatalog.set(key, broker)
+  })
+  const effectiveRows = []
   const byCliente = new Map()
-  const byNome = new Map()
-  const brokers = new Set()
+  const byAssessor = new Map()
+  const brokers = new Set(Array.from(brokerCatalog.values()))
   const assessors = new Set()
   const teams = new Set()
   const units = new Set()
   const seniorities = new Set()
+  let hasUnknownBroker = false
 
   rows.forEach((row) => {
-    if (row?.broker) brokers.add(row.broker)
-    if (row?.assessor) assessors.add(row.assessor)
-    if (row?.time) teams.add(row.time)
-    if (row?.unit) units.add(row.unit)
-    if (row?.seniority) seniorities.add(row.seniority)
-    const clienteKey = normalizeTagKey(row?.cliente)
-    if (clienteKey && !byCliente.has(clienteKey)) byCliente.set(clienteKey, row)
-    const nomeKey = normalizeTagKey(row?.nomeCliente)
-    if (nomeKey && !byNome.has(nomeKey)) byNome.set(nomeKey, row)
+    const assessorKey = normalizeAssessorOverrideKey(row?.assessor)
+    const override = assessorKey ? assessorOverrideMap.get(assessorKey) : null
+    const effectiveRow = {
+      ...(row || {}),
+      assessor: override?.assessor || row?.assessor,
+      broker: resolveBrokerFromCatalog(override?.broker || row?.broker, brokerCatalog),
+      time: override?.time || row?.time,
+      unit: override?.unit || row?.unit,
+    }
+    effectiveRows.push(effectiveRow)
+
+    if (effectiveRow?.broker === BROKER_UNKNOWN) hasUnknownBroker = true
+    if (effectiveRow?.assessor) assessors.add(effectiveRow.assessor)
+    if (effectiveRow?.time) teams.add(effectiveRow.time)
+    if (effectiveRow?.unit) units.add(effectiveRow.unit)
+    if (effectiveRow?.seniority) seniorities.add(effectiveRow.seniority)
+    const assessorLookupKey = normalizeAssessorOverrideKey(effectiveRow?.assessor)
+    if (assessorLookupKey && !byAssessor.has(assessorLookupKey)) {
+      byAssessor.set(assessorLookupKey, effectiveRow)
+    }
+    const clienteKeys = buildClientLookupKeys(effectiveRow?.cliente)
+    clienteKeys.forEach((key) => {
+      if (key && !byCliente.has(key)) byCliente.set(key, effectiveRow)
+    })
   })
 
+  Object.values(assessorOverrides).forEach((entry) => {
+    if (entry?.assessor) assessors.add(entry.assessor)
+    if (entry?.time) teams.add(entry.time)
+    if (entry?.unit) units.add(entry.unit)
+  })
+
+  const brokerOptions = Array.from(brokers).sort((a, b) => a.localeCompare(b, 'pt-BR'))
+  if (hasUnknownBroker && !brokerOptions.includes(BROKER_UNKNOWN)) brokerOptions.push(BROKER_UNKNOWN)
+
   return {
-    rows,
+    rows: effectiveRows,
     byCliente,
-    byNome,
-    brokers: Array.from(brokers).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+    byAssessor,
+    assessorOverrides,
+    brokerCatalog,
+    brokers: brokerOptions,
     assessors: Array.from(assessors).sort((a, b) => a.localeCompare(b, 'pt-BR')),
     teams: Array.from(teams).sort((a, b) => a.localeCompare(b, 'pt-BR')),
     units: Array.from(units).sort((a, b) => a.localeCompare(b, 'pt-BR')),
@@ -358,36 +506,79 @@ export const buildTagIndex = (payload) => {
   }
 }
 
+const applyAssessorOverride = (row, assessorOverrides) => {
+  if (!row || !assessorOverrides || typeof assessorOverrides !== 'object') return row
+  const assessorKey = normalizeAssessorOverrideKey(row?.assessor)
+  if (!assessorKey) return row
+  const override = assessorOverrides[assessorKey]
+  if (!override) return row
+  const next = { ...row }
+  if (override.assessor) next.assessor = override.assessor
+  if (override.broker) next.broker = normalizeBrokerLabel(override.broker, BROKER_UNKNOWN)
+  if (override.time) next.time = override.time
+  if (override.unit) {
+    next.unit = override.unit
+    next.unidade = override.unit
+  }
+  return next
+}
+
 export const enrichRow = (row, tagIndex) => {
   if (!row) return row
 
   const baseAssessor = normalizeAssessorName(row.assessor)
+  const baseBroker = normalizeBrokerLabel(row.broker, BROKER_UNKNOWN)
   const baseRow = baseAssessor && baseAssessor !== String(row.assessor || '').trim()
-    ? { ...row, assessor: baseAssessor }
-    : row
+    ? { ...row, assessor: baseAssessor, broker: baseBroker }
+    : { ...row, broker: baseBroker }
 
-  if (!tagIndex) return baseRow
+  const resolveFinalBroker = (value) => {
+    const catalog = tagIndex?.brokerCatalog
+    if (catalog instanceof Map && catalog.size) return resolveBrokerFromCatalog(value, catalog)
+    return normalizeBrokerLabel(value, BROKER_UNKNOWN)
+  }
+
+  if (!tagIndex) {
+    return {
+      ...baseRow,
+      broker: resolveFinalBroker(baseRow.broker),
+    }
+  }
 
   const rawCode = baseRow.codigoCliente || baseRow.clienteCodigo || baseRow.codCliente || baseRow.cliente
-  const codeKey = normalizeTagKey(rawCode)
-  const nameKey = normalizeTagKey(baseRow.nomeCliente || baseRow.cliente)
-  const tag = (codeKey && tagIndex.byCliente?.get(codeKey)) || (nameKey && tagIndex.byNome?.get(nameKey))
-  if (!tag) return baseRow
+  const codeKeys = buildClientLookupKeys(rawCode)
+  const directTag = resolveByLookupKeys(tagIndex.byCliente, codeKeys)
+  const assessorLookupKey = normalizeAssessorOverrideKey(baseRow.assessor)
+  const assessorTag = assessorLookupKey ? tagIndex.byAssessor?.get(assessorLookupKey) : null
+  const matchedByAssessor = !directTag && Boolean(assessorTag)
+  const tag = directTag || assessorTag
+  if (!tag) {
+    const overridden = applyAssessorOverride(baseRow, tagIndex.assessorOverrides)
+    return {
+      ...overridden,
+      broker: resolveFinalBroker(overridden?.broker),
+    }
+  }
 
   const next = { ...baseRow }
   if (tag.assessor) next.assessor = normalizeAssessorName(tag.assessor, 'Sem assessor')
-  if (tag.broker) next.broker = tag.broker
-  if (tag.time) next.time = tag.time
-  if (tag.unit) next.unit = tag.unit
-  if (tag.seniority) next.seniority = tag.seniority
-  if (tag.nomeCliente) next.nomeCliente = tag.nomeCliente
-  if (tag.cliente && !next.codigoCliente) next.codigoCliente = tag.cliente
+  if (tag.broker && (!matchedByAssessor || !next.broker)) next.broker = tag.broker
+  if (tag.time && (!matchedByAssessor || !next.time)) next.time = tag.time
+  if (tag.unit && (!matchedByAssessor || !next.unit)) next.unit = tag.unit
+  if (tag.seniority && (!matchedByAssessor || !next.seniority)) next.seniority = tag.seniority
 
-  if (!next.cliente || looksLikeCode(next.cliente)) {
-    next.cliente = tag.nomeCliente || tag.cliente || next.cliente
+  if (!matchedByAssessor) {
+    if (tag.cliente && !next.codigoCliente) next.codigoCliente = tag.cliente
+    if (!next.cliente || looksLikeCode(next.cliente)) {
+      next.cliente = tag.cliente || next.cliente
+    }
   }
 
-  return next
+  const overridden = applyAssessorOverride(next, tagIndex.assessorOverrides)
+  return {
+    ...overridden,
+    broker: resolveFinalBroker(overridden?.broker),
+  }
 }
 
 export const normalizeTagLookup = (value) => normalizeTagKey(value)

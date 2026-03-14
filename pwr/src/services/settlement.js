@@ -1,4 +1,5 @@
 import { normalizeDateKey } from '../utils/dateKey.js'
+import { toNumber } from '../utils/number.js'
 
 const parsePercent = (value) => {
   if (value == null) return 0
@@ -7,27 +8,6 @@ const parsePercent = (value) => {
   const parsed = Number(cleaned)
   if (Number.isNaN(parsed)) return 0
   return parsed / 100
-}
-
-const toNumber = (value) => {
-  if (value == null || value === '') return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const raw = String(value).trim()
-  if (!raw) return null
-  let cleaned = raw.replace(/[^\d,.-]/g, '')
-  const hasComma = cleaned.includes(',')
-  const hasDot = cleaned.includes('.')
-  if (hasComma && hasDot) {
-    if (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')) {
-      cleaned = cleaned.replace(/\./g, '').replace(/,/g, '.')
-    } else {
-      cleaned = cleaned.replace(/,/g, '')
-    }
-  } else if (hasComma) {
-    cleaned = cleaned.replace(/,/g, '.')
-  }
-  const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
 }
 
 const normalizeDateOverride = (value) => {
@@ -82,6 +62,10 @@ const resolveBarrierDirection = (type, barrierValue, spotInicial) => {
   const upper = (type || '').toUpperCase()
   if (upper.includes('UP')) return 'high'
   if (upper.includes('DOWN')) return 'low'
+  if (upper.includes('ALTA')) return 'high'
+  if (upper.includes('BAIXA')) return 'low'
+  const compact = upper.replace(/[^A-Z]/g, '')
+  if (compact === 'DI' || compact === 'DO') return 'low'
 
   if (barrierValue != null && spotInicial != null) {
     return Number(barrierValue) >= Number(spotInicial) ? 'high' : 'low'
@@ -95,6 +79,148 @@ const resolveBarrierMode = (type) => {
   if (normalized === 'UO' || normalized === 'KO') return 'out'
   if (normalized === 'UI' || normalized === 'KI') return 'in'
   return 'none'
+}
+
+const readContractedQty = (leg) => (
+  toNumber(leg?.quantidadeContratada ?? leg?.quantidadeBoleta)
+)
+
+const readActiveQty = (leg) => (
+  toNumber(leg?.quantidadeAtiva)
+)
+
+const normalizePositiveQuantity = (value) => {
+  const parsed = toNumber(value)
+  if (parsed == null) return null
+  const abs = Math.abs(parsed)
+  return abs > 0 ? abs : null
+}
+
+const inferQuantityFromLegs = (operation, readers = []) => {
+  const legs = Array.isArray(operation?.pernas) ? operation.pernas : []
+  const quantities = []
+  legs.forEach((leg) => {
+    readers.forEach((reader) => {
+      const qty = normalizePositiveQuantity(reader(leg))
+      if (qty != null) quantities.push(qty)
+    })
+  })
+  return quantities.length ? Math.max(...quantities) : null
+}
+
+const inferPreferredOptionQuantity = (operation, readers = []) => {
+  const legs = Array.isArray(operation?.pernas) ? operation.pernas : []
+  const optionTypesByPriority = ['PUT', 'CALL']
+
+  for (const optionType of optionTypesByPriority) {
+    const quantities = legs
+      .filter((leg) => String(leg?.tipo || '').toUpperCase() === optionType)
+      .map((leg) => {
+        for (const reader of readers) {
+          const qty = normalizePositiveQuantity(reader(leg))
+          if (qty != null) return qty
+        }
+        return null
+      })
+      .filter((qty) => qty != null)
+    if (quantities.length) return Math.max(...quantities)
+  }
+
+  return null
+}
+
+const inferTrackedQuantity = (operation) => {
+  // Para estruturas call/put puras não há perna stock — ignora stock e usa apenas opções
+  if (!isCallPutStructure(operation?.estrutura)) {
+    const stockQty = inferQuantityFromLegs(operation, [
+      (leg) => String(leg?.tipo || '').toUpperCase() === 'STOCK' ? readActiveQty(leg) : null,
+    ])
+    if (stockQty != null) return stockQty
+  }
+
+  return inferPreferredOptionQuantity(operation, [
+    (leg) => readActiveQty(leg),
+  ])
+}
+
+const resolveTrackedLegs = (operation) => {
+  const legs = Array.isArray(operation?.pernas) ? operation.pernas : []
+  // Para call/put/call spread/put spread, apenas pernas de opção são relevantes para rastreio
+  if (isCallPutStructure(operation?.estrutura)) {
+    return legs.filter((leg) => ['CALL', 'PUT'].includes(String(leg?.tipo || '').toUpperCase()))
+  }
+  return legs
+}
+
+export const inferOperationQuantityBase = (operation) => {
+  const trackedQty = inferTrackedQuantity(operation)
+  if (trackedQty != null) return trackedQty
+
+  const trackedLegs = resolveTrackedLegs(operation)
+  const hasTrackedActiveState = trackedLegs.some((leg) => (
+    leg?.quantidadeAtiva != null
+    || leg?.quantidadeContratada != null
+    || leg?.quantidadeBoleta != null
+  ))
+  if (hasTrackedActiveState) return 0
+
+  return inferPreferredOptionQuantity(operation, [
+    (leg) => leg?.quantidadeEfetiva,
+    (leg) => leg?.quantidade,
+    (leg) => readContractedQty(leg),
+  ])
+}
+
+export const inferOperationQuantityAtual = (operation) => {
+  const inferredFromTracked = inferTrackedQuantity(operation)
+  if (inferredFromTracked != null) return inferredFromTracked
+
+  const trackedLegs = resolveTrackedLegs(operation)
+  const hasTrackedActiveState = trackedLegs.some((leg) => (
+    leg?.quantidadeAtiva != null
+    || leg?.quantidadeContratada != null
+    || leg?.quantidadeBoleta != null
+  ))
+  if (hasTrackedActiveState) return 0
+
+  return inferPreferredOptionQuantity(operation, [
+    (leg) => leg?.quantidadeEfetiva,
+    (leg) => leg?.quantidade,
+  ])
+}
+
+const resolveQuantitySignalByDirection = ({ legs = [], spotInicial = null, hasHighBarrier = false, hasLowBarrier = false } = {}) => {
+  const result = { high: false, low: false, unknown: false }
+
+  ;(Array.isArray(legs) ? legs : []).forEach((leg) => {
+    const contracted = readContractedQty(leg)
+    if (contracted == null || contracted === 0) return
+
+    const active = readActiveQty(leg)
+    const activeIsMissingOrZero = active == null || active === 0
+    if (!activeIsMissingOrZero) return
+
+    const direction = resolveBarrierDirection(leg?.barreiraTipo, leg?.barreiraValor, spotInicial)
+    if (direction === 'high') {
+      result.high = true
+      return
+    }
+    if (direction === 'low') {
+      result.low = true
+      return
+    }
+    result.unknown = true
+  })
+
+  if (result.unknown) {
+    if (hasHighBarrier && !hasLowBarrier && !result.high) result.high = true
+    if (hasLowBarrier && !hasHighBarrier && !result.low) result.low = true
+  }
+
+  return {
+    high: result.high,
+    low: result.low,
+  }
 }
 
 const hasStrikeField = (leg) => {
@@ -364,7 +490,7 @@ export const applyOverridesToOperation = (operation, override = {}) => {
 export const computeBarrierStatus = (operation, market, override) => {
   const legs = operation?.pernas || []
   const barriers = legs
-    .filter((leg) => leg?.barreiraValor != null)
+    .filter((leg) => leg?.barreiraValor != null && Number(leg.barreiraValor) > 0)
     .map((leg) => ({
       ...leg,
       direction: resolveBarrierDirection(leg.barreiraTipo, leg.barreiraValor, operation.spotInicial),
@@ -379,16 +505,40 @@ export const computeBarrierStatus = (operation, market, override) => {
     }
   }
 
-  const highBarriers = barriers.filter((item) => item.direction === 'high')
-  const lowBarriers = barriers.filter((item) => item.direction === 'low')
-  const marketHigh = toNumber(market?.high ?? market?.close ?? operation?.spotInicial)
-  const marketLow = toNumber(market?.low ?? market?.close ?? operation?.spotInicial)
+  const highBarriers = barriers.filter((item) => item.direction === 'high' && Number(item.barreiraValor) > 0)
+  const lowBarriers = barriers.filter((item) => item.direction === 'low' && Number(item.barreiraValor) > 0)
+  const marketHighRaw = toNumber(market?.high ?? market?.close ?? operation?.spotInicial)
+  const marketLowRaw = toNumber(market?.low ?? market?.close ?? operation?.spotInicial)
+  const marketHigh = marketHighRaw != null && marketHighRaw > 0 ? marketHighRaw : null
+  const marketLow = marketLowRaw != null && marketLowRaw > 0 ? marketLowRaw : null
+  const stickyHigh = override?.stickyHighHit === true
+  const stickyLow = override?.stickyLowHit === true
+  const quantitySignal = resolveQuantitySignalByDirection({
+    legs,
+    spotInicial: operation?.spotInicial,
+    hasHighBarrier: highBarriers.length > 0,
+    hasLowBarrier: lowBarriers.length > 0,
+  })
 
-  const autoHigh = highBarriers.length && marketHigh != null
+  const autoHighFromMarket = highBarriers.length && marketHigh != null
     ? highBarriers.some((item) => Number(marketHigh) >= Number(item.barreiraValor))
     : null
-  const autoLow = lowBarriers.length && marketLow != null
+  const autoLowFromMarket = lowBarriers.length && marketLow != null
     ? lowBarriers.some((item) => Number(marketLow) <= Number(item.barreiraValor))
+    : null
+
+  const autoHighBase = highBarriers.length
+    ? (autoHighFromMarket === true || quantitySignal.high === true ? true : autoHighFromMarket)
+    : null
+  const autoLowBase = lowBarriers.length
+    ? (autoLowFromMarket === true || quantitySignal.low === true ? true : autoLowFromMarket)
+    : null
+
+  const autoHigh = highBarriers.length
+    ? (autoHighBase === true || stickyHigh ? true : autoHighBase)
+    : null
+  const autoLow = lowBarriers.length
+    ? (autoLowBase === true || stickyLow ? true : autoLowBase)
     : null
 
   const highOverride = override?.high && override.high !== 'auto' ? override.high === 'hit' : null
@@ -398,14 +548,18 @@ export const computeBarrierStatus = (operation, market, override) => {
   const low = lowOverride != null ? lowOverride : autoLow
 
   const source = {
-    high: highOverride != null ? 'manual' : 'auto',
-    low: lowOverride != null ? 'manual' : 'auto',
+    high: highOverride != null ? 'manual' : (stickyHigh && autoHighBase !== true ? 'sticky' : 'auto'),
+    low: lowOverride != null ? 'manual' : (stickyLow && autoLowBase !== true ? 'sticky' : 'auto'),
   }
 
   return {
     high,
     low,
     source,
+    sticky: {
+      high: stickyHigh,
+      low: stickyLow,
+    },
     list: barriers,
   }
 }
@@ -456,6 +610,11 @@ const isCallPutStructure = (estrutura) => {
   return normalized.includes('call') || normalized.includes('put')
 }
 
+const isSpreadStructure = (estrutura) => {
+  const normalized = normalizeEstrutura(estrutura)
+  return normalized === 'call spread' || normalized === 'put spread'
+}
+
 const getFirstNumber = (obj, keys) => {
   for (const key of keys) {
     const value = toNumber(obj?.[key])
@@ -481,8 +640,46 @@ const getOptionQty = (operation, legs) => {
   return null
 }
 
+const resolveOptionEntryQuantity = (operation, legs) => {
+  const explicitOptionQty = getFirstNumber(operation, [
+    'qtdAtivaOpcao',
+    'quantidadeAtivaOpcao',
+    'quantidadeOpcao',
+    'qtdOpcao',
+    'qtdOpcoes',
+  ])
+  const normalizedExplicitQty = normalizePositiveQuantity(explicitOptionQty)
+  if (normalizedExplicitQty != null) return normalizedExplicitQty
+
+  const optionLegs = (Array.isArray(legs) && legs.length ? legs : operation?.pernas || [])
+    .filter((leg) => ['CALL', 'PUT'].includes(String(leg?.tipo || '').toUpperCase()))
+
+  const optionOperation = { ...operation, pernas: optionLegs }
+
+  const activeQty = inferPreferredOptionQuantity(optionOperation, [
+    (leg) => readActiveQty(leg),
+  ])
+  if (activeQty != null) return activeQty
+
+  const derivedLegQty = inferPreferredOptionQuantity(optionOperation, [
+    (leg) => leg?.quantidadeEfetiva,
+    (leg) => leg?.quantidade,
+    (leg) => readContractedQty(leg),
+  ])
+  if (derivedLegQty != null) return derivedLegQty
+
+  const genericQty = optionLegs.length
+    ? getFirstNumber(operation, ['qtyAtual', 'quantidadeAtual'])
+    : null
+  const normalizedGenericQty = normalizePositiveQuantity(genericQty)
+  if (normalizedGenericQty != null) return normalizedGenericQty
+
+  return null
+}
+
 const resolveUnitCost = (operation) => {
   const direct = getFirstNumber(operation, [
+    'custoUnitarioCliente',
     'custoUnitarioOpcao',
     'custoOpcao',
     'premioOpcao',
@@ -490,6 +687,7 @@ const resolveUnitCost = (operation) => {
   if (direct != null) return direct
   return null
 }
+
 
 const resolvePutUnitCost = (operation) => {
   return getFirstNumber(operation, [
@@ -505,6 +703,7 @@ const resolveStockValue = (operation) => {
 
 const computeValorEntrada = (operation, legs, fallbackValue) => {
   const estrutura = operation?.estrutura
+
   if (isAlocacaoProtegida(estrutura)) {
     const stockQty = getFirstNumber(operation, [
       'qtdAtivaEstoque',
@@ -548,27 +747,21 @@ const computeValorEntrada = (operation, legs, fallbackValue) => {
   }
 
   if (isCallPutStructure(estrutura)) {
-    const optionQty = getOptionQty(operation, legs)
-    const optionUnitCost = resolveUnitCost(operation)
+    const optionQty = resolveOptionEntryQuantity(operation, legs)
+    const optionUnitCost = Math.abs(Number(resolveUnitCost(operation) || 0))
     const missing = [optionQty, optionUnitCost]
       .some((value) => value == null || Number.isNaN(Number(value)) || Number(value) === 0)
     if (missing) {
       return {
         value: null,
         incomplete: true,
-        components: {
-          optionQty,
-          optionUnitCost,
-        },
+        components: { optionQty, optionUnitCost },
       }
     }
     return {
-      value: Number(optionQty) * Number(optionUnitCost),
+      value: Math.abs(Number(optionQty)) * optionUnitCost,
       incomplete: false,
-      components: {
-        optionQty,
-        optionUnitCost,
-      },
+      components: { optionQty, optionUnitCost },
     }
   }
 
@@ -626,11 +819,29 @@ const isKoHit = (legs, barrierStatus, spotInicial) => {
   })
 }
 
-const resolveDebitQuantity = (leg, fallback) => {
-  const baseQty = Math.abs(Number(fallback || 0))
-  if (baseQty) return baseQty
+const isPopStructure = (estrutura) => normalizeEstrutura(estrutura) === 'pop'
+
+const hasExplicitLegQuantity = (leg) => (
+  leg?.quantidadeOriginal != null
+  || leg?.quantidadeAtiva != null
+  || leg?.quantidadeContratada != null
+  || leg?.quantidadeBoleta != null
+)
+
+const resolveDebitQuantity = (leg, fallback, operation) => {
+  const tipo = String(leg?.tipo || '').toUpperCase()
+  const popShortCall = isPopStructure(operation?.estrutura) && tipo === 'CALL' && isShortLeg(leg)
   const legQty = Math.abs(resolveLegQuantity(leg, 0))
-  return legQty || 0
+  const baseQty = Math.abs(Number(fallback || 0))
+  if (legQty) {
+    if (popShortCall && baseQty && legQty === baseQty && !hasExplicitLegQuantity(leg)) {
+      return baseQty / 2
+    }
+    return legQty
+  }
+  if (popShortCall && baseQty) return baseQty / 2
+  if (baseQty) return baseQty
+  return 0
 }
 
 const isCupomRecorrente = (estrutura) => {
@@ -638,17 +849,69 @@ const isCupomRecorrente = (estrutura) => {
   return normalized === 'cupom recorrente' || normalized === 'cupom recorrente europeia'
 }
 
+const shouldInferSettlementQuantity = (operation) => (
+  isCupomRecorrente(operation?.estrutura) || isCallPutStructure(operation?.estrutura)
+)
+
+const isFinanciamento = (estrutura) => {
+  const normalized = normalizeEstrutura(estrutura)
+  return normalized === 'financiamento' || normalized === 'financiamento sob custodia'
+}
+
+export const resolveOperationQuantities = (operation, qtyBonusOverride = null, qtyBaseOverride = null) => {
+  const explicitQtyBase = normalizePositiveQuantity(operation?.qtyBase ?? operation?.quantidade)
+  const explicitQtyAtual = normalizePositiveQuantity(operation?.qtyAtual ?? operation?.quantidadeAtual)
+  const inferredQtyBase = inferOperationQuantityBase(operation)
+  const inferredQtyAtual = inferOperationQuantityAtual(operation)
+  const normalizedBonusOverride = normalizePositiveQuantity(qtyBonusOverride)
+  const hasBonusOverride = normalizedBonusOverride != null
+  const normalizedQtyBaseOverride = normalizePositiveQuantity(qtyBaseOverride)
+  const hasQtyBaseOverride = normalizedQtyBaseOverride != null
+
+  const displayQtyBase = hasQtyBaseOverride
+    ? normalizedQtyBaseOverride
+    : (explicitQtyBase ?? inferredQtyBase ?? 0)
+  const displayQtyAtualBase = explicitQtyAtual ?? inferredQtyAtual
+  const displayQtyBonusBase = explicitQtyAtual != null
+    ? Math.max(0, explicitQtyAtual - displayQtyBase)
+    : 0
+  const displayQtyBonus = hasBonusOverride ? normalizedBonusOverride : displayQtyBonusBase
+  const displayQtyAtual = hasBonusOverride
+    ? Math.max(0, displayQtyBase + displayQtyBonus)
+    : (hasQtyBaseOverride ? Math.max(0, displayQtyBase + displayQtyBonus) : (displayQtyAtualBase ?? Math.max(0, displayQtyBase + displayQtyBonus)))
+
+  const settlementUsesInference = shouldInferSettlementQuantity(operation)
+  const settlementQtyBase = hasQtyBaseOverride
+    ? normalizedQtyBaseOverride
+    : (explicitQtyBase ?? (settlementUsesInference ? inferredQtyBase : null) ?? 0)
+  const settlementQtyAtualBase = explicitQtyAtual
+    ?? (settlementUsesInference ? inferredQtyAtual : null)
+  const settlementQtyBonusBase = explicitQtyAtual != null
+    ? Math.max(0, explicitQtyAtual - settlementQtyBase)
+    : 0
+  const settlementQtyBonus = hasBonusOverride ? normalizedBonusOverride : settlementQtyBonusBase
+  const settlementQtyAtual = hasBonusOverride
+    ? Math.max(0, settlementQtyBase + settlementQtyBonus)
+    : (hasQtyBaseOverride ? Math.max(0, settlementQtyBase + settlementQtyBonus) : (settlementQtyAtualBase ?? Math.max(0, settlementQtyBase + settlementQtyBonus)))
+
+  return {
+    displayQtyBase,
+    displayQtyAtual,
+    displayQtyBonus,
+    settlementQtyBase,
+    settlementQtyAtual,
+    settlementQtyBonus,
+  }
+}
+
 export const computeResult = (operation, market, barrierStatus, override = {}) => {
-  const qtyBaseRaw = operation.qtyBase ?? operation.quantidade ?? 0
-  const qtyBonusRaw = operation.qtyBonus ?? 0
-  const qtyBase = Math.max(0, Number(qtyBaseRaw || 0))
-  const qtyBonus = Math.max(0, Number(qtyBonusRaw || 0))
-  const qtyAtualOverride = toNumber(operation.qtyAtual ?? operation.quantidadeAtual)
-  const hasQtyAtualOverride = qtyAtualOverride != null && qtyAtualOverride > 0
-  const qtyAtual = hasQtyAtualOverride ? qtyAtualOverride : qtyBase + qtyBonus
-  const qtyBonusResolved = hasQtyAtualOverride ? Math.max(0, qtyAtual - qtyBase) : qtyBonus
+  const qtyBonusRaw = toNumber(operation?.qtyBonus ?? 0)
+  const {
+    settlementQtyBase: qtyBase,
+    settlementQtyAtual: qtyAtual,
+    settlementQtyBonus: qtyBonusResolved,
+  } = resolveOperationQuantities(operation, qtyBonusRaw)
   const custoUnitario = Number(operation.custoUnitario || 0)
-  const custoTotal = qtyBase * custoUnitario
   const pagouManual = operation.pagou != null && operation.pagou !== '' ? Number(operation.pagou) : null
   let effectiveLegs = getEffectiveLegs(operation)
   if (isBooster(operation?.estrutura) && isKoHit(effectiveLegs, barrierStatus, operation?.spotInicial)) {
@@ -663,13 +926,28 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
     .map((leg) => Math.abs(resolveLegQuantity(leg, 0)))
     .filter((qty) => qty > 0)
   const optionQtyBase = optionQtyList.length ? Math.max(...optionQtyList) : 0
-  const optionEntryUnit = Math.abs(custoUnitario || 0)
+  const callPutStructure = isCallPutStructure(operation?.estrutura)
+  const optionEntryUnit = callPutStructure
+    ? Math.abs(Number(resolveUnitCost(operation) || 0))
+    : Math.abs(custoUnitario || 0)
   const optionEntryTotal = optionEntryUnit && optionQtyBase ? optionEntryUnit * optionQtyBase : 0
+  const custoTotal = callPutStructure ? optionEntryTotal : qtyBase * custoUnitario
   const pagou = pagouManual != null
     ? pagouManual
     : (!qtyBase && optionEntryTotal ? optionEntryTotal : custoTotal)
 
-  const spotFinal = market?.close ?? operation.spotInicial ?? 0
+  const spotFinalRaw = market?.close ?? operation.spotInicial ?? 0
+  const spotFinal = (() => {
+    if (spotFinalRaw) return spotFinalRaw
+    if (!isCupomRecorrente(operation.estrutura)) return spotFinalRaw
+    for (const leg of effectiveLegs) {
+      const legQty = readActiveQty(leg) ?? resolveLegQuantity(leg, 0)
+      if (legQty <= 0) continue
+      const legSpot = toNumber(leg?.settlementSpotOverride ?? leg?.spotFinalOverride ?? leg?.spotFinal)
+      if (legSpot) return legSpot
+    }
+    return spotFinalRaw
+  })()
   const vendaAtivoBruta = qtyAtual ? spotFinal * qtyAtual : 0
 
   const isRecorrente = isCupomRecorrente(operation.estrutura)
@@ -698,7 +976,10 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
     return sum + result
   }, 0)
 
-  const dividends = (market?.dividendsTotal || 0) * (qtyAtual || 0)
+  const manualDividendBRL = toNumber(override?.manualDividendBRL)
+  const dividends = Number.isFinite(manualDividendBRL)
+    ? manualDividendBRL
+    : (market?.dividendsTotal || 0) * (qtyAtual || 0)
   const manualCouponBRL = toNumber(override?.manualCouponBRL ?? override?.manualCouponBrl)
   const manualOptionsGainBRL = toNumber(override?.manualOptionsGainBRL ?? override?.manualOptionsGainBrl)
   const legacyCoupon = override?.manualCouponPct ?? override?.cupomManual ?? override?.cupomManualPct
@@ -706,11 +987,21 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
   const legacyConvertible = legacyRaw && legacyRaw.includes('%') && custoTotal
   const legacyNeedsInput = Boolean(legacyRaw && !legacyConvertible)
   const legacyConverted = Boolean(legacyConvertible)
+  const financiamentoCouponAuto = (() => {
+    if (!isFinanciamento(operation?.estrutura)) return null
+    const optionQty = getOptionQty(operation, effectiveLegs) ?? optionQtyBase
+    const optionQtySafe = Math.max(0, Number(optionQty || 0))
+    const unitCostSafe = Math.abs(Number(custoUnitario || 0))
+    if (!optionQtySafe || !unitCostSafe) return 0
+    return unitCostSafe * optionQtySafe
+  })()
   const cupomTotal = manualCouponBRL != null
     ? manualCouponBRL
     : legacyConvertible
       ? parsePercent(legacyRaw) * custoTotal
-      : (custoTotal ? parsePercent(operation.cupom) * custoTotal : 0)
+      : (financiamentoCouponAuto != null
+        ? financiamentoCouponAuto
+        : (custoTotal ? parsePercent(operation.cupom) * custoTotal : 0))
 
   const rebateTotal = effectiveLegs.reduce((sum, leg) => {
     if (!leg?.rebate) return sum
@@ -738,19 +1029,26 @@ export const computeResult = (operation, market, barrierStatus, override = {}) =
     if (!isShortLeg(leg)) return sum
     const strike = resolveStrike(leg)
     if (!Number.isFinite(strike) || strike <= 0) return sum
-    const liquidou = tipo === 'CALL' ? legSpotFinal >= strike : legSpotFinal <= strike
-    if (!liquidou) return sum
-    const qty = resolveDebitQuantity(leg, qtyBase)
+    const intrinsic = tipo === 'CALL'
+      ? Math.max(legSpotFinal - strike, 0)
+      : Math.max(strike - legSpotFinal, 0)
+    if (!intrinsic) return sum
+    const qty = resolveDebitQuantity(leg, qtyBase, operation)
     if (!qty) return sum
-    return sum + strike * qty
+    return sum - (intrinsic * qty)
   }, 0)
 
   const shouldAdjustCupomVenda = isCupomRecorrente(operation.estrutura) && dividends > 0
   const vendaAtivoAjustada = shouldAdjustCupomVenda ? vendaAtivoBruta - dividends : vendaAtivoBruta
+  const lowBarrierHit = barrierStatus?.low === true
+  const cupomRecorrenteUseSaleValue = isCupomRecorrente(operation.estrutura) && (shouldAdjustCupomVenda || lowBarrierHit)
   const valorSaida = isCupomRecorrente(operation.estrutura)
-    ? (shouldAdjustCupomVenda ? vendaAtivoAjustada : pagou)
+    ? (cupomRecorrenteUseSaleValue ? vendaAtivoAjustada : pagou)
+    : callPutStructure
+      ? ganhosOpcoes
     : vendaAtivoBruta
-  let financeiroFinal = valorSaida - pagou + ganhosOpcoes + dividends + cupomTotal + rebateTotal
+  const ganhosOpcoesContribution = callPutStructure ? 0 : ganhosOpcoes
+  let financeiroFinal = valorSaida - pagou + ganhosOpcoesContribution + dividends + cupomTotal + rebateTotal
   if (!Number.isFinite(financeiroFinal) || (!pagou && operation.pl != null)) {
     financeiroFinal = Number(operation.pl || 0)
   }

@@ -26,20 +26,24 @@ const PayoffTable = ({
       <table className="payoff-table">
         <thead>
           <tr>
-            <th>{leftLabel}</th>
-            <th>{rightLabel}</th>
+            <th className="payoff-col-header">{leftLabel}</th>
+            <th className="payoff-col-header">{rightLabel}</th>
           </tr>
         </thead>
         <tbody>
           {safeRows.map((row, index) => (
             <tr key={`${row.underlyingVarPct}-${row.strategyVarPct}-${index}`}>
-              <td>
-                <span className={resolveToneClass(row.underlyingTone)} />
-                {formatPct(row.underlyingVarPct)}
+              <td className="payoff-col-value">
+                <span className="payoff-cell-content">
+                  <span className={resolveToneClass(row.underlyingTone)} />
+                  {formatPct(row.underlyingVarPct)}
+                </span>
               </td>
-              <td>
-                <span className={resolveToneClass(row.strategyTone)} />
-                {formatPct(row.strategyVarPct)}
+              <td className="payoff-col-value">
+                <span className={`payoff-structure-value ${row.strategyTone || 'neutral'} payoff-cell-content`}>
+                  <span className={resolveToneClass(row.strategyTone)} />
+                  <span>{formatPct(row.strategyVarPct)}</span>
+                </span>
               </td>
             </tr>
           ))}

@@ -1,3 +1,5 @@
+import { toNumber } from '../utils/number'
+
 const profileCache = new Map()
 const pendingProfileCache = new Map()
 
@@ -24,11 +26,6 @@ const pickSummary = (result = {}) => String(
   || result?.summary
   || '',
 ).trim()
-
-const toNumber = (value) => {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
-}
 
 const mapProfile = (result = {}, symbol) => {
   const summaryProfile = result?.summaryProfile || {}

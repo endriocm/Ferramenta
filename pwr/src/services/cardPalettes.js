@@ -123,6 +123,11 @@ export const buildCardPaletteStyles = (paletteInput) => {
   const textSecondary = mixHex(textPrimary, base, darkMode ? 0.52 : 0.4)
   const border = darkMode ? mixHex(surface, textPrimary, 0.25) : mixHex(surface, '#B9C5D5', 0.45)
   const headerText = pickTextColor(surface, [textPrimary, accentB, accentA])
+  const offersCardBg = darkMode ? mixHex(surface, '#0C1016', 0.2) : mixHex('#FFFFFF', surface, 0.1)
+  const offersMonochromeText =
+    contrastRatio(offersCardBg, '#FFFFFF') >= contrastRatio(offersCardBg, '#000000')
+      ? '#FFFFFF'
+      : '#000000'
 
   const previewBackground = `radial-gradient(circle at 18% 16%, ${rgba(accentA, darkMode ? 0.22 : 0.26)}, transparent 38%), radial-gradient(circle at 80% 10%, ${rgba(accentB, darkMode ? 0.2 : 0.22)}, transparent 40%), linear-gradient(180deg, ${mixHex(base, surface, darkMode ? 0.25 : 0.55)}, ${mixHex(base, surface, darkMode ? 0.08 : 0.35)})`
 
@@ -148,6 +153,12 @@ export const buildCardPaletteStyles = (paletteInput) => {
     '--xp-logo-border': rgba(border, darkMode ? 0.9 : 0.88),
     '--xp-logo-shadow': darkMode ? '0 5px 12px rgba(0, 0, 0, 0.34)' : '0 5px 12px rgba(23, 34, 46, 0.16)',
     '--xp-logo-img-bg': darkMode ? mixHex(base, surface, 0.3) : mixHex('#FFFFFF', surface, 0.22),
+    '--xp-brand-bg': `linear-gradient(120deg, ${rgba(mixHex(accentA, surface, darkMode ? 0.38 : 0.6), darkMode ? 0.66 : 0.86)}, ${rgba(mixHex(accentB, base, darkMode ? 0.42 : 0.62), darkMode ? 0.64 : 0.84)})`,
+    '--xp-summary-bg': `linear-gradient(180deg, ${rgba(mixHex(surface, base, darkMode ? 0.4 : 0.74), darkMode ? 0.94 : 0.92)}, ${rgba(mixHex(base, '#0A111C', darkMode ? 0.18 : 0.58), darkMode ? 0.95 : 0.93)})`,
+    '--xp-summary-head-bg': `linear-gradient(120deg, ${rgba(mixHex(accentA, '#D1A648', 0.56), darkMode ? 0.38 : 0.34)}, ${rgba(mixHex(surface, '#8F6F29', 0.48), darkMode ? 0.34 : 0.3)})`,
+    '--xp-pos': '#33D184',
+    '--xp-neg': '#DE5964',
+    '--xp-neutral': '#D6B343',
   }
 
   const offersVars = {
@@ -157,9 +168,10 @@ export const buildCardPaletteStyles = (paletteInput) => {
     '--offers-shadow': darkMode ? '0 20px 42px rgba(0, 0, 0, 0.42)' : '0 20px 42px rgba(18, 28, 40, 0.22)',
     '--offers-header-bg': `linear-gradient(130deg, ${mixHex(base, accentA, 0.2)}, ${mixHex(surface, accentB, 0.2)})`,
     '--offers-header-text': pickTextColor(mixHex(base, surface, 0.2), [accentB, '#F5F8FF']),
-    '--offers-card-bg': darkMode ? mixHex(surface, '#0C1016', 0.2) : mixHex('#FFFFFF', surface, 0.1),
+    '--offers-card-bg': offersCardBg,
     '--offers-card-border': rgba(border, darkMode ? 0.86 : 0.8),
     '--offers-subtitle': textSecondary,
+    '--offers-monochrome-text': offersMonochromeText,
     '--offers-time-label': mixHex(textSecondary, surface, darkMode ? 0.35 : 0.25),
     '--offers-item-bg': `linear-gradient(180deg, ${darkMode ? mixHex(surface, accentA, 0.16) : mixHex('#FFFFFF', accentA, 0.2)}, ${darkMode ? mixHex(surface, accentB, 0.12) : mixHex('#FFFFFF', accentB, 0.26)})`,
     '--offers-item-text': textPrimary,

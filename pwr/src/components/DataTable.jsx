@@ -1,6 +1,16 @@
 ﻿import { memo } from 'react'
 
-const DataTable = ({ columns, rows, onRowClick, emptyMessage = 'Sem dados para exibir.' }) => {
+const DataTable = ({
+  columns,
+  rows,
+  onRowClick,
+  emptyMessage = 'Sem dados para exibir.',
+  visibleRows,
+}) => {
+  const parsedVisibleRows = Number(visibleRows)
+  const maxHeight = Number.isFinite(parsedVisibleRows) && parsedVisibleRows > 0
+    ? `${Math.round(parsedVisibleRows * 44 + 56)}px`
+    : undefined
   if (!rows.length) {
     return (
       <div className="empty-state">
@@ -12,7 +22,7 @@ const DataTable = ({ columns, rows, onRowClick, emptyMessage = 'Sem dados para e
   }
 
   return (
-    <div className="table-wrap">
+    <div className="table-wrap" style={maxHeight ? { maxHeight } : undefined}>
       <table className="data-table">
         <thead>
           <tr>

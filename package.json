@@ -1,6 +1,6 @@
 {
     "name":  "ferramenta",
-    "version":  "1.0.73",
+    "version":  "1.0.176",
     "description":  "",
     "main":  "electron/main.js",
     "scripts":  {
@@ -10,11 +10,11 @@
                     "verify:clean":  "node scripts/verify-clean.js",
                     "dev":  "serve .",
                     "dev:api":  "node server/index.js",
-                    "dev:ui":  "cd pwr \u0026\u0026 npm run dev",
-                    "dev:electron":  "set VITE_DEV_SERVER_URL=http://localhost:5173\u0026\u0026 electron .",
+                    "dev:ui":  "cd pwr \u0026\u0026 npm run dev --",
+                    "dev:electron":  "set ELECTRON_RUN_AS_NODE=\u0026\u0026 set VITE_DEV_SERVER_URL=http://localhost:5173\u0026\u0026 electron .",
                     "publish:updates":  "powershell -ExecutionPolicy Bypass -File scripts/publish-updates.ps1",
                     "build:ui":  "cd pwr \u0026\u0026 npm run build",
-                    "start:electron":  "electron .",
+                    "start:electron":  "set ELECTRON_RUN_AS_NODE=\u0026\u0026 electron .",
                     "build:electron":  "npm run build:ui \u0026\u0026 electron-builder --win --x64",
                     "pack:electron":  "npm run build:ui \u0026\u0026 electron-builder --win --x64 --dir",
                     "release:summary":  "node scripts/release-summary.mjs",
@@ -34,14 +34,12 @@
                             "serve":  "^14.2.5"
                         },
     "dependencies":  {
-                         "@aws-sdk/rds-signer":  "^3.994.0",
                          "busboy":  "^1.6.0",
                          "cors":  "^2.8.5",
                          "electron-updater":  "^6.1.7",
                          "express":  "^4.19.2",
                          "multer":  "^1.4.5-lts.1",
                          "pdfjs-dist":  "^4.10.38",
-                         "pg":  "^8.18.0",
                          "playwright-core":  "^1.58.2",
                          "xlsx":  "^0.18.5"
                      },
@@ -82,7 +80,7 @@
                   "publish":  [
                                   {
                                       "provider":  "generic",
-                                      "url":  "https://ferramenta-updates-937506434821.s3.sa-east-1.amazonaws.com/win/"
+                                      "url":  "https://s3.sa-east-1.amazonaws.com/ferramenta-updates-937506434821/win/"
                                   }
                               ]
               }

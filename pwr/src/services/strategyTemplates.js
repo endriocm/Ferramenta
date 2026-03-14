@@ -1,3 +1,5 @@
+import { toNumber } from '../utils/number.js'
+
 const BASE_POINTS = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]
 const OPTION_DRIVEN_BASE_POINTS = [-20, -10, 0, 10, 20]
 const OPTION_DRIVEN_NO_BARRIER_BASE_POINTS = [-30, -20, -10, 0, 10, 20, 30]
@@ -5,25 +7,7 @@ const OPTION_DRIVEN_NO_BARRIER_BASE_POINTS = [-30, -20, -10, 0, 10, 20, 30]
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 const round2 = (value) => Math.round(Number(value) * 100) / 100
 const blank = (value) => value == null || String(value).trim() === ''
-
-const toNumber = (value) => {
-  if (value == null || value === '') return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
-  const raw = String(value).trim()
-  if (!raw) return null
-  let cleaned = raw.replace(/[^\d,.-]/g, '')
-  const hasComma = cleaned.includes(',')
-  const hasDot = cleaned.includes('.')
-  if (hasComma && hasDot) {
-    cleaned = cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.')
-      ? cleaned.replace(/\./g, '').replace(/,/g, '.')
-      : cleaned.replace(/,/g, '')
-  } else if (hasComma) {
-    cleaned = cleaned.replace(/,/g, '.')
-  }
-  const parsed = Number(cleaned)
-  return Number.isFinite(parsed) ? parsed : null
-}
+const BARRIER_EDGE_STEP = 0.01
 
 const pct = (value, fallback, min = -200, max = 200) => {
   const parsed = toNumber(value)
@@ -46,8 +30,8 @@ const fmtPct = (value, digits = 2) => {
 const beforeBarrierPct = (barrierPct, direction = 'high') => {
   const barrier = Number(barrierPct)
   if (!Number.isFinite(barrier)) return barrierPct
-  if (direction === 'low') return round2(barrier + 0.01)
-  return round2(barrier - 0.01)
+  if (direction === 'low') return round2(barrier + BARRIER_EDGE_STEP)
+  return round2(barrier - BARRIER_EDGE_STEP)
 }
 
 const fmtDate = (value) => {
@@ -66,6 +50,14 @@ const fmtTerm = (value) => {
   if (n == null || n <= 0) return '--'
   const label = Number.isInteger(n) ? String(n) : n.toFixed(1).replace('.', ',')
   return `${label} meses`
+}
+
+const resolveRecurringCouponPerPeriodPct = (couponPct, termMonths) => {
+  const coupon = Number(couponPct)
+  const months = toNumber(termMonths)
+  if (!Number.isFinite(coupon)) return 0
+  if (months == null || months <= 0) return round2(coupon)
+  return round2(coupon / months)
 }
 
 const fmtCurrency = (value) => {
@@ -128,27 +120,25 @@ const resolveBarrierSamplingTargets = (barrierVarPct, direction, mode = 'barrier
 
   const nearMagnitude = distance >= 10 ? 5 : round2(Math.max(distance * 0.4, 0.5))
   const halfMagnitude = round2(distance / 2)
-  const maxBeforeMagnitude = Math.max(distance - 0.01, 0)
+  const maxBeforeMagnitude = Math.max(distance - BARRIER_EDGE_STEP, 0)
   const towardSign = barrier === 0 ? (direction === 'high' ? 1 : -1) : Math.sign(barrier)
 
   const nearPoint = round2(towardSign * Math.min(nearMagnitude, maxBeforeMagnitude))
   const halfPoint = round2(towardSign * Math.min(halfMagnitude, maxBeforeMagnitude))
-  const preBarrierPoint = round2(direction === 'high' ? barrier - 0.01 : barrier + 0.01)
+  const preBarrierPoint = beforeBarrierPct(barrier, direction === 'high' ? 'high' : 'low')
+  const postPointOne = round2(direction === 'high' ? barrier + nearMagnitude : barrier - nearMagnitude)
+  const postPointTwo = round2(direction === 'high' ? barrier + (2 * nearMagnitude) : barrier - (2 * nearMagnitude))
 
   if (mode === 'post_only') {
-    const postPointOne = round2(direction === 'high' ? barrier + nearMagnitude : barrier - nearMagnitude)
-    const postPointTwo = round2(direction === 'high' ? barrier + (2 * nearMagnitude) : barrier - (2 * nearMagnitude))
     return {
       before: uniqueNumeric([nearPoint, halfPoint, preBarrierPoint]),
-      after: uniqueNumeric([postPointOne, postPointTwo]),
+      after: uniqueNumeric([barrier, postPointOne, postPointTwo]),
     }
   }
 
-  const postBarrierPoint = round2(direction === 'high' ? barrier + nearMagnitude : barrier - nearMagnitude)
-
   return {
     before: uniqueNumeric([nearPoint, halfPoint, preBarrierPoint]),
-    after: uniqueNumeric([barrier, postBarrierPoint]),
+    after: uniqueNumeric([barrier, postPointOne, postPointTwo]),
   }
 }
 
@@ -272,7 +262,7 @@ const injectSpreadGuideRows = (
 
   const nearTarget = round2(direction === 'high' ? breakeven + nearDelta : breakeven - nearDelta)
   const midTarget = round2(direction === 'high' ? breakeven + midDelta : breakeven - midDelta)
-  const preBarrierTarget = round2(direction === 'high' ? barrier - 0.01 : barrier + 0.01)
+  const preBarrierTarget = round2(direction === 'high' ? barrier - BARRIER_EDGE_STEP : barrier + BARRIER_EDGE_STEP)
   const guideTargets = uniqueNumeric([nearTarget, midTarget, preBarrierTarget])
 
   const interpolateStrategyAt = (target) => {
@@ -400,6 +390,164 @@ const limitRowsAroundBarriers = (
     .filter(Boolean)
 }
 
+const injectBarrierEdgeRows = (
+  rows,
+  {
+    highBarrierPct = null,
+    lowBarrierPct = null,
+    highBarrierMode = 'barrier',
+    lowBarrierMode = 'barrier',
+  } = {},
+) => {
+  const safeRows = Array.isArray(rows) ? rows : []
+  if (!safeRows.length) return safeRows
+
+  const parseBarrier = (value) => {
+    if (value == null || value === '') return null
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? round2(parsed) : null
+  }
+
+  const highBarrier = parseBarrier(highBarrierPct)
+  const lowBarrier = parseBarrier(lowBarrierPct)
+  if (highBarrier == null && lowBarrier == null) return safeRows
+
+  const rowMap = new Map()
+  safeRows.forEach((row) => {
+    const underlying = Number(row?.underlyingVarPct)
+    const strategy = Number(row?.strategyVarPct)
+    if (!Number.isFinite(underlying) || !Number.isFinite(strategy)) return
+    const x = round2(underlying)
+    const y = round2(strategy)
+    rowMap.set(x, {
+      ...row,
+      underlyingVarPct: x,
+      strategyVarPct: y,
+      underlyingTone: tone(x),
+      strategyTone: tone(y),
+    })
+  })
+
+  const sortedRows = () => Array.from(rowMap.values()).sort((left, right) => left.underlyingVarPct - right.underlyingVarPct)
+
+  const sideRows = (barrier, direction, phase = 'before') => sortedRows().filter((row) => {
+    if (direction === 'high') {
+      return phase === 'before'
+        ? row.underlyingVarPct < barrier
+        : row.underlyingVarPct >= barrier
+    }
+    return phase === 'before'
+      ? row.underlyingVarPct > barrier
+      : row.underlyingVarPct <= barrier
+  })
+
+  const interpolateWithCandidates = (target, candidates = []) => {
+    if (!candidates.length) return null
+    const ordered = candidates.slice().sort((left, right) => left.underlyingVarPct - right.underlyingVarPct)
+
+    for (let index = 0; index < ordered.length - 1; index += 1) {
+      const left = ordered[index]
+      const right = ordered[index + 1]
+      const x0 = Number(left?.underlyingVarPct)
+      const y0 = Number(left?.strategyVarPct)
+      const x1 = Number(right?.underlyingVarPct)
+      const y1 = Number(right?.strategyVarPct)
+      if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) continue
+      if (target < Math.min(x0, x1) || target > Math.max(x0, x1)) continue
+      return round2(lerp(target, x0, x1, y0, y1))
+    }
+
+    if (ordered.length === 1) return round2(Number(ordered[0]?.strategyVarPct) || 0)
+
+    const nearest = ordered
+      .slice()
+      .sort((left, right) => Math.abs(left.underlyingVarPct - target) - Math.abs(right.underlyingVarPct - target))
+      .slice(0, 2)
+      .sort((left, right) => left.underlyingVarPct - right.underlyingVarPct)
+
+    if (nearest.length < 2) return round2(Number(nearest[0]?.strategyVarPct) || 0)
+
+    const [left, right] = nearest
+    const x0 = Number(left?.underlyingVarPct)
+    const y0 = Number(left?.strategyVarPct)
+    const x1 = Number(right?.underlyingVarPct)
+    const y1 = Number(right?.strategyVarPct)
+    if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) return null
+    if (x0 === x1) return round2(y0)
+    return round2(lerp(target, x0, x1, y0, y1))
+  }
+
+  const interpolateWithinSide = (target, barrier, direction, phase = 'before') => {
+    const candidates = sideRows(barrier, direction, phase)
+    const sideValue = interpolateWithCandidates(target, candidates)
+    if (Number.isFinite(sideValue)) return sideValue
+    return interpolateWithCandidates(target, sortedRows())
+  }
+
+  const addGuideRows = (barrier, direction, mode) => {
+    if (barrier == null) return
+    const targets = resolveBarrierSamplingTargets(barrier, direction, mode)
+    const beforeTargets = Array.isArray(targets.before) ? targets.before : []
+    const afterTargets = Array.isArray(targets.after) ? targets.after : []
+
+    beforeTargets.forEach((target) => {
+      const x = round2(target)
+      if (rowMap.has(x)) return
+      const y = interpolateWithinSide(x, barrier, direction, 'before')
+      if (!Number.isFinite(y)) return
+      rowMap.set(x, {
+        underlyingVarPct: x,
+        strategyVarPct: y,
+        underlyingTone: tone(x),
+        strategyTone: tone(y),
+        isGuide: true,
+      })
+    })
+
+    afterTargets.forEach((target) => {
+      const x = round2(target)
+      if (rowMap.has(x)) return
+      const y = interpolateWithinSide(x, barrier, direction, 'after')
+      if (!Number.isFinite(y)) return
+      rowMap.set(x, {
+        underlyingVarPct: x,
+        strategyVarPct: y,
+        underlyingTone: tone(x),
+        strategyTone: tone(y),
+        isGuide: true,
+      })
+    })
+  }
+
+  addGuideRows(highBarrier, 'high', highBarrierMode)
+  addGuideRows(lowBarrier, 'low', lowBarrierMode)
+
+  return Array.from(rowMap.values()).sort((left, right) => left.underlyingVarPct - right.underlyingVarPct)
+}
+
+const buildRubiGuidePoints = (barrierPct) => {
+  const barrier = Number(barrierPct)
+  const safeBarrier = Number.isFinite(barrier) && barrier < 0 ? round2(barrier) : -20
+  const distance = Math.abs(safeBarrier)
+  const nearMagnitude = round2(Math.max(Math.min(5, distance * 0.35), 1))
+  const halfMagnitude = round2(Math.max(distance / 2, nearMagnitude + 0.5))
+  const topMagnitude = round2(Math.max(distance, halfMagnitude + 0.5))
+  const postStep = round2(Math.max(nearMagnitude, 1))
+  const preBarrierPoint = beforeBarrierPct(safeBarrier, 'low')
+
+  const positive = [nearMagnitude, halfMagnitude, topMagnitude]
+  const negative = [
+    round2(-nearMagnitude),
+    round2(-halfMagnitude),
+    preBarrierPoint,
+    safeBarrier,
+    round2(safeBarrier - postStep),
+    round2(safeBarrier - (2 * postStep)),
+  ]
+
+  return uniqueNumeric([...positive, 0, ...negative])
+}
+
 const unique = (list) => Array.from(new Set((list || []).filter(Boolean)))
 
 const numberField = (key, label, section = 'Parametros', required = true) => ({ key, label, section, type: 'number', required })
@@ -414,7 +562,7 @@ const IDENT_FIELDS = [
 ]
 
 const OPTION_COST_FIELD = numberField('optionCostPct', 'Custo da opcao (%)', 'Identificacao', false)
-const OPTION_COST_TEMPLATES = new Set(['call', 'call_spread', 'put', 'put_spread', 'alocacao_protegida'])
+const OPTION_COST_TEMPLATES = new Set(['call', 'call_spread', 'put', 'put_spread', 'alocacao_protegida', 'alocacao_protegida_sob_custodia', 'financiamento', 'financiamento_sob_custodia'])
 
 const withOptionCostField = (templateId, fields = []) => {
   if (!OPTION_COST_TEMPLATES.has(String(templateId || '').trim())) return fields
@@ -448,6 +596,24 @@ const resolveOptionCostPct = (values = {}, fallback = 0) => {
   const fallbackValue = toNumber(fallback)
   if (fallbackValue != null) return clamp(fallbackValue, 0, 100)
   return 0
+}
+
+const resolveOptionCreditPct = (values = {}, fallback = 0) => {
+  const explicit = toNumber(values?.optionCostPct)
+  if (explicit != null) return clamp(Math.abs(explicit), 0, 100)
+  const fallbackValue = toNumber(fallback)
+  if (fallbackValue != null) return clamp(Math.abs(fallbackValue), 0, 100)
+  return 0
+}
+
+const resolveFeeAaiRealPct = (templateId, values = {}) => {
+  const normalizedTemplateId = String(templateId || '').trim()
+  if (!OPTION_COST_TEMPLATES.has(normalizedTemplateId)) return null
+  const feeAaiPct = toNumber(values?.feeAai)
+  if (feeAaiPct == null) return null
+  const optionCostPct = resolveOptionCostPct(values, values?.premiumPct)
+  if (optionCostPct <= 0) return null
+  return (feeAaiPct / optionCostPct) * 100
 }
 
 const normalizeOptionType = (value) => {
@@ -681,6 +847,94 @@ const resolveCouponConfigFromOptions = (entries = [], fallbackCouponPct = 0, fal
   return { specs, couponPct, downBarrierAbsPct, warnings }
 }
 
+const resolveRubiConfigFromOptions = (entries = [], fallbackCouponPct = 0, fallbackDownBarrierAbsPct = 0, baseQuantity = null) => {
+  const rawEntries = Array.isArray(entries) ? entries : []
+  const specs = buildOptionLegSpecs(rawEntries, { baseQuantity })
+  let couponPct = round2(fallbackCouponPct)
+  let downBarrierAbsPct = Math.abs(round2(fallbackDownBarrierAbsPct))
+  const warnings = []
+
+  if (!specs.length) {
+    if (rawEntries.length) warnings.push('Preencha strike e barreira D.O/KO nas opcoes.')
+    return { specs, couponPct, downBarrierAbsPct, warnings }
+  }
+
+  const callShortStrike = specs.find((leg) => (
+    leg.optionType === 'CALL'
+    && leg.side === 'short'
+    && Number.isFinite(Number(leg?.strikePct))
+  ))
+  const putLongStrike = specs.find((leg) => (
+    leg.optionType === 'PUT'
+    && leg.side === 'long'
+    && Number.isFinite(Number(leg?.strikePct))
+  ))
+  const strikeRef = callShortStrike?.strikePct ?? putLongStrike?.strikePct
+  if (Number.isFinite(Number(strikeRef))) {
+    couponPct = round2(Number(strikeRef) - 100)
+  } else {
+    warnings.push('Informe strike da call vendida (ou put comprada) para derivar o cupom.')
+  }
+
+  const lowBarrierLeg = specs.find((leg) => (
+    isExplicitBarrierType(leg?.barrierType)
+    && resolveBarrierDirection(leg?.barrierType) === 'low'
+    && leg?.barrierValuePct != null
+  ))
+  if (lowBarrierLeg) {
+    downBarrierAbsPct = Math.abs(round2(100 - Number(lowBarrierLeg.barrierValuePct)))
+  } else {
+    warnings.push('Inclua barreira de baixa (D.O/KO) nas opcoes.')
+  }
+
+  return { specs, couponPct, downBarrierAbsPct, warnings }
+}
+
+const toInputPercent = (value) => {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return ''
+  const rounded = round2(number)
+  if (Number.isInteger(rounded)) return String(rounded)
+  return rounded.toFixed(2).replace('.', ',')
+}
+
+const resolveStrikePctFromOptionEntries = (entries = [], optionType, side) => {
+  const safeEntries = Array.isArray(entries) ? entries : []
+  const match = safeEntries.find((entry) => (
+    normalizeOptionType(entry?.optionType) === normalizeOptionType(optionType)
+    && normalizeOptionSide(entry?.side) === normalizeOptionSide(side)
+    && toNumber(entry?.strike ?? entry?.strikePercent) != null
+  ))
+  return toNumber(match?.strike ?? match?.strikePercent)
+}
+
+const hasMeaningfulOptionInput = (entries = []) => (
+  (Array.isArray(entries) ? entries : []).some((entry) => (
+    !blank(entry?.strike ?? entry?.strikePercent)
+    || !blank(entry?.barrierValue ?? entry?.barrierPercent)
+    || !blank(entry?.coupon ?? entry?.couponPct)
+    || (entry?.useCustomQuantity && !blank(entry?.quantity))
+  ))
+)
+
+const buildPayoffFallbackMessage = ({ templateLabel, tickerLabel, maturityLabel, highlights }) => {
+  const safeTicker = tickerLabel || 'ATIVO'
+  const safeHighlights = (Array.isArray(highlights) ? highlights : []).filter(Boolean).slice(0, 3)
+  const objective = safeHighlights.length
+    ? `*Objetivo:* Estrutura calibrada pelas opcoes aplicadas, com retorno conforme payoff estimado no preview.`
+    : '*Objetivo:* Estrutura calibrada pelas opcoes aplicadas, com retorno conforme payoff estimado.'
+
+  return [
+    `*${templateLabel || 'Estrutura'} em ${safeTicker}*`,
+    '',
+    objective,
+    ...safeHighlights.map((item) => `- ${item}`),
+    '',
+    `*Vencimento da estrategia:* ${maturityLabel || '--'}`,
+    '_(Possivel saida antecipada mediante cotacao)._',
+  ].join('\n')
+}
+
 const buildOptionDrivenRows = (
   entries = [],
   {
@@ -725,11 +979,11 @@ const buildOptionDrivenRows = (
     : OPTION_DRIVEN_NO_BARRIER_BASE_POINTS.slice()
   if (highBarriers.length) {
     const nearestHighBarrier = Math.min(...highBarriers)
-    contextualBase = contextualBase.filter((point) => point <= nearestHighBarrier - 0.01)
+    contextualBase = contextualBase.filter((point) => point <= nearestHighBarrier - BARRIER_EDGE_STEP)
   }
   if (lowBarriers.length) {
     const nearestLowBarrier = Math.max(...lowBarriers)
-    contextualBase = contextualBase.filter((point) => point >= nearestLowBarrier + 0.01)
+    contextualBase = contextualBase.filter((point) => point >= nearestLowBarrier + BARRIER_EDGE_STEP)
   }
   if (!contextualBase.includes(0)) contextualBase.push(0)
 
@@ -904,6 +1158,31 @@ const OPTION_FORM_MAP = {
       { optionType: 'CALL', side: 'short', label: 'Call vendida' },
     ],
   },
+  alocacao_protegida_sob_custodia: {
+    enabled: true,
+    showStrike: true,
+    showBarrier: false,
+    defaultEntries: [
+      { optionType: 'PUT', side: 'long', label: 'Put de protecao' },
+      { optionType: 'CALL', side: 'short', label: 'Call vendida' },
+    ],
+  },
+  financiamento: {
+    enabled: true,
+    showStrike: true,
+    showBarrier: false,
+    defaultEntries: [
+      { optionType: 'CALL', side: 'short', label: 'Call vendida' },
+    ],
+  },
+  financiamento_sob_custodia: {
+    enabled: true,
+    showStrike: true,
+    showBarrier: false,
+    defaultEntries: [
+      { optionType: 'CALL', side: 'short', label: 'Call vendida' },
+    ],
+  },
   pop: {
     enabled: true,
     showStrike: true,
@@ -919,8 +1198,8 @@ const OPTION_FORM_MAP = {
     showStrike: true,
     showBarrier: true,
     defaultEntries: [
-      { optionType: 'CALL', side: 'short', label: 'Call vendida', barrierType: 'KO' },
-      { optionType: 'PUT', side: 'long', label: 'Put comprada' },
+      { optionType: 'CALL', side: 'short', label: 'Call vendida', strike: '108', barrierType: 'KO', barrierValue: '80' },
+      { optionType: 'PUT', side: 'long', label: 'Put comprada', strike: '108', barrierType: 'KO', barrierValue: '80' },
     ],
   },
   rubi_black: {
@@ -928,17 +1207,17 @@ const OPTION_FORM_MAP = {
     showStrike: true,
     showBarrier: true,
     defaultEntries: [
-      { optionType: 'CALL', side: 'short', label: 'Call vendida', barrierType: 'KO' },
-      { optionType: 'PUT', side: 'long', label: 'Put comprada' },
+      { optionType: 'CALL', side: 'short', label: 'Call vendida', strike: '108', barrierType: 'KO', barrierValue: '80' },
+      { optionType: 'PUT', side: 'long', label: 'Put comprada', strike: '108', barrierType: 'KO', barrierValue: '80' },
     ],
   },
   smart_coupon: {
     enabled: true,
     showStrike: true,
     showBarrier: true,
-    showCoupon: true,
     defaultEntries: [
-      { optionType: 'PUT', side: 'long', label: 'Put com barreira D.O', strike: '100', barrierType: 'KO', barrierValue: '90', coupon: '6' },
+      { optionType: 'CALL', side: 'short', label: 'Call vendida', strike: '108', barrierType: 'KO', barrierValue: '80' },
+      { optionType: 'PUT', side: 'long', label: 'Put comprada', strike: '108', barrierType: 'KO', barrierValue: '80' },
     ],
   },
   cupom_recorrente: {
@@ -1053,6 +1332,421 @@ const buildMessage = ({ label, tickerLabel, maturityLabel, sections }) => ([
   '_(Possivel saida antecipada mediante cotacao)._',
 ].join('\n'))
 
+const resolveRowsMaxGainPct = (rows = [], fallback = null) => {
+  const candidates = (Array.isArray(rows) ? rows : [])
+    .map((row) => Number(row?.strategyVarPct))
+    .filter((value) => Number.isFinite(value))
+  if (candidates.length) return Math.max(...candidates)
+  const parsedFallback = Number(fallback)
+  return Number.isFinite(parsedFallback) ? parsedFallback : 0
+}
+
+const buildSpreadCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  direction = 'up',
+  startPct,
+  limitPct,
+  maxGainPct,
+  investmentValue,
+}) => {
+  const isDown = direction === 'down'
+  const strategyLabel = isDown ? 'Trava de baixa' : 'Trava de alta'
+  const movementLabel = isDown ? 'queda' : 'ALTA'
+  const objective = isDown
+    ? `🎯 Objetivo: Obter ganho alavancado com a desvalorização de ${tickerLabel} com risco máximo limitado ao valor pago pela estrutura.`
+    : `🎯 Objetivo: Obter ganho alavancado com a variação de ${tickerLabel} com risco máximo limitado ao valor pago pela estrutura.`
+
+  const investedAmount = toNumber(investmentValue)
+  const investedLabel = investedAmount != null ? fmtCurrency(investedAmount) : '--'
+  const safeMaxGain = Math.max(0, Number(maxGainPct) || 0)
+  const maxProfitValue = investedAmount != null
+    ? round2((investedAmount * safeMaxGain) / 100)
+    : null
+  const maxProfitLabel = maxProfitValue != null ? fmtCurrency(maxProfitValue) : '--'
+
+  return [
+    `${strategyLabel} em ${tickerLabel}.`,
+    '',
+    objective,
+    '',
+    'Exemplo de desempenho no vencimento:',
+    ` - Considerando aporte de ${investedLabel}.`,
+    '',
+    `${tickerLabel} com ${movementLabel} de ${fmtPct(startPct)}= Recebe o Capital Investido (0X0).`,
+    `${tickerLabel} com ${movementLabel} a partir de ${fmtPct(limitPct)}= Capital Investido + ${maxProfitLabel}.`,
+    '',
+    '❗ Risco máximo: Valor investido.',
+    `📈 Lucro máximo: ${fmtPct(safeMaxGain)} sobre o valor investido.`,
+    '',
+    `⏱ Vencimento: ${maturityLabel || '--'}`,
+    'Possível saida antecipada mediante cotação',
+  ].join('\n')
+}
+
+const buildFenceUiCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  preBarrierPct,
+  partialProtectionPct,
+  barrierPct,
+  capAfterPct,
+}) => {
+  const safePartial = Math.abs(Number(partialProtectionPct) || 0)
+  const downPartial = -safePartial
+  const preBarrier = fmtPct(preBarrierPct)
+  const barrier = fmtPct(barrierPct)
+  const capAfter = fmtPct(capAfterPct)
+  const partial = fmtPct(downPartial)
+
+  return [
+    `Fence UI em ${tickerLabel}`,
+    '',
+    `🎯 Objetivo: Ganhar com a alta moderada de ${tickerLabel} em até ${preBarrier}, com proteção parcial na queda de até ${partial}. Se a alta de ${barrier} for superada, o ganho máximo fica limitado a ${capAfter} no período.`,
+    '',
+    `Cenário de alta (sem atingir ${barrier}):`,
+    `Se ${tickerLabel} subir, sem nunca tocar ${barrier} do preço inicial, o investidor ganha 1% para cada 1% de alta, até o limite de ${preBarrier}.`,
+    '',
+    `Cenário de alta (atingiu ${barrier}):`,
+    `Se ${tickerLabel} a qualquer momento atingir ${barrier} do preço inicial, o investidor segue com ganho na alta, porém com ganho máximo limitado a ${capAfter} no período.`,
+    '',
+    'Cenário neutro:',
+    `Se ${tickerLabel} ficar entre 0% e ${partial} do preço inicial, o investidor não ganha e nem perde (faixa de proteção parcial).`,
+    '',
+    'Cenário de perda:',
+    `Se ${tickerLabel} cair abaixo de ${partial} do preço inicial, o investidor perde 1% para cada 1% de queda abaixo desse nível, de forma ilimitada.`,
+    '',
+    `⏰ Vencimento: ${maturityLabel || '--'}`,
+  ].join('\n')
+}
+
+const buildCollarCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  capPct,
+  protectionPct,
+}) => {
+  const cap = fmtPct(capPct)
+  const protection = fmtPct(protectionPct)
+  return [
+    `Operação Collar em ${tickerLabel}`,
+    '',
+    `🎯 Objetivo: Ganho limitado com a alta de ${tickerLabel} de até ${cap} com proteção de ${protection} na queda do ativo.`,
+    '',
+    `Cenário de alta: ${tickerLabel} com valorização de até ${cap} investidor ganha de forma linear conforme variação do ativo.`,
+    '',
+    `Cenário de queda: Investidor possui ${protection} do capital protegido em qualquer cenário de desvalorização.`,
+    '',
+    `⏰ Vencimento: ${maturityLabel || '--'}`,
+    '(possível saída antecipada mediante cotação).',
+  ].join('\n')
+}
+
+const buildCollarUiCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  preBarrierPct,
+  capAfterPct,
+  protectionPct,
+}) => {
+  const preBarrier = fmtPct(preBarrierPct)
+  const capAfter = fmtPct(capAfterPct)
+  const protection = fmtPct(protectionPct)
+  return [
+    `Operação Collar UI em ${tickerLabel}`,
+    '',
+    `🎯 Objetivo: Ganho limitado com a alta de ${tickerLabel} de até ${preBarrier} com proteção de ${protection} na queda do ativo.`,
+    '',
+    `Cenário de alta: ${tickerLabel} com valorização de até ${preBarrier} investidor ganha de forma linear conforme variação do ativo.`,
+    '',
+    `Caso ${tickerLabel} apresente uma valorização superior a ${preBarrier}: Investidor tem ganho limitado a ${capAfter}`,
+    '',
+    `Cenário de queda: Investidor possui ${protection} do capital protegido em qualquer cenário de desvalorização.`,
+    '',
+    `⏰ Vencimento: ${maturityLabel || '--'}`,
+    '(possível saída antecipada mediante cotação).',
+  ].join('\n')
+}
+
+const buildDocBidirecionalCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  preHighBarrierPct,
+  maxGainPct,
+  couponPct,
+  preDownKoPct,
+}) => {
+  const preHigh = fmtPct(preHighBarrierPct)
+  const maxGain = fmtPct(maxGainPct)
+  const coupon = fmtPct(couponPct)
+  const preDown = fmtPct(preDownKoPct)
+  return [
+    `DOC Bidirecional em ${tickerLabel}`,
+    '',
+    `🎯 Objetivo: Obter ganho dobrado com alta de ${tickerLabel} até ${preHigh} com possibilidade de ganho máximo de ${maxGain} e capital protegido até uma desvalorização de ${preDown}.`,
+    '',
+    `- ${tickerLabel} com valorização de até ${preHigh}: Investidor tem ganho dobrado.`,
+    `- ${tickerLabel} com valorização superior a ${preHigh}: Investidor terá ganho limitado a ${coupon}.`,
+    `- ${tickerLabel} com desvalorização de até ${preDown}: Investidor tem capital protegido.`,
+    `- ${tickerLabel} com desvalorização superior a ${preDown}: Investidor participa integralmente da queda do ativo.`,
+    '',
+    `⏰ Vencimento: ${maturityLabel || '--'}`,
+    '(possível saída antecipada mediante cotação)',
+  ].join('\n')
+}
+
+const buildRubiCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  couponPct,
+  barrierPct,
+  preBarrierPct,
+  cdiEquivPct = null,
+}) => {
+  const coupon = fmtPct(couponPct)
+  const barrier = fmtPct(barrierPct)
+  const preBarrier = fmtPct(preBarrierPct)
+  const cdiText = cdiEquivPct != null && Number.isFinite(Number(cdiEquivPct))
+    ? `, equivalente a ${fmtPct(cdiEquivPct)} do CDI`
+    : ''
+  return [
+    `Rubi ${tickerLabel}`,
+    '',
+    `🎯 Objetivo: Retorno pré-acordado de ${coupon}${cdiText}, desde que a ação não tenha uma desvalorização superior a ${preBarrier} do preço inicial.`,
+    '',
+    'Cenário de Ganho:',
+    `Na queda ou na alta em relação ao preço de entrada, sem atingir a barreira de ${barrier}.`,
+    '',
+    'Cenário de perda:',
+    ` Se ${tickerLabel} atingir queda de ${barrier}, o investidor fica somente posicionado na ação, deixando de ganhar o cupom.`,
+    '',
+    `Vencimento da estratégia: ${maturityLabel || '--'}`,
+  ].join('\n')
+}
+
+const buildRubiBlackCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  couponPct,
+  barrierPct,
+  upCapPct = null,
+}) => {
+  const coupon = fmtPct(couponPct)
+  const barrier = fmtPct(barrierPct)
+  const safeUpCap = upCapPct != null && Number.isFinite(Number(upCapPct)) ? Number(upCapPct) : null
+  const upCapLabel = safeUpCap != null ? fmtPct(safeUpCap) : null
+  const totalGainLabel = safeUpCap != null ? fmtPct(round2(Number(couponPct) + safeUpCap)) : null
+  const extraLines = safeUpCap != null ? [
+    '',
+    'Exemplo de ganho adicional:',
+    `Ação com valorização de ${upCapLabel} investidor ganha ${totalGainLabel} (${upCapLabel} da ação + o cupom da estratégia)`,
+  ] : []
+  return [
+    `Rubi Black em ${tickerLabel}`,
+    '',
+    `🎯 Objetivo: Retorno pré-acordado de ${coupon}, desde que a ação não tenha uma desvalorização igual ou superior a  ${barrier} do preço inicial${safeUpCap != null ? ` e ganho adicional limitado a uma alta de ${upCapLabel} do papel` : ''}.`,
+    ...extraLines,
+    '',
+    'Cenário de Ganho',
+    `Na queda ou na alta em relação ao preço de entrada, sem atingir a barreira de ${barrier}`,
+    '',
+    'Cenário de perda',
+    `Se ${tickerLabel} atingir queda de ${barrier}, o investidor fica somente posicionado na ação, deixando de ganhar o cupom.`,
+    '',
+    `Vencimento da estratégia: ${maturityLabel || '--'}`,
+    'possível saida antecipada mediante cotação',
+  ].join('\n')
+}
+
+const buildSmartCouponCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  couponPct,
+  barrierPct,
+  preBarrierPct,
+  cdiEquivPct = null,
+}) => {
+  const coupon = fmtPct(couponPct)
+  const barrier = fmtPct(barrierPct)
+  const preBarrier = fmtPct(preBarrierPct)
+  const cdiText = cdiEquivPct != null && Number.isFinite(Number(cdiEquivPct))
+    ? ` equivalente a aproximadamente ${fmtPct(cdiEquivPct)} do CDI`
+    : ''
+  return [
+    `Smart Coupon em ${tickerLabel}`,
+    '',
+    `Objetivo: Retorno pré-acordado de ${coupon}${cdiText}.`,
+    '',
+    `Cenário de Ganho: Na queda ou na alta em relação ao preço de entrada, estando acima da barreira de ${barrier} no vencimento.`,
+    '',
+    `Cenário de perda: Se, no vencimento, a ação apresentar uma desvalorização superior a ${preBarrier}, investidor deixa de ganhar o cupom, ficando somente posicionado na ação.`,
+    '',
+    `⏱ Vencimento: ${maturityLabel || '--'}`,
+  ].join('\n')
+}
+
+const buildPopCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  upPartPct,
+  downProtectionPct,
+}) => {
+  const upPart = fmtPct(upPartPct)
+  const protection = fmtPct(downProtectionPct)
+  return [
+    `POP ${tickerLabel}`,
+    '',
+    `🎯 Objetivo: Obter ganho equivalente a ${upPart} da alta do ativo, com ${protection} do capital principal protegido.`,
+    '',
+    'Cenário de Ganho:',
+    `Investidor participa de ${upPart} da alta do ativo-objeto de maneira ilimitada.`,
+    '',
+    'Cenário de perda:',
+    `Investidor tem ${protection} do capital principal protegido no caso de queda do ativo objeto.`,
+    '',
+    `Vencimento: ${maturityLabel || '--'}`,
+  ].join('\n')
+}
+
+const buildCupomRecorrenteCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  couponPerPeriod,
+  barrierPct,
+  termMonths,
+}) => {
+  const coupon = fmtPct(couponPerPeriod)
+  const barrier = fmtPct(barrierPct)
+  const safeBarrierAbs = Math.abs(Number(barrierPct) || 0)
+  const preBarrier = fmtPct(beforeBarrierPct(-safeBarrierAbs, 'low'))
+  return [
+    `Cupom Recorrente em ${tickerLabel}`,
+    '',
+    'Objetivo',
+    `Ganho de cupom mensal de ${coupon} desde que a ação não apresente uma desvalorização de ${barrier} no mês.`,
+    '',
+    `Caso a ação tenha uma desvalorização igual ou superior a ${barrier} na data do vencimento, o investidor deixa de ganhar o cupom naquele mês`,
+    '',
+    'É importante salientar que o pagamento dos cupons de cada vencimento são independentes entre si, ou seja, ao longo da vida da operação o cliente poderá receber o cupom de um vencimento e posteriormente não receber o cupom do mês subsequente.',
+    '',
+    `Vencimento: ${maturityLabel || '--'}.`,
+  ].join('\n')
+}
+
+const buildAlocacaoProtegidaCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  investmentValue,
+  termMonths,
+}) => {
+  const investedLabel = toNumber(investmentValue) != null ? fmtCurrency(toNumber(investmentValue)) : '--'
+  const termLabel = fmtTerm(termMonths)
+  return [
+    `Alocação Protegida ${tickerLabel}`,
+    `Em um cenário de juros reais ainda elevados no Brasil, essa estratégia busca capturar o potencial de valorização de um ETF atrelado a uma carteira de títulos públicos indexados à inflação com vencimento em 2050, com proteção do capital no vencimento.`,
+    '',
+    'Vantagens do ETF x Tesouro:',
+    '- 15% de IR e isenção de IOF, sem DARF;',
+    '- Reinvestimento de Cupom sem IR;',
+    '',
+    '💲 Ganho máximo ILIMITADO',
+    '🛟 Capital 100% protegido no vencimento.',
+    `⏱ Vencimento: ${maturityLabel || '--'} (${termLabel})`,
+    `💰 Aplicação mínima: ${investedLabel}`,
+    'Possibilidade de saída antecipada mediante cotação',
+    '',
+    'OBS: Informações meramente informativas com valores aproximados. Favor verificar perfil de risco e o push da operação.',
+  ].join('\n')
+}
+
+const buildFinanciamentoCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  creditPct,
+  underlyingBreakevenPct,
+  capPct,
+}) => {
+  const credit = fmtPct(creditPct)
+  const breakeven = fmtPct(underlyingBreakevenPct)
+  const cap = fmtPct(capPct)
+  const capRaw = Number(capPct) || 0
+  const creditRaw = Number(creditPct) || 0
+  const capPlusCredit = fmtPct(round2(capRaw + creditRaw))
+  return [
+    `Financiamento ${tickerLabel}`,
+    '',
+    'Objetivo',
+    `Ganhar taxa mediante a venda da call referente ao prêmio recebido na montagem da operação de ${credit} sobre a posição comprada no ativo ${tickerLabel}.`,
+    '',
+    'Cenário de Perda',
+    `Investidor perde 1% a cada 1% que a ação estiver abaixo de ${breakeven} do preço de referência de forma ilimitada.`,
+    '',
+    'Cenário de Ganho',
+    `Ganho de 1% a cada 1% acima de ${breakeven} do preço inicial, com ganho máximo limitado a ${capPlusCredit} (prêmio recebido na montagem + alta de até ${cap}).`,
+    '',
+    'Vencimento',
+    `${maturityLabel || '--'}`,
+  ].join('\n')
+}
+
+const findBreakevenPctFromRows = (rows, direction = 'up') => {
+  const withBreakeven = injectBreakevenRows(rows || [])
+  const breakevenRow = withBreakeven.find((r) => r.isBreakeven)
+  if (breakevenRow && Number.isFinite(Number(breakevenRow.underlyingVarPct))) {
+    return round2(Math.abs(Number(breakevenRow.underlyingVarPct)))
+  }
+  const ordered = (Array.isArray(rows) ? rows : []).slice().sort((a, b) => a.underlyingVarPct - b.underlyingVarPct)
+  if (direction === 'up') {
+    const firstNonLoss = ordered.find((r) => Number(r.strategyVarPct) >= 0 && Number(r.underlyingVarPct) > 0)
+    if (firstNonLoss) return round2(Math.abs(Number(firstNonLoss.underlyingVarPct)))
+  } else {
+    const firstNonLoss = [...ordered].reverse().find((r) => Number(r.strategyVarPct) >= 0 && Number(r.underlyingVarPct) < 0)
+    if (firstNonLoss) return round2(Math.abs(Number(firstNonLoss.underlyingVarPct)))
+  }
+  return null
+}
+
+const buildOptionCommercialMessage = ({
+  tickerLabel,
+  maturityLabel,
+  direction = 'up',
+  optionCostPct,
+  breakevenPct = null,
+  investmentValue,
+}) => {
+  const isDown = direction === 'down'
+  const movementLabel = isDown ? 'queda' : 'alta'
+  const cost = Math.abs(Number(optionCostPct) || 0.01)
+  const rawBreakeven = breakevenPct != null && Number.isFinite(Number(breakevenPct))
+    ? Math.abs(Number(breakevenPct))
+    : cost
+  const pt0 = isDown ? -rawBreakeven : rawBreakeven
+  const pt1 = isDown ? -(rawBreakeven + cost) : rawBreakeven + cost
+  const pt2 = isDown ? -(rawBreakeven + 2 * cost) : rawBreakeven + 2 * cost
+  const investedAmount = toNumber(investmentValue)
+  const investedLabel = investedAmount != null ? fmtCurrency(investedAmount) : '--'
+  const profit1Label = investedAmount != null ? fmtCurrency(investedAmount) : '--'
+  const profit2Label = investedAmount != null ? fmtCurrency(investedAmount * 2) : '--'
+  return [
+    `${tickerLabel}`,
+    '',
+    `🎯 Objetivo: Obter ganho ilimitado com a ${isDown ? 'desvalorizacao' : 'valorizacao'} de ${tickerLabel} com risco maximo limitado ao valor pago pela estrutura.`,
+    '',
+    'Exemplo de desempenho no vencimento:',
+    `- Considerando aporte de ${investedLabel}.`,
+    '',
+    `${tickerLabel} com ${movementLabel} de ${fmtPct(pt0)} = Recebe o Capital Investido (0X0).`,
+    `${tickerLabel} com ${movementLabel} de ${fmtPct(pt1)} = Capital Investido + ${profit1Label}.`,
+    `${tickerLabel} com ${movementLabel} de ${fmtPct(pt2)} = Capital Investido + ${profit2Label}.`,
+    '',
+    '❗ Risco maximo: Valor investido.',
+    '📈 Lucro maximo: Lucro ilimitado.',
+    '',
+    `⏱ Vencimento: ${maturityLabel || '--'}`,
+    '(possibilidade de saida antecipada).',
+  ].join('\n')
+}
+
 const buildModel = ({
   template,
   values,
@@ -1068,10 +1762,20 @@ const buildModel = ({
   lowBarrierSamplingPct = null,
   highBarrierSamplingMode = 'barrier',
   lowBarrierSamplingMode = 'barrier',
+  includeBreakeven = true,
 }) => {
   const tk = ticker(values.ticker)
   const maturityLabel = fmtDate(values.maturityDate)
-  const rowsWithBreakeven = injectBreakevenRows(rows)
+  const feeAaiRealPct = resolveFeeAaiRealPct(template?.id, values)
+  const rowsWithBarrierEdge = injectBarrierEdgeRows(rows, {
+    highBarrierPct: highBarrierSamplingPct,
+    lowBarrierPct: lowBarrierSamplingPct,
+    highBarrierMode: highBarrierSamplingMode,
+    lowBarrierMode: lowBarrierSamplingMode,
+  })
+  const rowsWithBreakeven = includeBreakeven
+    ? injectBreakevenRows(rowsWithBarrierEdge)
+    : rowsWithBarrierEdge
   const sampledRows = limitRowsAroundBarriers(rowsWithBreakeven, {
     highBarrierPct: highBarrierSamplingPct,
     lowBarrierPct: lowBarrierSamplingPct,
@@ -1079,6 +1783,9 @@ const buildModel = ({
     lowBarrierMode: lowBarrierSamplingMode,
   })
   const orderedRows = orderPayoffRows(sampledRows, scenarioDirection)
+  const parsedMaxGainBarrierPct = maxGainBarrierPct == null || maxGainBarrierPct === ''
+    ? null
+    : Number(maxGainBarrierPct)
   return {
     templateId: template.id,
     templateLabel: template.label,
@@ -1089,9 +1796,11 @@ const buildModel = ({
     footer: {
       ticketMin: fmtCurrency(values.ticketMin),
       feeAai: fmtFee(values.feeAai),
+      feeAaiReal: feeAaiRealPct == null ? '--' : fmtPct(feeAaiRealPct, 3),
     },
+    feeAaiRealPct: feeAaiRealPct == null ? null : round2(feeAaiRealPct),
     payoffRows: orderedRows,
-    maxGainBarrierPct: Number.isFinite(Number(maxGainBarrierPct)) ? Number(maxGainBarrierPct) : null,
+    maxGainBarrierPct: Number.isFinite(parsedMaxGainBarrierPct) ? parsedMaxGainBarrierPct : null,
     generatedMessage: buildMessage({ label: template.label, tickerLabel: tk, maturityLabel, sections }),
     validations: unique([...(validateFields(template.fields, values) || []), ...(validations || [])]),
     tableHeadLeft: 'Variacao do ativo',
@@ -1140,24 +1849,40 @@ const templates = [
           barrierPct: effectiveFloor,
         })
         : fallbackRows
+      const effectiveMaxGain = resolveRowsMaxGainPct(rows, maxGain)
+      const breakevenFromRows = optionSettlement.leveraged ? findBreakevenPctFromRows(rows, 'down') : null
+      const startForMessage = breakevenFromRows != null ? -breakevenFromRows : start
+      const spreadMessage = buildSpreadCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        direction: 'down',
+        startPct: startForMessage,
+        limitPct: effectiveFloor,
+        maxGainPct: effectiveMaxGain,
+        investmentValue: values.ticketMin,
+      })
       const warnings = startRaw <= limitRaw ? ['O inicio do ganho deve ser maior que o limite da queda.'] : []
       const hasStrikeInput = hasOptionStrikeInput(values.options)
       if (hasStrikeInput && !optionSettlement.hasDerivativeLegs) warnings.push('Configure strike nas opcoes para calculo de vencimento.')
       if (hasStrikeInput && !optionSettlement.hasValidCost) warnings.push('Informe o custo da opcao (%) para calcular o retorno alavancado.')
-      return buildModel({
+      const model = buildModel({
         template, values, rows, validations: warnings,
         scenarioDirection: template.scenarioDirection || 'up',
         lowBarrierSamplingPct: effectiveFloor,
         lowBarrierSamplingMode: 'post_only',
         subtitle: 'Ganho na queda com perda limitada ao premio.',
-        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Ganho maximo', value: fmtPct(maxGain), tone: 'positive' }, { label: 'Premio', value: `-${fmtPct(premium)}`, tone: 'negative' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
-        highlights: [`Inicio na queda: ${fmtPct(start)}`, `Limitador: ${fmtPct(limit)}`, `Perda maxima: ${fmtPct(premium)}`],
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Ganho maximo', value: fmtPct(effectiveMaxGain), tone: 'positive' }, { label: 'Premio', value: `-${fmtPct(premium)}`, tone: 'negative' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        highlights: [`Inicio na queda: ${fmtPct(start)}`, `Limitador: ${fmtPct(effectiveFloor)}`, `Perda maxima: ${fmtPct(premium)}`],
         sections: [
           `*Objetivo:* Buscar ganho com a queda de ${tk}, com risco limitado ao custo da estrutura de ${fmtPct(premium)}.`,
           `*Cenario de ganho:* Se ${tk} cair entre ${fmtPct(start)} e ${fmtPct(limit)}, o retorno cresce de forma gradual ate ${fmtPct(maxGain)}; abaixo de ${fmtPct(limit)}, o ganho permanece em ${fmtPct(maxGain)}.`,
           `*Cenario de perda:* Se ${tk} ficar estavel ou subir, a perda maxima fica limitada a ${fmtPct(premium)}.`,
         ],
       })
+      return {
+        ...model,
+        generatedMessage: spreadMessage,
+      }
     },
   },
   {
@@ -1171,21 +1896,41 @@ const templates = [
       const barrier = pct(values.barrierUpPct, 36.99, 0, 200)
       const capAfter = pct(values.capAfterPct, 7, -50, 200)
       const floor = -(100 - protection)
-      const preBarrier = beforeBarrierPct(barrier, 'high')
-      const rows = payoffRows((u) => (u <= floor ? floor : (u <= barrier ? u : Math.min(u, capAfter))), [floor, barrier, capAfter])
-      return buildModel({
+      const optionPayoff = buildOptionDrivenRows(values.options, {
+        includeUnderlying: true,
+        baseQuantity: values.stockQuantity,
+      })
+      const highBarrierFromOptions = resolveHighBarrierFromOptionSpecs(optionPayoff.specs)
+      const highCapFromOptions = resolveHighCapFromOptionEntries(values.options)
+      const effectiveBarrier = highBarrierFromOptions != null ? highBarrierFromOptions : barrier
+      const effectiveCapAfter = highCapFromOptions != null ? highCapFromOptions : capAfter
+      const preBarrier = beforeBarrierPct(effectiveBarrier, 'high')
+      const fallbackRows = payoffRows(
+        (u) => (u <= floor ? floor : (u <= effectiveBarrier ? u : Math.min(u, effectiveCapAfter))),
+        [floor, effectiveBarrier, effectiveCapAfter],
+      )
+      const rows = optionPayoff.hasDerivativeLegs ? optionPayoff.rows : fallbackRows
+      const collarUiMessage = buildCollarUiCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        preBarrierPct: preBarrier,
+        capAfterPct: effectiveCapAfter,
+        protectionPct: protection,
+      })
+      const collarUiModel = buildModel({
         template, values, rows,
         subtitle: 'Protecao de capital com limite de alta apos ativacao da barreira.',
-        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Barreira alta', value: fmtPct(barrier) }, { label: 'Limitador', value: fmtPct(capAfter), tone: 'positive' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
-        maxGainBarrierPct: barrier,
-        highBarrierSamplingPct: barrier,
-        highlights: [`Protecao: ${fmtPct(protection)} do capital`, `Barreira de alta: ${fmtPct(barrier)}`, `Limitador de alta: ${fmtPct(capAfter)}`],
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Barreira alta', value: fmtPct(effectiveBarrier) }, { label: 'Limitador', value: fmtPct(effectiveCapAfter), tone: 'positive' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        maxGainBarrierPct: effectiveBarrier,
+        highBarrierSamplingPct: effectiveBarrier,
+        highlights: [`Protecao: ${fmtPct(protection)} do capital`, `Barreira de alta: ${fmtPct(effectiveBarrier)}`, `Limitador de alta: ${fmtPct(effectiveCapAfter)}`],
         sections: [
-          `*Objetivo:* Participar da valorizacao de ${tk} ate ${fmtPct(preBarrier)}. Caso a alta seja igual ou superior a ${fmtPct(barrier)}, o retorno final fica limitado a ${fmtPct(capAfter)} no periodo.`,
-          `*Cenario de ganho:* Em alta, o investidor acompanha o ativo ate ${fmtPct(preBarrier)}; ao atingir ${fmtPct(barrier)}, o ganho fica travado em ${fmtPct(capAfter)}.`,
+          `*Objetivo:* Participar da valorizacao de ${tk} ate ${fmtPct(preBarrier)}. Caso a alta seja igual ou superior a ${fmtPct(effectiveBarrier)}, o retorno final fica limitado a ${fmtPct(effectiveCapAfter)} no periodo.`,
+          `*Cenario de ganho:* Em alta, o investidor acompanha o ativo ate ${fmtPct(preBarrier)}; ao atingir ${fmtPct(effectiveBarrier)}, o ganho fica travado em ${fmtPct(effectiveCapAfter)}.`,
           `*Cenario de perda:* Em queda, o resultado minimo da estrategia fica limitado em ${fmtPct(floor)}.`,
         ],
       })
+      return { ...collarUiModel, generatedMessage: collarUiMessage }
     },
   },
   {
@@ -1227,23 +1972,39 @@ const templates = [
           barrierPct: effectiveCap,
         })
         : fallbackRows
+      const effectiveMaxGain = resolveRowsMaxGainPct(rows, maxGain)
+      const breakevenFromRows = optionSettlement.leveraged ? findBreakevenPctFromRows(rows, 'up') : null
+      const startForMessage = breakevenFromRows != null ? breakevenFromRows : start
+      const spreadMessage = buildSpreadCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        direction: 'up',
+        startPct: startForMessage,
+        limitPct: effectiveCap,
+        maxGainPct: effectiveMaxGain,
+        investmentValue: values.ticketMin,
+      })
       const warnings = startRaw >= limitRaw ? ['O inicio do ganho deve ser menor que o limite da alta.'] : []
       const hasStrikeInput = hasOptionStrikeInput(values.options)
       if (hasStrikeInput && !optionSettlement.hasDerivativeLegs) warnings.push('Configure strike nas opcoes para calculo de vencimento.')
       if (hasStrikeInput && !optionSettlement.hasValidCost) warnings.push('Informe o custo da opcao (%) para calcular o retorno alavancado.')
-      return buildModel({
+      const model = buildModel({
         template, values, rows, validations: warnings,
         subtitle: 'Alta alavancada com perda limitada ao premio.',
-        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Ganho maximo', value: fmtPct(maxGain), tone: 'positive' }, { label: 'Premio', value: `-${fmtPct(premium)}`, tone: 'negative' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Ganho maximo', value: fmtPct(effectiveMaxGain), tone: 'positive' }, { label: 'Premio', value: `-${fmtPct(premium)}`, tone: 'negative' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
         highBarrierSamplingPct: effectiveCap,
         highBarrierSamplingMode: 'post_only',
-        highlights: [`Inicio da alta: ${fmtPct(start)}`, `Limitador da alta: ${fmtPct(limit)}`, `Perda maxima: ${fmtPct(premium)}`],
+        highlights: [`Inicio da alta: ${fmtPct(start)}`, `Limitador da alta: ${fmtPct(effectiveCap)}`, `Perda maxima: ${fmtPct(premium)}`],
         sections: [
           `*Objetivo:* Buscar ganho com a alta de ${tk} entre ${fmtPct(start)} e ${fmtPct(limit)}, com risco limitado ao custo da estrutura de ${fmtPct(premium)}.`,
           `*Cenario de ganho:* Se ${tk} subir entre ${fmtPct(start)} e ${fmtPct(limit)}, o retorno cresce de forma gradual ate ${fmtPct(maxGain)}; acima de ${fmtPct(limit)}, o ganho permanece em ${fmtPct(maxGain)}.`,
           `*Cenario de perda:* Em estabilidade ou queda, a perda maxima fica limitada a ${fmtPct(premium)}.`,
         ],
       })
+      return {
+        ...model,
+        generatedMessage: spreadMessage,
+      }
     },
   },
   {
@@ -1278,7 +2039,16 @@ const templates = [
       const hasStrikeInput = hasOptionStrikeInput(values.options)
       if (hasStrikeInput && !optionSettlement.hasDerivativeLegs) warnings.push('Configure strike nas opcoes para calculo de vencimento.')
       if (hasStrikeInput && !optionSettlement.hasValidCost) warnings.push('Informe o custo da opcao (%) para calcular o retorno alavancado.')
-      return buildModel({
+      const breakevenPctCall = findBreakevenPctFromRows(rows, 'up')
+      const callMessage = buildOptionCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        direction: 'up',
+        optionCostPct: optionCost,
+        breakevenPct: breakevenPctCall,
+        investmentValue: values.ticketMin,
+      })
+      const callModel = buildModel({
         template, values, rows, validations: warnings,
         subtitle: 'Exposicao de alta com risco limitado ao valor investido.',
         metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Ganho maximo', value: fmtPct(maxGain), tone: maxGain > 0 ? 'positive' : 'neutral' }, { label: 'Risco maximo', value: '-100,00%', tone: 'negative' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
@@ -1289,6 +2059,7 @@ const templates = [
           `*Cenario de perda:* Em estabilidade ou queda, a perda maxima fica limitada a 100,00% do valor investido na opcao.`,
         ],
       })
+      return { ...callModel, generatedMessage: callMessage }
     },
   },
   {
@@ -1324,7 +2095,16 @@ const templates = [
       const hasStrikeInput = hasOptionStrikeInput(values.options)
       if (hasStrikeInput && !optionSettlement.hasDerivativeLegs) warnings.push('Configure strike nas opcoes para calculo de vencimento.')
       if (hasStrikeInput && !optionSettlement.hasValidCost) warnings.push('Informe o custo da opcao (%) para calcular o retorno alavancado.')
-      return buildModel({
+      const breakevenPctPut = findBreakevenPctFromRows(rows, 'down')
+      const putMessage = buildOptionCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        direction: 'down',
+        optionCostPct: optionCost,
+        breakevenPct: breakevenPctPut,
+        investmentValue: values.ticketMin,
+      })
+      const putModel = buildModel({
         template, values, rows, validations: warnings,
         scenarioDirection: template.scenarioDirection || 'up',
         subtitle: 'Exposicao de queda com risco limitado ao valor investido.',
@@ -1336,6 +2116,7 @@ const templates = [
           `*Cenario de perda:* Em estabilidade ou alta, a perda maxima fica limitada a 100,00% do valor investido na opcao.`,
         ],
       })
+      return { ...putModel, generatedMessage: putMessage }
     },
   },
   {
@@ -1348,18 +2129,34 @@ const templates = [
       const protection = pct(values.protectionPct, 90, 0, 100)
       const cap = pct(values.highCapPct, 20, -20, 200)
       const floor = -(100 - protection)
-      const rows = payoffRows((u) => (u <= floor ? floor : (u >= cap ? cap : u)), [floor, cap])
-      return buildModel({
+      const optionPayoff = buildOptionDrivenRows(values.options, {
+        includeUnderlying: true,
+        baseQuantity: values.stockQuantity,
+      })
+      const highCapFromOptions = resolveHighCapFromOptionEntries(values.options)
+      const effectiveCap = highCapFromOptions != null ? highCapFromOptions : cap
+      const fallbackRows = payoffRows((u) => (u <= floor ? floor : (u >= effectiveCap ? effectiveCap : u)), [floor, effectiveCap])
+      const rows = optionPayoff.hasDerivativeLegs ? optionPayoff.rows : fallbackRows
+      const collarMessage = buildCollarCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        capPct: effectiveCap,
+        protectionPct: protection,
+      })
+      const collarModel = buildModel({
         template, values, rows,
         subtitle: 'Protecao na queda com limite de alta.',
-        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Protecao', value: fmtPct(protection) }, { label: 'Limitador', value: fmtPct(cap), tone: 'positive' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
-        highlights: [`Protecao: ${fmtPct(protection)}`, `Limitador de alta: ${fmtPct(cap)}`, 'Estrutura sem premio adicional'],
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Protecao', value: fmtPct(protection) }, { label: 'Limitador', value: fmtPct(effectiveCap), tone: 'positive' }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        highBarrierSamplingPct: effectiveCap,
+        highBarrierSamplingMode: 'post_only',
+        highlights: [`Protecao: ${fmtPct(protection)}`, `Limitador de alta: ${fmtPct(effectiveCap)}`, 'Estrutura sem premio adicional'],
         sections: [
-          `*Objetivo:* Participar da alta de ${tk} ate ${fmtPct(cap)}, com resultado minimo limitado em ${fmtPct(floor)}.`,
-          `*Cenario de ganho:* Em alta, o retorno acompanha o ativo ate ${fmtPct(cap)}; acima desse ponto, o ganho fica limitado em ${fmtPct(cap)}.`,
+          `*Objetivo:* Participar da alta de ${tk} ate ${fmtPct(effectiveCap)}, com resultado minimo limitado em ${fmtPct(floor)}.`,
+          `*Cenario de ganho:* Em alta, o retorno acompanha o ativo ate ${fmtPct(effectiveCap)}; acima desse ponto, o ganho fica limitado em ${fmtPct(effectiveCap)}.`,
           `*Cenario de perda:* Em queda, a perda maxima no vencimento fica travada em ${fmtPct(floor)}.`,
         ],
       })
+      return { ...collarModel, generatedMessage: collarMessage }
     },
   },
   {
@@ -1372,21 +2169,49 @@ const templates = [
       const partial = pct(values.partialProtectionPct, 15, 0, 80)
       const barrier = pct(values.barrierUpPct, 21, 0, 150)
       const capAfter = pct(values.capAfterPct, 7, -20, 200)
-      const preBarrier = beforeBarrierPct(barrier, 'high')
-      const rows = payoffRows((u) => (u >= 0 ? (u <= barrier ? u : Math.min(u, capAfter)) : (u >= -partial ? 0 : u + partial)), [barrier, capAfter, -partial])
-      return buildModel({
+      const optionPayoff = buildOptionDrivenRows(values.options, {
+        includeUnderlying: true,
+        baseQuantity: values.stockQuantity,
+      })
+      const highBarrierFromOptions = resolveHighBarrierFromOptionSpecs(optionPayoff.specs)
+      const highCapFromOptions = resolveHighCapFromOptionEntries(values.options)
+      const lowCapFromOptions = resolveLowCapFromOptionEntries(values.options)
+      const effectiveBarrier = highBarrierFromOptions != null ? highBarrierFromOptions : barrier
+      const effectiveCapAfter = highCapFromOptions != null ? highCapFromOptions : capAfter
+      const effectivePartial = lowCapFromOptions == null ? partial : Math.abs(Math.min(lowCapFromOptions, 0))
+      const preBarrier = beforeBarrierPct(effectiveBarrier, 'high')
+      const fallbackRows = payoffRows(
+        (u) => (u >= 0 ? (u <= effectiveBarrier ? u : Math.min(u, effectiveCapAfter)) : (u >= -effectivePartial ? 0 : u + effectivePartial)),
+        [effectiveBarrier, effectiveCapAfter, -effectivePartial],
+      )
+      const rows = optionPayoff.hasDerivativeLegs ? optionPayoff.rows : fallbackRows
+      const fenceMessage = buildFenceUiCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        preBarrierPct: preBarrier,
+        partialProtectionPct: effectivePartial,
+        barrierPct: effectiveBarrier,
+        capAfterPct: effectiveCapAfter,
+      })
+      const model = buildModel({
         template, values, rows,
         subtitle: 'Protecao parcial na queda e limite de alta apos barreira.',
-        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Protecao parcial', value: fmtPct(partial) }, { label: 'Barreira alta', value: fmtPct(barrier) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
-        maxGainBarrierPct: barrier,
-        highBarrierSamplingPct: barrier,
-        highlights: [`Protecao parcial: ${fmtPct(partial)}`, `Barreira de alta: ${fmtPct(barrier)}`, `Limitador apos barreira: ${fmtPct(capAfter)}`],
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Protecao parcial', value: fmtPct(effectivePartial) }, { label: 'Barreira alta', value: fmtPct(effectiveBarrier) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        maxGainBarrierPct: effectiveBarrier,
+        highBarrierSamplingPct: effectiveBarrier,
+        highlights: [`Protecao parcial: ${fmtPct(effectivePartial)}`, `Barreira de alta: ${fmtPct(effectiveBarrier)}`, `Limitador apos barreira: ${fmtPct(effectiveCapAfter)}`],
         sections: [
-          `*Objetivo:* Combinar participacao na alta de ${tk} ate ${fmtPct(preBarrier)} com colchao de ${fmtPct(partial)} na queda. Se a alta atingir ${fmtPct(barrier)}, o retorno passa a ${fmtPct(capAfter)}.`,
-          `*Cenario de ganho:* Em alta ate ${fmtPct(preBarrier)}, o retorno acompanha o ativo; ao atingir ${fmtPct(barrier)}, o ganho fica limitado em ${fmtPct(capAfter)}.`,
-          `*Cenario de perda:* Quedas ate ${fmtPct(-partial)} ficam neutralizadas; abaixo desse nivel, a estrategia volta a acompanhar a desvalorizacao.`,
+          `*Objetivo:* Ganhar com a alta moderada de ${tk} em ate ${fmtPct(preBarrier)}, com protecao parcial na queda de ate ${fmtPct(-effectivePartial)}. Se a alta de ${fmtPct(effectiveBarrier)} for superada, o ganho maximo fica limitado a ${fmtPct(effectiveCapAfter)} no periodo.`,
+          `*Cenario de alta (sem atingir ${fmtPct(effectiveBarrier)}):* Se ${tk} subir, sem nunca tocar ${fmtPct(effectiveBarrier)} do preco inicial, o investidor ganha 1% para cada 1% de alta, ate o limite de ${fmtPct(preBarrier)}.`,
+          `*Cenario de alta (atingiu ${fmtPct(effectiveBarrier)}):* Se ${tk} a qualquer momento atingir ${fmtPct(effectiveBarrier)} do preco inicial, o investidor segue com ganho na alta, porem com ganho maximo limitado a ${fmtPct(effectiveCapAfter)} no periodo.`,
+          `*Cenario neutro:* Se ${tk} ficar entre 0% e ${fmtPct(-effectivePartial)} do preco inicial, o investidor nao ganha e nem perde (faixa de protecao parcial).`,
+          `*Cenario de perda:* Se ${tk} cair abaixo de ${fmtPct(-effectivePartial)} do preco inicial, o investidor perde 1% para cada 1% de queda abaixo desse nivel, de forma ilimitada.`,
         ],
       })
+      return {
+        ...model,
+        generatedMessage: fenceMessage,
+      }
     },
   },
   {
@@ -1457,19 +2282,31 @@ const templates = [
       const barrierRaw = pct(values.barrierUpPct, 25, -10, 180)
       const barrier = Math.max(barrierRaw, trigger)
       const capAfter = pct(values.capAfterPct, 10, -30, 200)
-      const preBarrier = beforeBarrierPct(barrier, 'high')
-      const rows = payoffRows((u) => (u < 0 ? u : (u <= trigger ? u : (u <= barrier ? trigger + 2 * (u - trigger) : capAfter))), [trigger, barrier, capAfter])
+      const optionPayoff = buildOptionDrivenRows(values.options, {
+        includeUnderlying: true,
+        baseQuantity: values.stockQuantity,
+      })
+      const highBarrierFromOptions = resolveHighBarrierFromOptionSpecs(optionPayoff.specs)
+      const highCapFromOptions = resolveHighCapFromOptionEntries(values.options)
+      const effectiveBarrier = highBarrierFromOptions != null ? Math.max(highBarrierFromOptions, trigger) : barrier
+      const effectiveCapAfter = highCapFromOptions != null ? highCapFromOptions : capAfter
+      const preBarrier = beforeBarrierPct(effectiveBarrier, 'high')
+      const fallbackRows = payoffRows(
+        (u) => (u < 0 ? u : (u <= trigger ? u : (u <= effectiveBarrier ? trigger + 2 * (u - trigger) : effectiveCapAfter))),
+        [trigger, effectiveBarrier, effectiveCapAfter],
+      )
+      const rows = optionPayoff.hasDerivativeLegs ? optionPayoff.rows : fallbackRows
       const warnings = barrierRaw < trigger ? ['A barreira KO de alta deve ser maior ou igual ao gatilho.'] : []
       return buildModel({
         template, values, rows, validations: warnings,
         subtitle: 'Ganho dobrado na alta ate o KO, com limitador apos ativacao.',
-        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'KO alta', value: fmtPct(barrier) }, { label: 'Pos KO', value: fmtPct(capAfter) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
-        maxGainBarrierPct: barrier,
-        highBarrierSamplingPct: barrier,
-        highlights: [`Ganho dobrado acima de ${fmtPct(trigger)}`, `Barreira KO: ${fmtPct(barrier)}`, `Limitador apos KO: ${fmtPct(capAfter)}`],
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'KO alta', value: fmtPct(effectiveBarrier) }, { label: 'Pos KO', value: fmtPct(effectiveCapAfter) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        maxGainBarrierPct: effectiveBarrier,
+        highBarrierSamplingPct: effectiveBarrier,
+        highlights: [`Ganho dobrado acima de ${fmtPct(trigger)}`, `Barreira KO: ${fmtPct(effectiveBarrier)}`, `Limitador apos KO: ${fmtPct(effectiveCapAfter)}`],
         sections: [
           `*Objetivo:* Buscar ganho acelerado na alta de ${tk} a partir de ${fmtPct(trigger)} ate ${fmtPct(preBarrier)}.`,
-          `*Cenario de ganho:* Entre ${fmtPct(trigger)} e ${fmtPct(preBarrier)}, a estrategia amplia o retorno da alta. Se ${tk} atingir ${fmtPct(barrier)}, o resultado final passa para ${fmtPct(capAfter)}.`,
+          `*Cenario de ganho:* Entre ${fmtPct(trigger)} e ${fmtPct(preBarrier)}, a estrategia amplia o retorno da alta. Se ${tk} atingir ${fmtPct(effectiveBarrier)}, o resultado final passa para ${fmtPct(effectiveCapAfter)}.`,
           `*Cenario de perda:* Em movimentos de queda, o investidor acompanha a desvalorizacao do ativo.`,
         ],
       })
@@ -1511,7 +2348,16 @@ const templates = [
         if (!hasHighUoCall) warnings.push('Inclua uma call comprada com UO para desativacao na alta.')
         if (!hasHighUiCall) warnings.push('Inclua uma call vendida com UI para ativacao na alta.')
       }
-      return buildModel({
+      const maxGainAtBarrier = round2(2 * (highBarrierFromOptions != null ? highBarrierFromOptions : highKo))
+      const docMessage = buildDocBidirecionalCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        preHighBarrierPct: preHighBarrier,
+        maxGainPct: maxGainAtBarrier,
+        couponPct: coupon,
+        preDownKoPct: effectivePreDownBarrier,
+      })
+      const docModel = buildModel({
         template, values, rows, validations: warnings,
         subtitle: 'Protecao na queda ate KO; apos desativacao participa da queda normalmente.',
         metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'UI alta', value: fmtPct(highKo) }, { label: 'KO baixa', value: fmtPct(effectiveDownKo) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
@@ -1525,6 +2371,7 @@ const templates = [
           `*Cenario de perda:* Em queda, ha protecao ate ${fmtPct(effectivePreDownBarrier)}. Se a desvalorizacao atingir ${fmtPct(effectiveDownKo)}, a estrategia volta a acompanhar a variacao do ativo.`,
         ],
       })
+      return { ...docModel, generatedMessage: docMessage }
     },
   },
   {
@@ -1552,7 +2399,13 @@ const templates = [
         baseQuantity: values.stockQuantity,
       })
       const rows = optionSettlement.leveraged ? optionSettlement.rows : fallbackRows
-      return buildModel({
+      const alocMessage = buildAlocacaoProtegidaCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        investmentValue: values.ticketMin,
+        termMonths: values.termMonths,
+      })
+      const alocModel = buildModel({
         template, values, rows,
         subtitle: 'Participacao de alta com perda apenas abaixo do patamar protegido.',
         metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Gatilho alta', value: fmtPct(upTrigger) }, { label: 'Protecao', value: fmtPct(downProtection) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
@@ -1563,6 +2416,7 @@ const templates = [
           `*Cenario de perda:* Entre 0% e ${fmtPct(-downProtection)}, a estrategia busca preservar capital; abaixo desse nivel, volta a acompanhar a queda.`,
         ],
       })
+      return { ...alocModel, generatedMessage: alocMessage }
     },
   },
   {
@@ -1585,7 +2439,13 @@ const templates = [
       if (!optionPayoff.hasDerivativeLegs) {
         warnings.push('Configure strikes e quantidades nas opcoes para o payoff por pernas.')
       }
-      return buildModel({
+      const popMessage = buildPopCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        upPartPct: upPart,
+        downProtectionPct: downProtection,
+      })
+      const popModel = buildModel({
         template, values, rows, validations: warnings,
         subtitle: 'Participacao parcial na alta com protecao em quedas mais profundas.',
         metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Part. alta', value: fmtPct(upPart) }, { label: 'Protecao', value: fmtPct(downProtection) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
@@ -1596,24 +2456,39 @@ const templates = [
           `*Cenario de perda:* Em queda, o resultado minimo fica travado em ${fmtPct(-downProtection)}.`,
         ],
       })
+      return { ...popModel, generatedMessage: popMessage }
     },
   },
   {
     id: 'rubi',
     label: 'RUBI',
-    defaults: { ...BASE_DEFAULTS, ticker: 'RENT3', termMonths: '4', couponPct: '8', downBarrierPct: '20', ticketMin: 'R$ 5.000,00', feeAai: '1,23%' },
-    fields: [...IDENT_FIELDS, numberField('couponPct', 'Cupom nominal (%)'), numberField('downBarrierPct', 'Barreira KO de baixa (%)'), ...COMM_FIELDS],
+    defaults: { ...BASE_DEFAULTS, ticker: 'RENT3', termMonths: '4', couponPct: '8', downBarrierPct: '20', cdiEquivPct: '', ticketMin: 'R$ 5.000,00', feeAai: '1,23%' },
+    fields: [...IDENT_FIELDS, numberField('couponPct', 'Cupom nominal (%)'), numberField('downBarrierPct', 'Barreira KO de baixa (%)'), numberField('cdiEquivPct', 'Equivalência CDI (%) opcional'), ...COMM_FIELDS],
     build(values, template) {
       const tk = ticker(values.ticker)
-      const coupon = pct(values.couponPct, 8, -100, 300)
-      const barrier = -Math.abs(pct(values.downBarrierPct, 20, 0, 95))
+      const fallbackCoupon = pct(values.couponPct, 8, -100, 300)
+      const fallbackBarrierAbs = pct(values.downBarrierPct, 20, 0, 95)
+      const optionConfig = resolveRubiConfigFromOptions(values.options, fallbackCoupon, fallbackBarrierAbs, values.stockQuantity)
+      const coupon = optionConfig.couponPct
+      const barrier = -Math.abs(optionConfig.downBarrierAbsPct)
       const preBarrier = beforeBarrierPct(barrier, 'low')
-      const rows = payoffRows((u) => (u >= barrier ? coupon : u), [barrier, coupon])
-      return buildModel({
-        template, values, rows,
+      const guidePoints = buildRubiGuidePoints(barrier)
+      const rows = payoffRows((u) => (u > barrier ? coupon : u), [], guidePoints)
+      const cdiEquiv = toNumber(values.cdiEquivPct)
+      const rubiMessage = buildRubiCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        couponPct: coupon,
+        barrierPct: barrier,
+        preBarrierPct: preBarrier,
+        cdiEquivPct: cdiEquiv,
+      })
+      const rubiModel = buildModel({
+        template, values, rows, validations: optionConfig.warnings,
         subtitle: 'Cupom pre-acordado condicionado ao nao atingimento de KO durante a vida.',
         metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Cupom', value: fmtPct(coupon), tone: 'positive' }, { label: 'KO baixa', value: fmtPct(barrier) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
         lowBarrierSamplingPct: barrier,
+        includeBreakeven: false,
         highlights: [`Cupom nominal: ${fmtPct(coupon)}`, `KO de baixa: ${fmtPct(barrier)}`, 'Barreira monitorada durante toda a operacao'],
         sections: [
           `*Objetivo:* Buscar retorno pre-acordado de ${fmtPct(coupon)} desde que ${tk} nao tenha desvalorizacao igual ou superior a ${fmtPct(barrier)}.`,
@@ -1621,24 +2496,38 @@ const templates = [
           `*Cenario de perda:* Se ${tk} atingir ${fmtPct(barrier)} ou abaixo, o cupom deixa de ser pago e o investidor passa a acompanhar a variacao do ativo.`,
         ],
       })
+      return { ...rubiModel, generatedMessage: rubiMessage }
     },
   },
   {
     id: 'rubi_black',
     label: 'RUBI Black',
-    defaults: { ...BASE_DEFAULTS, ticker: 'RENT3', termMonths: '4', couponPct: '8', downBarrierPct: '20', ticketMin: 'R$ 5.000,00', feeAai: '1,23%' },
-    fields: [...IDENT_FIELDS, numberField('couponPct', 'Cupom nominal (%)'), numberField('downBarrierPct', 'Barreira KO de baixa (%)'), ...COMM_FIELDS],
+    defaults: { ...BASE_DEFAULTS, ticker: 'RENT3', termMonths: '4', couponPct: '8', downBarrierPct: '20', highCapPct: '', ticketMin: 'R$ 5.000,00', feeAai: '1,23%' },
+    fields: [...IDENT_FIELDS, numberField('couponPct', 'Cupom nominal (%)'), numberField('downBarrierPct', 'Barreira KO de baixa (%)'), numberField('highCapPct', 'Ganho adicional de alta (%) opcional'), ...COMM_FIELDS],
     build(values, template) {
       const tk = ticker(values.ticker)
-      const coupon = pct(values.couponPct, 8, -100, 300)
-      const barrier = -Math.abs(pct(values.downBarrierPct, 20, 0, 95))
+      const fallbackCoupon = pct(values.couponPct, 8, -100, 300)
+      const fallbackBarrierAbs = pct(values.downBarrierPct, 20, 0, 95)
+      const optionConfig = resolveRubiConfigFromOptions(values.options, fallbackCoupon, fallbackBarrierAbs, values.stockQuantity)
+      const coupon = optionConfig.couponPct
+      const barrier = -Math.abs(optionConfig.downBarrierAbsPct)
       const preBarrier = beforeBarrierPct(barrier, 'low')
-      const rows = payoffRows((u) => (u >= barrier ? coupon : u), [barrier, coupon])
-      return buildModel({
-        template, values, rows,
+      const guidePoints = buildRubiGuidePoints(barrier)
+      const rows = payoffRows((u) => (u > barrier ? coupon : u), [], guidePoints)
+      const upCap = toNumber(values.highCapPct)
+      const rubiBlackMessage = buildRubiBlackCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        couponPct: coupon,
+        barrierPct: barrier,
+        upCapPct: upCap,
+      })
+      const rubiBlackModel = buildModel({
+        template, values, rows, validations: optionConfig.warnings,
         subtitle: 'Cupom pre-acordado condicionado ao nao atingimento de KO durante a vida.',
         metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Cupom', value: fmtPct(coupon), tone: 'positive' }, { label: 'KO baixa', value: fmtPct(barrier) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
         lowBarrierSamplingPct: barrier,
+        includeBreakeven: false,
         highlights: [`Cupom nominal: ${fmtPct(coupon)}`, `KO de baixa: ${fmtPct(barrier)}`, 'Barreira monitorada durante toda a operacao'],
         sections: [
           `*Objetivo:* Buscar retorno pre-acordado de ${fmtPct(coupon)} desde que ${tk} nao tenha desvalorizacao igual ou superior a ${fmtPct(barrier)}.`,
@@ -1646,31 +2535,171 @@ const templates = [
           `*Cenario de perda:* Se ${tk} atingir ${fmtPct(barrier)} ou abaixo, o cupom deixa de ser pago e o investidor passa a acompanhar a variacao do ativo.`,
         ],
       })
+      return { ...rubiBlackModel, generatedMessage: rubiBlackMessage }
     },
   },
   {
     id: 'smart_coupon',
-    label: 'Cupom Recorrente Europeia',
-    defaults: { ...BASE_DEFAULTS, ticker: 'MELI34', termMonths: '3', couponPct: '6', downBarrierPct: '10', ticketMin: 'R$ 9.500,00', feeAai: '1,25%' },
-    fields: [...IDENT_FIELDS, ...COMM_FIELDS],
+    label: 'Smart Coupon',
+    defaults: { ...BASE_DEFAULTS, ticker: 'MELI34', termMonths: '3', couponPct: '6', downBarrierPct: '10', cdiEquivPct: '', ticketMin: 'R$ 9.500,00', feeAai: '1,25%' },
+    fields: [...IDENT_FIELDS, numberField('couponPct', 'Cupom nominal (%)'), numberField('downBarrierPct', 'Barreira KO de baixa (%)'), numberField('cdiEquivPct', 'Equivalência CDI (%) opcional'), ...COMM_FIELDS],
     build(values, template) {
       const tk = ticker(values.ticker)
       const fallbackCoupon = pct(values.couponPct, 6, -100, 300)
       const fallbackBarrierAbs = pct(values.downBarrierPct, 10, 0, 95)
-      const optionConfig = resolveCouponConfigFromOptions(values.options, fallbackCoupon, fallbackBarrierAbs, values.stockQuantity)
+      const optionConfig = resolveRubiConfigFromOptions(values.options, fallbackCoupon, fallbackBarrierAbs, values.stockQuantity)
       const coupon = optionConfig.couponPct
       const barrier = -Math.abs(optionConfig.downBarrierAbsPct)
-      const rows = payoffRows((u) => (u >= barrier ? coupon : u), [barrier, coupon])
-      return buildModel({
+      const preBarrier = beforeBarrierPct(barrier, 'low')
+      const guidePoints = buildRubiGuidePoints(barrier)
+      const rows = payoffRows((u) => (u > barrier ? coupon : u), [], guidePoints)
+      const cdiEquiv = toNumber(values.cdiEquivPct)
+      const smartMessage = buildSmartCouponCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        couponPct: coupon,
+        barrierPct: barrier,
+        preBarrierPct: preBarrier,
+        cdiEquivPct: cdiEquiv,
+      })
+      const smartModel = buildModel({
         template, values, rows, validations: optionConfig.warnings,
-        subtitle: 'Cupom nominal condicionado ao ativo acima da barreira na data final.',
-        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Cupom', value: fmtPct(coupon), tone: 'positive' }, { label: 'Barreira baixa', value: fmtPct(barrier) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        subtitle: 'Cupom pre-acordado com validacao da barreira apenas no vencimento.',
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Cupom', value: fmtPct(coupon), tone: 'positive' }, { label: 'KO baixa', value: fmtPct(barrier) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
         lowBarrierSamplingPct: barrier,
-        highlights: [`Cupom nominal: ${fmtPct(coupon)}`, `Barreira de baixa: ${fmtPct(barrier)}`, 'Validacao da barreira no vencimento'],
+        includeBreakeven: false,
+        highlights: [`Cupom nominal: ${fmtPct(coupon)}`, `KO de baixa: ${fmtPct(barrier)}`, 'Barreira validada apenas no vencimento'],
         sections: [
-          `*Objetivo:* Receber cupom de ${fmtPct(coupon)} no vencimento, desde que ${tk} feche acima de ${fmtPct(barrier)}.`,
-          `*Cenario de ganho:* Na data final, se ${tk} estiver acima de ${fmtPct(barrier)}, o cupom de ${fmtPct(coupon)} e pago.`,
-          `*Cenario de perda:* Na data final, se ${tk} estiver em ${fmtPct(barrier)} ou abaixo, o cupom nao e pago e o resultado acompanha a variacao do ativo.`,
+          `*Objetivo:* Buscar retorno pre-acordado de ${fmtPct(coupon)} desde que ${tk} nao encerre o periodo com desvalorizacao igual ou superior a ${fmtPct(barrier)}.`,
+          `*Cenario de ganho:* Em alta ou em queda ate ${fmtPct(preBarrier)}, o retorno permanece em ${fmtPct(coupon)} no periodo.`,
+          `*Cenario de perda:* Apenas no vencimento, se ${tk} estiver em ${fmtPct(barrier)} ou abaixo, o cupom deixa de ser pago e o investidor passa a acompanhar a variacao do ativo.`,
+        ],
+      })
+      return { ...smartModel, generatedMessage: smartMessage }
+    },
+  },
+  {
+    id: 'financiamento',
+    label: 'Financiamento',
+    defaults: { ...BASE_DEFAULTS, ticker: 'PETR4', termMonths: '6', optionCostPct: '3', highCapPct: '15', ticketMin: 'R$ 1.700,00', feeAai: '1,33%' },
+    fields: [...IDENT_FIELDS, numberField('highCapPct', 'Limitador de alta (%)'), ...COMM_FIELDS],
+    build(values, template) {
+      const tk = ticker(values.ticker)
+      const optionCredit = resolveOptionCreditPct(values, 3)
+      const cap = pct(values.highCapPct, 15, -20, 200)
+      const highCapFromOptions = resolveHighCapFromOptionEntries(values.options)
+      const effectiveCap = highCapFromOptions != null ? highCapFromOptions : cap
+      const fallbackRows = payoffRows((u) => {
+        const capped = u >= effectiveCap ? effectiveCap : u
+        return capped + optionCredit
+      }, [effectiveCap])
+      const optionPayoff = buildOptionDrivenRows(values.options, {
+        includeUnderlying: true,
+        baseQuantity: values.stockQuantity,
+      })
+      const rows = optionPayoff.hasDerivativeLegs ? optionPayoff.rows : fallbackRows
+      const underlyingBreakeven = -Math.abs(optionCredit)
+      const finMessage = buildFinanciamentoCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        creditPct: optionCredit,
+        underlyingBreakevenPct: round2(100 + underlyingBreakeven),
+        capPct: effectiveCap,
+      })
+      const finModel = buildModel({
+        template, values, rows,
+        subtitle: 'Compra do ativo com venda de call — recebe premio que reduz o custo de entrada.',
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Premio recebido', value: fmtPct(optionCredit), tone: 'positive' }, { label: 'Limitador', value: fmtPct(effectiveCap) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        highBarrierSamplingPct: effectiveCap,
+        highBarrierSamplingMode: 'post_only',
+        highlights: [`Premio recebido: ${fmtPct(optionCredit)}`, `Limitador de alta: ${fmtPct(effectiveCap)}`, 'Custo de entrada reduzido pelo premio da venda de call'],
+        sections: [
+          `*Objetivo:* Comprar ${tk} e vender uma call para receber premio de ${fmtPct(optionCredit)}, reduzindo o custo de entrada.`,
+          `*Cenario de ganho:* Em alta ate ${fmtPct(effectiveCap)}, o retorno acompanha o ativo somado ao premio recebido; acima de ${fmtPct(effectiveCap)} o ganho fica limitado.`,
+          `*Cenario de perda:* Em queda, o investidor acompanha a desvalorizacao do ativo, porem com o colchao do premio de ${fmtPct(optionCredit)} ja creditado.`,
+        ],
+      })
+      return { ...finModel, generatedMessage: finMessage }
+    },
+  },
+  {
+    id: 'financiamento_sob_custodia',
+    label: 'Financiamento sob Custodia',
+    defaults: { ...BASE_DEFAULTS, ticker: 'PETR4', termMonths: '6', optionCostPct: '3', highCapPct: '15', ticketMin: 'R$ 1.700,00', feeAai: '1,33%' },
+    fields: [...IDENT_FIELDS, numberField('highCapPct', 'Limitador de alta (%)'), ...COMM_FIELDS],
+    build(values, template) {
+      const tk = ticker(values.ticker)
+      const optionCredit = resolveOptionCreditPct(values, 3)
+      const cap = pct(values.highCapPct, 15, -20, 200)
+      const highCapFromOptions = resolveHighCapFromOptionEntries(values.options)
+      const effectiveCap = highCapFromOptions != null ? highCapFromOptions : cap
+      const fallbackRows = payoffRows((u) => {
+        const capped = u >= effectiveCap ? effectiveCap : u
+        return capped + optionCredit
+      }, [effectiveCap])
+      const optionPayoff = buildOptionDrivenRows(values.options, {
+        includeUnderlying: true,
+        baseQuantity: values.stockQuantity,
+      })
+      const rows = optionPayoff.hasDerivativeLegs ? optionPayoff.rows : fallbackRows
+      const underlyingBreakevenSc = -Math.abs(optionCredit)
+      const finScMessage = buildFinanciamentoCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        creditPct: optionCredit,
+        underlyingBreakevenPct: round2(100 + underlyingBreakevenSc),
+        capPct: effectiveCap,
+      })
+      const finScModel = buildModel({
+        template, values, rows,
+        subtitle: 'Compra do ativo sob custodia com venda de call — recebe premio que reduz o custo de entrada.',
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Premio recebido', value: fmtPct(optionCredit), tone: 'positive' }, { label: 'Limitador', value: fmtPct(effectiveCap) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        highBarrierSamplingPct: effectiveCap,
+        highBarrierSamplingMode: 'post_only',
+        highlights: [`Premio recebido: ${fmtPct(optionCredit)}`, `Limitador de alta: ${fmtPct(effectiveCap)}`, 'Ativo sob custodia com premio da venda de call creditado'],
+        sections: [
+          `*Objetivo:* Comprar ${tk} sob custodia e vender call para receber premio de ${fmtPct(optionCredit)}, reduzindo o custo de entrada.`,
+          `*Cenario de ganho:* Em alta ate ${fmtPct(effectiveCap)}, o retorno acompanha o ativo somado ao premio recebido; acima de ${fmtPct(effectiveCap)} o ganho fica limitado.`,
+          `*Cenario de perda:* Em queda, o investidor acompanha a desvalorizacao do ativo, porem com o colchao do premio de ${fmtPct(optionCredit)} ja creditado.`,
+        ],
+      })
+      return { ...finScModel, generatedMessage: finScMessage }
+    },
+  },
+  {
+    id: 'alocacao_protegida_sob_custodia',
+    label: 'Alocacao Protegida sob Custodia',
+    defaults: { ...BASE_DEFAULTS, ticker: 'XB5011', termMonths: '24', optionCostPct: '0', upTriggerPct: '0', downProtectionPct: '10', ticketMin: 'R$ 5.000,00', feeAai: '1,00%' },
+    fields: [...IDENT_FIELDS, numberField('upTriggerPct', 'Inicio da participacao na alta (%)'), numberField('downProtectionPct', 'Patamar de protecao na queda (%)'), ...COMM_FIELDS],
+    build(values, template) {
+      const tk = ticker(values.ticker)
+      const optionCost = resolveOptionCostPct(values, 0)
+      const upTrigger = pct(values.upTriggerPct, 0, -20, 120)
+      const downProtection = pct(values.downProtectionPct, 10, 0, 95)
+      const fallbackRows = payoffRows((u) => {
+        const base = u >= upTrigger
+          ? u - upTrigger
+          : (u >= -downProtection ? 0 : u + downProtection)
+        const gainPct = base - optionCost
+        const entryPct = 100 + optionCost
+        return entryPct > 0 ? (gainPct / entryPct) * 100 : 0
+      }, [upTrigger, -downProtection])
+      const optionSettlement = buildOptionSettlementReturnRows(values.options, {
+        includeUnderlying: true,
+        includeUnderlyingInEntry: true,
+        optionCostPct: optionCost,
+        baseQuantity: values.stockQuantity,
+      })
+      const rows = optionSettlement.leveraged ? optionSettlement.rows : fallbackRows
+      return buildModel({
+        template, values, rows,
+        subtitle: 'Participacao de alta com perda apenas abaixo do patamar protegido (ativo sob custodia).',
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Gatilho alta', value: fmtPct(upTrigger) }, { label: 'Protecao', value: fmtPct(downProtection) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        highlights: [`Participacao na alta acima de ${fmtPct(upTrigger)}`, `Patamar protegido: ${fmtPct(-downProtection)}`, 'Perda apenas abaixo do patamar protegido'],
+        sections: [
+          `*Objetivo:* Participar da alta de ${tk} acima de ${fmtPct(upTrigger)} com protecao nas quedas ate ${fmtPct(-downProtection)}, ativo sob custodia.`,
+          `*Cenario de ganho:* Acima de ${fmtPct(upTrigger)}, o retorno cresce de forma linear com cada alta adicional do ativo.`,
+          `*Cenario de perda:* Entre 0% e ${fmtPct(-downProtection)}, a estrategia busca preservar capital; abaixo desse nivel, volta a acompanhar a queda.`,
         ],
       })
     },
@@ -1682,24 +2711,35 @@ const templates = [
     fields: [...IDENT_FIELDS, ...COMM_FIELDS],
     build(values, template) {
       const tk = ticker(values.ticker)
+      const termMonths = toNumber(values.termMonths) || 1
       const fallbackCoupon = pct(values.couponPct, 8, -100, 300)
       const fallbackBarrierAbs = pct(values.downBarrierPct, 16.65, 0, 95)
       const optionConfig = resolveCouponConfigFromOptions(values.options, fallbackCoupon, fallbackBarrierAbs, values.stockQuantity)
-      const coupon = optionConfig.couponPct
+      const couponTotal = optionConfig.couponPct
+      const couponPerPeriod = resolveRecurringCouponPerPeriodPct(couponTotal, termMonths)
       const barrier = -Math.abs(optionConfig.downBarrierAbsPct)
-      const rows = payoffRows((u) => (u >= barrier ? coupon : u), [barrier, coupon])
-      return buildModel({
+      const recurringCouponHighlight = `Cupons recorrentes de ${fmtPct(couponPerPeriod)} ao mes`
+      const rows = payoffRows((u) => (u >= barrier ? couponPerPeriod : u), [barrier, couponPerPeriod])
+      const crMessage = buildCupomRecorrenteCommercialMessage({
+        tickerLabel: tk,
+        maturityLabel: fmtDate(values.maturityDate),
+        couponPerPeriod,
+        barrierPct: barrier,
+        termMonths,
+      })
+      const crModel = buildModel({
         template, values, rows, validations: optionConfig.warnings,
-        subtitle: 'Estrutura orientada a cupom com condicao de barreira na data final.',
-        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Cupom', value: fmtPct(coupon), tone: 'positive' }, { label: 'Barreira baixa', value: fmtPct(barrier) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
+        subtitle: 'Cupom nominal distribuido em pagamentos recorrentes com condicao de barreira em cada observacao.',
+        metrics: [{ label: 'Prazo', value: fmtTerm(values.termMonths) }, { label: 'Cupom nominal', value: fmtPct(couponTotal), tone: 'positive' }, { label: 'Barreira baixa', value: fmtPct(barrier) }, { label: 'Vencimento', value: fmtDate(values.maturityDate) }],
         lowBarrierSamplingPct: barrier,
-        highlights: [`Cupom acordado: ${fmtPct(coupon)}`, `Barreira de baixa: ${fmtPct(barrier)}`, 'Foco em retorno nominal no periodo'],
+        highlights: [`Cupom nominal: ${fmtPct(couponTotal)}`, recurringCouponHighlight, `Barreira de baixa: ${fmtPct(barrier)}`],
         sections: [
-          `*Objetivo:* Receber cupom de ${fmtPct(coupon)} em cada vencimento, desde que ${tk} feche acima de ${fmtPct(barrier)} no respectivo periodo.`,
-          `*Cenario de ganho:* Em cada data, se o ativo terminar acima de ${fmtPct(barrier)}, o cupom daquele mes e pago.`,
-          `*Cenario de perda:* Se em algum vencimento o ativo fechar em ${fmtPct(barrier)} ou abaixo, nao ha cupom naquele periodo e o investidor permanece posicionado no ativo.`,
+          `*Objetivo:* Receber cupom nominal de ${fmtPct(couponTotal)} ao longo de ${fmtTerm(termMonths)}, em cupons recorrentes de ${fmtPct(couponPerPeriod)} ao mes, desde que ${tk} feche acima de ${fmtPct(barrier)} em cada observacao.`,
+          `*Cenario de ganho:* Em cada data de observacao, se o ativo terminar acima de ${fmtPct(barrier)}, o cupom recorrente daquele periodo e pago em ${fmtPct(couponPerPeriod)}.`,
+          `*Cenario de perda:* Se em algum vencimento o ativo fechar em ${fmtPct(barrier)} ou abaixo, nao ha pagamento do cupom recorrente daquele periodo e o investidor permanece posicionado no ativo.`,
         ],
       })
+      return { ...crModel, generatedMessage: crMessage }
     },
   },
 ]
@@ -1712,7 +2752,9 @@ const templateMap = templates.reduce((acc, item) => {
 const defaultTemplateId = templates[0]?.id || 'put_spread'
 const getTemplate = (id) => templateMap[id] || templateMap[defaultTemplateId]
 
-export const strategyTemplateOptions = templates.map((item) => ({ value: item.id, label: item.label }))
+export const strategyTemplateOptions = templates
+  .map((item) => ({ value: item.id, label: item.label }))
+  .sort((left, right) => left.label.localeCompare(right.label, 'pt-BR', { sensitivity: 'base' }))
 
 export const getStrategyOptionForm = (templateId) => {
   const raw = OPTION_FORM_MAP[templateId]
@@ -1750,6 +2792,178 @@ export const getStrategyFields = (templateId) => {
   return withOptionCostField(templateId, fields)
 }
 
+export const inferOptionSyncForTemplate = (templateId, values = {}) => {
+  const optionForm = getStrategyOptionForm(templateId)
+  const options = normalizeOptionEntries(values?.options, optionForm)
+  const hasOptionEditor = Boolean(optionForm?.enabled)
+  const hasOptionInput = hasMeaningfulOptionInput(options)
+  const specs = buildOptionLegSpecs(options, { baseQuantity: values?.stockQuantity })
+  const hasDerivativeLegs = specs.some((leg) => leg.optionType === 'CALL' || leg.optionType === 'PUT')
+
+  const patch = {}
+  const warnings = []
+  const patchPercent = (key, value) => {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return
+    patch[key] = toInputPercent(numeric)
+  }
+
+  if (!hasOptionEditor) {
+    return {
+      templateId,
+      mode: 'template',
+      narrativeMode: 'template',
+      warnings: [],
+      appliedPatch: {},
+      hasOptionEditor: false,
+      hasOptionInput: false,
+      hasDerivativeLegs: false,
+    }
+  }
+
+  if (!hasOptionInput) {
+    return {
+      templateId,
+      mode: 'template',
+      narrativeMode: 'template',
+      warnings: [],
+      appliedPatch: {},
+      hasOptionEditor: true,
+      hasOptionInput: false,
+      hasDerivativeLegs,
+    }
+  }
+
+  const highBarrierFromOptions = resolveHighBarrierFromOptionSpecs(specs)
+  const lowBarrierFromOptions = resolveLowBarrierFromOptionSpecs(specs)
+  const highCapFromOptions = resolveHighCapFromOptionEntries(options)
+  const lowCapFromOptions = resolveLowCapFromOptionEntries(options)
+  const callLongStrikePct = resolveStrikePctFromOptionEntries(options, 'CALL', 'long')
+  const callShortStrikePct = resolveStrikePctFromOptionEntries(options, 'CALL', 'short')
+  const putLongStrikePct = resolveStrikePctFromOptionEntries(options, 'PUT', 'long')
+  const putLongStrikeVar = putLongStrikePct == null ? null : round2(putLongStrikePct - 100)
+  const callLongStrikeVar = callLongStrikePct == null ? null : round2(callLongStrikePct - 100)
+  const callShortStrikeVar = callShortStrikePct == null ? null : round2(callShortStrikePct - 100)
+  const partialFromLowCap = lowCapFromOptions == null ? null : Math.abs(Math.min(lowCapFromOptions, 0))
+
+  switch (templateId) {
+    case 'put_spread':
+      patchPercent('startDownPct', putLongStrikeVar)
+      patchPercent('limitDownPct', lowCapFromOptions)
+      if (putLongStrikeVar != null && lowCapFromOptions != null && putLongStrikeVar <= lowCapFromOptions) {
+        warnings.push('Opcao de put spread com strikes invertidos; texto em modo payoff.')
+      }
+      break
+    case 'call_spread':
+      patchPercent('startUpPct', callLongStrikeVar)
+      patchPercent('limitUpPct', highCapFromOptions)
+      if (callLongStrikeVar != null && highCapFromOptions != null && callLongStrikeVar >= highCapFromOptions) {
+        warnings.push('Opcao de call spread com strikes invertidos; texto em modo payoff.')
+      }
+      break
+    case 'collar_ui':
+      patchPercent('protectionPct', putLongStrikePct == null ? null : clamp(putLongStrikePct, 0, 100))
+      patchPercent('barrierUpPct', highBarrierFromOptions)
+      patchPercent('capAfterPct', highCapFromOptions)
+      if (highBarrierFromOptions == null) warnings.push('Nao foi possivel inferir barreira de alta nas opcoes.')
+      break
+    case 'collar':
+      patchPercent('protectionPct', putLongStrikePct == null ? null : clamp(putLongStrikePct, 0, 100))
+      patchPercent('highCapPct', highCapFromOptions)
+      if (highCapFromOptions == null) warnings.push('Nao foi possivel inferir limitador de alta nas opcoes.')
+      break
+    case 'fence_ui':
+      patchPercent('partialProtectionPct', partialFromLowCap)
+      patchPercent('barrierUpPct', highBarrierFromOptions)
+      patchPercent('capAfterPct', highCapFromOptions)
+      if (highBarrierFromOptions == null) warnings.push('Nao foi possivel inferir barreira de alta nas opcoes.')
+      break
+    case 'booster_ko':
+      patchPercent('triggerUpPct', callLongStrikeVar)
+      patchPercent('barrierUpPct', highBarrierFromOptions)
+      patchPercent('capAfterPct', highCapFromOptions)
+      if (highBarrierFromOptions == null) warnings.push('Nao foi possivel inferir KO de alta nas opcoes.')
+      break
+    case 'collar_ui_bidirecional':
+      patchPercent('protectionPct', putLongStrikePct == null ? null : clamp(putLongStrikePct, 0, 100))
+      patchPercent('barrierUpPct', highBarrierFromOptions)
+      patchPercent('capAfterPct', highCapFromOptions)
+      patchPercent('downKoPct', lowBarrierFromOptions == null ? null : Math.abs(lowBarrierFromOptions))
+      if (highBarrierFromOptions == null || lowBarrierFromOptions == null) {
+        warnings.push('Nao foi possivel inferir todas as barreiras da estrutura pelas opcoes.')
+      }
+      break
+    case 'doc_bidirecional':
+      patchPercent('highKoPct', highBarrierFromOptions)
+      patchPercent('couponPct', callShortStrikeVar)
+      patchPercent('downKoPct', lowBarrierFromOptions == null ? null : Math.abs(lowBarrierFromOptions))
+      if (highBarrierFromOptions == null || lowBarrierFromOptions == null) {
+        warnings.push('Nao foi possivel inferir todas as barreiras do DOC pelas opcoes.')
+      }
+      break
+    case 'rubi':
+    case 'rubi_black': {
+      const fallbackCoupon = pct(values?.couponPct, 8, -100, 300)
+      const fallbackBarrierAbs = pct(values?.downBarrierPct, 20, 0, 95)
+      const optionConfig = resolveRubiConfigFromOptions(options, fallbackCoupon, fallbackBarrierAbs, values?.stockQuantity)
+      patchPercent('couponPct', optionConfig.couponPct)
+      patchPercent('downBarrierPct', optionConfig.downBarrierAbsPct)
+      warnings.push(...(optionConfig.warnings || []))
+      break
+    }
+    case 'smart_coupon': {
+      const fallbackCoupon = pct(values?.couponPct, 6, -100, 300)
+      const fallbackBarrierAbs = pct(values?.downBarrierPct, 10, 0, 95)
+      const optionConfig = resolveRubiConfigFromOptions(options, fallbackCoupon, fallbackBarrierAbs, values?.stockQuantity)
+      patchPercent('couponPct', optionConfig.couponPct)
+      patchPercent('downBarrierPct', optionConfig.downBarrierAbsPct)
+      warnings.push(...(optionConfig.warnings || []))
+      break
+    }
+    case 'cupom_recorrente': {
+      const fallbackCoupon = pct(values?.couponPct, 8, -100, 300)
+      const fallbackBarrierAbs = pct(values?.downBarrierPct, 16.65, 0, 95)
+      const optionConfig = resolveCouponConfigFromOptions(options, fallbackCoupon, fallbackBarrierAbs, values?.stockQuantity)
+      patchPercent('couponPct', optionConfig.couponPct)
+      patchPercent('downBarrierPct', optionConfig.downBarrierAbsPct)
+      warnings.push(...(optionConfig.warnings || []))
+      break
+    }
+    case 'alocacao_protegida':
+    case 'alocacao_protegida_sob_custodia':
+      patchPercent('upTriggerPct', callLongStrikeVar)
+      patchPercent('downProtectionPct', putLongStrikeVar == null ? null : Math.abs(Math.min(putLongStrikeVar, 0)))
+      break
+    case 'financiamento':
+    case 'financiamento_sob_custodia':
+      patchPercent('highCapPct', highCapFromOptions)
+      if (highCapFromOptions == null) warnings.push('Nao foi possivel inferir limitador de alta nas opcoes.')
+      break
+    default:
+      break
+  }
+
+  let narrativeMode = 'template'
+  if ((templateId === 'alocacao_protegida' || templateId === 'alocacao_protegida_sob_custodia' || templateId === 'pop') && hasDerivativeLegs) {
+    narrativeMode = 'payoff'
+  }
+  const uniqueWarnings = unique(warnings)
+  if (uniqueWarnings.length) {
+    narrativeMode = 'payoff'
+  }
+
+  return {
+    templateId,
+    mode: narrativeMode,
+    narrativeMode,
+    warnings: uniqueWarnings,
+    appliedPatch: { ...patch },
+    hasOptionEditor: true,
+    hasOptionInput: true,
+    hasDerivativeLegs,
+  }
+}
+
 export const buildStrategyModel = (templateId, values = {}) => {
   const template = getTemplate(templateId)
   const optionForm = getStrategyOptionForm(templateId)
@@ -1769,17 +2983,42 @@ export const buildStrategyModel = (templateId, values = {}) => {
       tableHeadRight: 'Variacao da estrutura',
       optionForm,
       optionEntries: [],
+      optionSync: {
+        templateId,
+        mode: 'template',
+        narrativeMode: 'template',
+        warnings: [],
+        appliedPatch: {},
+      },
     }
   }
   const merged = { ...template.defaults, ...(values || {}) }
   merged.options = normalizeOptionEntries(merged.options, optionForm)
-  const model = template.build(merged, template)
-  const optionValidations = validateOptionEntries(merged.options, optionForm)
+  const optionSync = inferOptionSyncForTemplate(templateId, merged)
+  const patchedValues = {
+    ...merged,
+    ...(optionSync?.appliedPatch || {}),
+  }
+  const model = template.build(patchedValues, template)
+  const optionValidations = validateOptionEntries(patchedValues.options, optionForm)
+  const syncWarnings = Array.isArray(optionSync?.warnings) ? optionSync.warnings : []
+  const validations = unique([...(model.validations || []), ...optionValidations, ...syncWarnings])
+  const maturityMetric = (Array.isArray(model?.metrics) ? model.metrics : [])
+    .find((metric) => String(metric?.label || '').toLowerCase().includes('vencimento'))?.value
+  const generatedMessage = optionSync?.narrativeMode === 'payoff'
+    ? buildPayoffFallbackMessage({
+      templateLabel: model.templateLabel,
+      tickerLabel: ticker(patchedValues?.ticker),
+      maturityLabel: maturityMetric || fmtDate(patchedValues?.maturityDate),
+      highlights: model.highlights,
+    })
+    : model.generatedMessage
   return {
     ...model,
+    generatedMessage,
     optionForm,
-    optionEntries: merged.options,
-    validations: unique([...(model.validations || []), ...optionValidations]),
+    optionEntries: patchedValues.options,
+    validations,
+    optionSync,
   }
 }
-

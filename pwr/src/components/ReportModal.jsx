@@ -1,7 +1,10 @@
-﻿import Modal from './Modal'
+import { useEffect, useRef, useState } from 'react'
+import Modal from './Modal'
 import Badge from './Badge'
 import Icon from './Icons'
 import { formatCurrency, formatDate, formatNumber } from '../utils/format'
+import { fetchCdiSnapshot } from '../services/cdi'
+import { useToast } from '../hooks/useToast'
 
 const getBarrierBadge = (status) => {
   if (!status) return { label: 'N/A', tone: 'cyan' }
@@ -14,14 +17,16 @@ const getBarrierBadge = (status) => {
   return { label: 'N/A', tone: 'cyan' }
 }
 
-const formatOptionalNumber = (value) => {
-  if (value == null || Number.isNaN(Number(value))) return '—'
-  return formatNumber(value)
+const fmt = (value) => {
+  if (value == null || !Number.isFinite(Number(value))) return '-'
+  return formatCurrency(value)
 }
 
-const formatOptionalCurrency = (value) => {
-  if (value == null || Number.isNaN(Number(value))) return '—'
-  return formatCurrency(value)
+const fmtPct = (value, decimals = 2, showSign = true) => {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '-'
+  const sign = showSign && n > 0 ? '+' : ''
+  return `${sign}${(n * 100).toFixed(decimals)}%`
 }
 
 const hasStructureParamOverride = (override) => {
@@ -31,260 +36,359 @@ const hasStructureParamOverride = (override) => {
     || override?.strikeOverride != null
     || override?.barrierValueOverride != null
     || override?.barrierTypeOverride != null
-  ) {
-    return true
-  }
+  ) return true
   if (
     override?.structure?.optionQty != null
     || override?.structure?.strike != null
     || override?.structure?.barrierValue != null
     || (override?.structure?.barrierType && String(override.structure.barrierType).toLowerCase() !== 'auto')
-  ) {
-    return true
-  }
+  ) return true
   const legs = override?.legs && typeof override.legs === 'object' ? Object.values(override.legs) : []
-  if (legs.some((entry) => entry?.optionQtyOverride != null || entry?.strikeOverride != null || entry?.barrierValueOverride != null || entry?.barrierTypeOverride != null)) {
-    return true
-  }
-  const structureByLeg = override?.structureByLeg && typeof override.structureByLeg === 'object'
+  if (legs.some((entry) => (
+    entry?.optionQtyOverride != null
+    || entry?.strikeOverride != null
+    || entry?.barrierValueOverride != null
+    || entry?.barrierTypeOverride != null
+  ))) return true
+  const byLeg = override?.structureByLeg && typeof override.structureByLeg === 'object'
     ? Object.values(override.structureByLeg)
     : []
-  return structureByLeg.some((entry) => entry?.optionQty != null || entry?.strike != null || entry?.barrierValue != null || entry?.barrierType != null)
+  return byLeg.some((entry) => (
+    entry?.optionQty != null
+    || entry?.strike != null
+    || entry?.barrierValue != null
+    || entry?.barrierType != null
+  ))
 }
 
-const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
+const computeCdiComparison = (row, cdi) => {
+  if (!cdi || !row?.dataRegistro || !row?.vencimento) return null
+  const entradaDate = new Date(row.dataRegistro)
+  const vencimentoDate = new Date(row.vencimento)
+  const days = Math.round((vencimentoDate - entradaDate) / (1000 * 60 * 60 * 24))
+  if (days <= 0) return null
+
+  const cdiAnnualRate = (cdi.annualPct || 12) / 100
+  const cdiPeriodRate = Math.pow(1 + cdiAnnualRate, days / 365) - 1
+  const operationRate = row.result?.percent ?? 0
+  const valorEntrada = row.result?.valorEntrada || row.result?.pagou || 0
+  const cdiAbsolute = valorEntrada * cdiPeriodRate
+  const cdiRatio = cdiPeriodRate > 0 ? operationRate / cdiPeriodRate : null
+
+  return {
+    cdiPeriodRate,
+    cdiAbsolute,
+    operationRate,
+    cdiRatio,
+    days,
+    cdiAnnualPct: cdi.annualPct,
+    beatsCdi: cdiRatio != null ? cdiRatio >= 1 : operationRate >= cdiPeriodRate,
+  }
+}
+
+const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh, extraContent = null }) => {
+  const cardRef = useRef(null)
+  const [cdi, setCdi] = useState(null)
+  const [screenshotting, setScreenshotting] = useState(false)
+  const { notify } = useToast()
+
+  useEffect(() => {
+    if (!open) return
+    fetchCdiSnapshot().then(setCdi).catch(() => {})
+  }, [open])
+
   if (!row) return null
 
-  const clienteLabel = row.nomeCliente || row.cliente || row.codigoCliente || '—'
-  const spotLabel = row.spotBase ?? row.spotInicial
-  const spotValue = spotLabel == null || Number.isNaN(Number(spotLabel)) ? '—' : formatNumber(spotLabel)
-  const legs = Array.isArray(row.effectiveLegs) ? row.effectiveLegs : (row.pernas || [])
-  const hasLegs = legs.length > 0
-
+  const clienteLabel = row.codigoCliente || row.conta || row.cliente || '-'
   const badge = getBarrierBadge(row.barrierStatus)
   const overrideManual = row.override?.high !== 'auto' || row.override?.low !== 'auto'
   const cupomManual = row.manualCouponBRL != null
   const ganhoOpcoesManual = row.override?.manualOptionsGainBRL != null
   const parametrosEstruturaManual = hasStructureParamOverride(row.override)
-  const warnings = []
-  const valorEntrada = row.result?.valorEntrada
   const valorEntradaIncomplete = row.result?.valorEntradaIncomplete
-  const valorEntradaComponents = row.result?.valorEntradaComponents || {}
-  const hasOptionComponents = valorEntradaComponents.optionQty != null || valorEntradaComponents.optionUnitCost != null
-  const hasStockComponents = valorEntradaComponents.stockQty != null || valorEntradaComponents.stockValue != null
-  const hasPutComponents = valorEntradaComponents.putQty != null || valorEntradaComponents.putUnitCost != null
+  const valorEntrada = row.result?.valorEntrada
+  const cupomTotal = row.result?.cupomTotal
+  const hasDividendOverride = row.override?.manualDividendBRL != null && row.override.manualDividendBRL !== ''
+  const hasCupom = cupomTotal != null && Number.isFinite(Number(cupomTotal)) && Number(cupomTotal) !== 0
+  const cdiComparison = computeCdiComparison(row, cdi)
 
-  if (row.market?.source !== 'yahoo') {
-    warnings.push('Cotacao em fallback (sem Yahoo Finance).')
-  }
-  if (overrideManual) {
-    warnings.push('Override manual aplicado nas barreiras.')
-  }
-  if (cupomManual) {
-    warnings.push('Cupom manual aplicado.')
-  }
-  if (ganhoOpcoesManual) {
-    warnings.push('Ganho nas opções (manual) aplicado.')
-  }
+  const warnings = []
+  if (row.market?.source !== 'yahoo') warnings.push('Cotacao em fallback (sem Yahoo Finance).')
+  if (overrideManual) warnings.push('Override manual aplicado nas barreiras.')
+  if (cupomManual) warnings.push('Cupom manual aplicado.')
+  if (ganhoOpcoesManual) warnings.push('Ganho nas opcoes (manual) aplicado.')
+  if (hasDividendOverride) warnings.push('Dividendos com valor manual aplicado.')
+  if (row.bonusAutoApplied) warnings.push('Bonificacao automatica aplicada na quantidade.')
+  if (row.override?.bonusAutoDisabled === true) warnings.push('Bonificacao automatica ignorada.')
   if (parametrosEstruturaManual) {
     const target = row.override?.optionSide ? ` (${row.override.optionSide})` : ''
-    warnings.push(`Parâmetros manuais (strike/barreira/tipo) aplicados${target}.`)
+    warnings.push(`Parametros manuais (strike/barreira/tipo) aplicados${target}.`)
+  }
+
+  const legs = Array.isArray(row.effectiveLegs) ? row.effectiveLegs : (row.pernas || [])
+  const hasLegs = legs.length > 0
+  const hasBarriers = (row.barrierStatus?.list || []).length > 0
+
+  const dividendEvents = Array.isArray(row.dividendEvents) ? row.dividendEvents : []
+  const bonusEvents = Array.isArray(row.bonusEvents) ? row.bonusEvents : []
+  const vendaAtivo = Number(row.result?.vendaAtivo || 0)
+  const dividendos = Number(row.result?.dividends || 0)
+  const ganhosOpcoes = row.result?.optionsSuppressed ? 0 : Number(row.result?.ganhosOpcoes || 0)
+  const saidaTotal = vendaAtivo + dividendos + Number(cupomTotal || 0) + ganhosOpcoes
+  const ganho = row.result?.ganho
+  const percent = row.result?.percent
+
+  const handleScreenshot = async () => {
+    if (!cardRef.current || screenshotting) return
+    setScreenshotting(true)
+    try {
+      const { toPng } = await import('html-to-image')
+      const dataUrl = await toPng(cardRef.current, {
+        pixelRatio: 2,
+        backgroundColor: '#0c1524',
+        style: { borderRadius: '0' },
+      })
+      const response = await fetch(dataUrl)
+      const blob = await response.blob()
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      notify('Imagem copiada para a area de transferencia.', 'success')
+    } catch {
+      notify('Nao foi possivel copiar a imagem.', 'warning')
+    } finally {
+      setScreenshotting(false)
+    }
   }
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title={`Relatorio - ${clienteLabel}`}
-      subtitle={`${row.ativo} | ${row.estrutura}`}
+      title="Resumo da Operacao"
+      subtitle={`${row.ativo || '-'} · ${row.estrutura || '-'}`}
     >
-      <div className="report-header">
-        <div>
-          <strong>Cliente</strong>
-          <p className="muted">{clienteLabel}</p>
-        </div>
-        <div>
-          <strong>Codigo</strong>
-          <p className="muted">{row.codigoOperacao || row.id}</p>
-        </div>
-        <div>
-          <strong>Periodo</strong>
-          <p className="muted">{formatDate(row.dataRegistro)} - {formatDate(row.vencimento)}</p>
-        </div>
-        <div>
-          <strong>Fonte</strong>
-          <p className="muted">Yahoo Finance {row.market?.cached ? '(cache)' : ''}</p>
-        </div>
-      </div>
-
-      <div className="report-summary">
-        <div>
-          <span className="muted">Resultado final</span>
-          <div className="report-highlight">{formatCurrency(row.result.financeiroFinal)}</div>
-        </div>
-        <div>
-          <span className="muted">Ganho/Prejuizo</span>
-          <div className="report-highlight">{formatCurrency(row.result.ganho)}</div>
-        </div>
-        <div>
-          <span className="muted">%</span>
-          <div className="report-highlight">{(row.result.percent * 100).toFixed(2)}%</div>
-        </div>
-        <div>
-          <span className="muted">Barreira</span>
+      <div ref={cardRef} className="op-card">
+        <div className="op-card-header">
+          <div className="op-card-header-main">
+            <span className="op-card-ativo">{row.ativo || '-'}</span>
+            <span className="op-card-estrutura">{row.estrutura || '-'}</span>
+          </div>
           <Badge tone={badge.tone}>{badge.label}</Badge>
         </div>
-      </div>
 
-      <div className="report-grid">
-        <div className="report-card">
-          <h4>De onde veio o resultado</h4>
-          <div className="report-list">
-            <div>
-              <span>Spot</span>
-              <strong>{spotValue}</strong>
+        <div className="op-card-results">
+          <div className={`op-card-result-item ${Number(saidaTotal) >= 0 ? 'op-card-positive' : 'op-card-negative'}`}>
+            <span className="op-card-label">Saida Total</span>
+            <div className="op-card-value">{fmt(saidaTotal)}</div>
+          </div>
+          <div className={`op-card-result-item ${Number(ganho) >= 0 ? 'op-card-positive' : 'op-card-negative'}`}>
+            <span className="op-card-label">Resultado (Saida - Entrada)</span>
+            <div className="op-card-value">{fmt(ganho)}</div>
+          </div>
+          <div className={`op-card-result-item ${Number(percent) >= 0 ? 'op-card-positive' : 'op-card-negative'}`}>
+            <span className="op-card-label">Lucro %</span>
+            <div className="op-card-value">{fmtPct(percent, 2, false)}</div>
+          </div>
+        </div>
+
+        <div className="op-card-section">
+          <div className="op-card-section-title">Identificacao</div>
+          <div className="op-card-meta">
+            <div className="op-card-meta-item">
+              <span className="op-card-label">Assessor</span>
+              <strong>{row.assessor || '-'}</strong>
             </div>
-            <div>
-              <span>Quantidade base</span>
-              <strong>{formatNumber(row.qtyBase ?? row.quantidade)}</strong>
+            <div className="op-card-meta-item">
+              <span className="op-card-label">Broker</span>
+              <strong>{row.broker || '-'}</strong>
             </div>
-            <div>
-              <span>Bonificacao</span>
-              <strong>{formatNumber(row.qtyBonus ?? 0)}</strong>
+            <div className="op-card-meta-item">
+              <span className="op-card-label">Codigo Cliente</span>
+              <strong>{clienteLabel}</strong>
             </div>
-            <div>
-              <span>Quantidade atual</span>
-              <strong>{formatNumber(row.qtyAtual ?? row.quantidade)}</strong>
+            <div className="op-card-meta-item">
+              <span className="op-card-label">Data de Entrada</span>
+              <strong>{formatDate(row.dataRegistro) || '-'}</strong>
             </div>
-            <div>
-              <span>Custo total</span>
-              <strong>{formatCurrency(row.result.custoTotal)}</strong>
-            </div>
-            <div>
-              <span>Valor de entrada</span>
-              <strong>{valorEntradaIncomplete ? 'Dados incompletos' : formatOptionalCurrency(valorEntrada)}</strong>
-            </div>
-            {hasOptionComponents ? (
-              <div>
-                <span>Qtd opcao</span>
-                <strong>{formatOptionalNumber(valorEntradaComponents.optionQty)}</strong>
-              </div>
-            ) : null}
-            {hasOptionComponents ? (
-              <div>
-                <span>Custo unitario opcao</span>
-                <strong>{formatOptionalCurrency(valorEntradaComponents.optionUnitCost)}</strong>
-              </div>
-            ) : null}
-            {hasStockComponents ? (
-              <div>
-                <span>Qtd estoque</span>
-                <strong>{formatOptionalNumber(valorEntradaComponents.stockQty)}</strong>
-              </div>
-            ) : null}
-            {hasStockComponents ? (
-              <div>
-                <span>Valor ativo</span>
-                <strong>{formatOptionalCurrency(valorEntradaComponents.stockValue)}</strong>
-              </div>
-            ) : null}
-            {hasPutComponents ? (
-              <div>
-                <span>Qtd put</span>
-                <strong>{formatOptionalNumber(valorEntradaComponents.putQty)}</strong>
-              </div>
-            ) : null}
-              {hasPutComponents ? (
-                <div>
-                  <span>Custo unitario put</span>
-                  <strong>{formatOptionalCurrency(valorEntradaComponents.putUnitCost)}</strong>
-                </div>
-              ) : null}
-              <div>
-                <span>Venda do ativo</span>
-                <strong>{formatCurrency(row.result.vendaAtivo)}</strong>
-              </div>
-            <div>
-              <span>Ganho na Call</span>
-              <strong>{row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhoCall)}</strong>
-            </div>
-            <div>
-              <span>Ganho na Put</span>
-              <strong>{row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhoPut)}</strong>
-            </div>
-            <div>
-              <span>{ganhoOpcoesManual ? 'Ganhos nas opções (manual)' : 'Ganhos nas opções'}</span>
-              <strong>{row.result.optionsSuppressed ? 'N/A' : formatCurrency(row.result.ganhosOpcoes)}</strong>
-            </div>
-            <div>
-              <span>Dividendos</span>
-              <strong>{formatCurrency(row.result.dividends)}</strong>
-            </div>
-            <div>
-              <span>{cupomManual ? 'Cupom (manual)' : 'Cupom'}</span>
-              <strong>{formatCurrency(row.result.cupomTotal)}</strong>
-            </div>
-            <div>
-              <span>Rebates</span>
-              <strong>{formatCurrency(row.result.rebateTotal)}</strong>
+            <div className="op-card-meta-item">
+              <span className="op-card-label">Data de Vencimento</span>
+              <strong>{formatDate(row.vencimento) || '-'}</strong>
             </div>
           </div>
         </div>
 
-        <div className="report-card">
-          <h4>Barreiras</h4>
+        <div className="op-card-section">
+          <div className="op-card-section-title">Composicao do Resultado</div>
+          <div className="op-card-comp">
+            <div className="op-card-comp-item">
+              <span className="op-card-label">Valor de Entrada</span>
+              <strong>{valorEntradaIncomplete ? 'Dados incompletos' : fmt(valorEntrada)}</strong>
+            </div>
+            <div className="op-card-comp-item">
+              <span className="op-card-label">Venda do ativo no vencimento</span>
+              <strong>{fmt(vendaAtivo)}</strong>
+            </div>
+            <div className="op-card-comp-item">
+              <span className="op-card-label">Ganhos nas opcoes</span>
+              <strong>{row.result?.optionsSuppressed ? 'N/A' : fmt(ganhosOpcoes)}</strong>
+            </div>
+            <div className="op-card-comp-item">
+              <span className="op-card-label">{hasDividendOverride ? 'Dividendos (Manual)' : 'Dividendos'}</span>
+              <strong>{fmt(dividendos)}</strong>
+            </div>
+            {hasCupom ? (
+              <div className="op-card-comp-item">
+                <span className="op-card-label">{cupomManual ? 'Cupom (Manual)' : 'Cupom'}</span>
+                <strong>{fmt(cupomTotal)}</strong>
+              </div>
+            ) : null}
+            <div className="op-card-comp-item">
+              <span className="op-card-label">Saida total no vencimento</span>
+              <strong>{fmt(saidaTotal)}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="op-card-section">
+          <div className="op-card-section-title">
+            Vs CDI
+            {cdiComparison ? ` · ${cdiComparison.cdiAnnualPct?.toFixed(2)}% a.a.` : ''}
+          </div>
+          {cdiComparison ? (
+            <div className="op-card-comp">
+              <div className="op-card-comp-item">
+                <span className="op-card-label">CDI no periodo ({cdiComparison.days}d)</span>
+                <strong>{fmtPct(cdiComparison.cdiPeriodRate, 2, false)}</strong>
+              </div>
+              <div className="op-card-comp-item">
+                <span className="op-card-label">Resultado da operacao</span>
+                <strong>{fmtPct(cdiComparison.operationRate, 2, false)}</strong>
+              </div>
+              <div className="op-card-comp-item">
+                <span className="op-card-label">Relacao com CDI</span>
+                <strong className={cdiComparison.beatsCdi ? 'op-card-text-positive' : 'op-card-text-negative'}>
+                  {cdiComparison.cdiRatio != null
+                    ? `${fmtPct(cdiComparison.cdiRatio, 0, false)} do CDI`
+                    : 'Sem base'}
+                </strong>
+              </div>
+            </div>
+          ) : (
+            <span className="op-card-label" style={{ opacity: 0.6 }}>
+              {cdi ? 'Sem datas suficientes para calcular.' : 'Carregando...'}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {(hasLegs || hasBarriers) ? (
+        <div className="report-grid" style={{ marginTop: 16 }}>
+          {hasBarriers ? (
+            <div className="report-card">
+              <h4>Barreiras</h4>
+              <div className="report-list">
+                {(row.barrierStatus?.list || []).map((barrier) => {
+                  const direction = barrier.direction === 'high' ? 'Alta' : 'Baixa'
+                  const hit = barrier.direction === 'high' ? row.barrierStatus?.high : row.barrierStatus?.low
+                  return (
+                    <div key={`${barrier.id}-${barrier.barreiraValor}`}>
+                      <span>{direction} ({barrier.barreiraTipo || 'N/A'})</span>
+                      <strong>{barrier.barreiraValor} - {hit == null ? 'N/A' : hit ? 'Bateu' : 'Nao bateu'}</strong>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ) : null}
+          {hasLegs ? (
+            <div className="report-card">
+              <h4>Pernas</h4>
+              <div className="report-list">
+                {legs.map((leg, index) => {
+                  const tipo = String(leg?.tipo || 'N/A').toUpperCase()
+                  const isShort = String(leg?.side || '').toLowerCase() === 'short' || Number(leg?.quantidade || 0) < 0
+                  const sideLabel = isShort ? 'Vendida' : 'Comprada'
+                  const strikeOriginal = leg?.strikeOriginal ?? leg?.strike ?? leg?.precoStrike ?? null
+                  const strikeAdjusted = leg?.strikeAjustado ?? leg?.strikeAdjusted ?? strikeOriginal
+                  const strikeAdjustedLabel = Number.isFinite(Number(strikeAdjusted)) ? formatNumber(strikeAdjusted) : '-'
+                  const strikeOriginalLabel = Number.isFinite(Number(strikeOriginal)) ? formatNumber(strikeOriginal) : '-'
+                  const showOriginal = Number.isFinite(Number(strikeAdjusted))
+                    && Number.isFinite(Number(strikeOriginal))
+                    && Number(strikeAdjusted) !== Number(strikeOriginal)
+                  const rawQty = leg?.quantidadeEfetiva ?? leg?.quantidade ?? 0
+                  const qtyLabel = formatNumber(Math.abs(Number(rawQty) || 0))
+                  const optionExpiryDate = leg?.optionExpiryDateOverride ?? leg?.optionExpiryDate ?? null
+                  const settlementSpotLabel = Number.isFinite(Number(leg?.settlementSpotOverride))
+                    ? formatNumber(leg.settlementSpotOverride)
+                    : null
+                  return (
+                    <div key={`${leg?.id || index}-${strikeOriginal}`}>
+                      <span>{tipo} {sideLabel}</span>
+                      <strong>Strike {strikeAdjustedLabel}</strong>
+                      <span>Qtd {qtyLabel}</span>
+                      {optionExpiryDate ? <small className="muted">Venc {formatDate(optionExpiryDate)}</small> : null}
+                      {settlementSpotLabel ? <small className="muted">Spot travado {settlementSpotLabel}</small> : null}
+                      {showOriginal ? <small className="muted">Orig {strikeOriginalLabel}</small> : null}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {dividendEvents.length > 0 ? (
+        <div className="report-card" style={{ marginTop: 16 }}>
+          <h4>Proventos no periodo{hasDividendOverride ? ' (valor manual aplicado)' : ''}</h4>
           <div className="report-list">
-            {(row.barrierStatus?.list || []).map((barrier) => {
-              const direction = barrier.direction === 'high' ? 'Alta' : 'Baixa'
-              const hit = barrier.direction === 'high' ? row.barrierStatus?.high : row.barrierStatus?.low
+            {dividendEvents.map((event, index) => {
+              const tipo = String(event?.type || event?.typeRaw || 'DIV').toUpperCase()
+              const dataCom = event?.dataCom ? formatDate(event.dataCom) : '-'
+              const paymentDate = event?.paymentDate ? formatDate(event.paymentDate) : '-'
+              const amount = Number.isFinite(Number(event?.amount)) ? Number(event.amount).toFixed(4) : '-'
+              const valueNet = Number.isFinite(Number(event?.valueNet)) ? Number(event.valueNet).toFixed(4) : null
               return (
-                <div key={`${barrier.id}-${barrier.barreiraValor}`}>
-                  <span>{direction} ({barrier.barreiraTipo || 'N/A'})</span>
-                  <strong>{barrier.barreiraValor} - {hit == null ? 'N/A' : hit ? 'Bateu' : 'Nao bateu'}</strong>
+                <div key={`${event?.dataCom}-${event?.amount}-${index}`}>
+                  <span>{tipo}</span>
+                  <strong>R$ {valueNet ?? amount}</strong>
+                  <small className="muted">Com {dataCom}</small>
+                  {paymentDate !== '-' ? <small className="muted">Pgto {paymentDate}</small> : null}
+                  {valueNet && valueNet !== amount ? <small className="muted">Bruto {amount}</small> : null}
                 </div>
               )
             })}
           </div>
         </div>
+      ) : null}
 
-        {hasLegs ? (
-          <div className="report-card">
-            <h4>Pernas</h4>
-            <div className="report-list">
-              {legs.map((leg, index) => {
-                const tipo = String(leg?.tipo || 'N/A').toUpperCase()
-                const isShort = String(leg?.side || '').toLowerCase() === 'short' || Number(leg?.quantidade || 0) < 0
-                const sideLabel = isShort ? 'Vendida' : 'Comprada'
-                const strikeOriginal = leg?.strikeOriginal ?? leg?.strike ?? leg?.precoStrike ?? null
-                const strikeAdjusted = leg?.strikeAjustado ?? leg?.strikeAdjusted ?? strikeOriginal
-                const strikeAdjustedLabel = Number.isFinite(Number(strikeAdjusted)) ? formatNumber(strikeAdjusted) : '—'
-                const strikeOriginalLabel = Number.isFinite(Number(strikeOriginal)) ? formatNumber(strikeOriginal) : '—'
-                const showOriginal = Number.isFinite(Number(strikeAdjusted))
-                  && Number.isFinite(Number(strikeOriginal))
-                  && Number(strikeAdjusted) !== Number(strikeOriginal)
-                const rawQty = leg?.quantidadeEfetiva ?? leg?.quantidade ?? 0
-                const qtyLabel = formatNumber(Math.abs(Number(rawQty) || 0))
-                const optionExpiryDate = leg?.optionExpiryDateOverride ?? leg?.optionExpiryDate ?? null
-                const settlementSpotLabel = Number.isFinite(Number(leg?.settlementSpotOverride))
-                  ? formatNumber(leg.settlementSpotOverride)
-                  : null
-                return (
-                  <div key={`${leg?.id || index}-${strikeOriginal}`}>
-                    <span>{tipo} {sideLabel}</span>
-                    <strong>Strike {strikeAdjustedLabel}</strong>
-                    <span>Qtd {qtyLabel}</span>
-                    {optionExpiryDate ? <small className="muted">Venc {formatDate(optionExpiryDate)}</small> : null}
-                    {settlementSpotLabel ? <small className="muted">Spot travado {settlementSpotLabel}</small> : null}
-                    {showOriginal ? <small className="muted">Orig {strikeOriginalLabel}</small> : null}
-                  </div>
-                )
-              })}
-            </div>
+      {bonusEvents.length > 0 ? (
+        <div className="report-card" style={{ marginTop: 16 }}>
+          <h4>Bonificacao no periodo</h4>
+          <div className="report-list">
+            {bonusEvents.map((event, index) => {
+              const dataCom = event?.dataCom ? formatDate(event.dataCom) : '-'
+              const exDate = event?.exDate ? formatDate(event.exDate) : '-'
+              const incorporationDate = event?.incorporationDate ? formatDate(event.incorporationDate) : '-'
+              const proportionPct = Number.isFinite(Number(event?.proportionPct))
+                ? `${Number(event.proportionPct).toFixed(2).replace('.', ',')}%`
+                : '-'
+              return (
+                <div key={`${event?.dataCom}-${event?.factor}-${index}`}>
+                  <span>BONUS</span>
+                  <strong>{proportionPct}</strong>
+                  <small className="muted">Com {dataCom}</small>
+                  {exDate !== '-' ? <small className="muted">Ex {exDate}</small> : null}
+                  {incorporationDate !== '-' ? <small className="muted">Incorp {incorporationDate}</small> : null}
+                </div>
+              )
+            })}
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
-      {warnings.length ? (
+      {extraContent}
+
+      {warnings.length > 0 ? (
         <div className="report-warnings">
           {warnings.map((warning) => (
             <span key={warning}><Icon name="warning" size={14} /> {warning}</span>
@@ -293,9 +397,29 @@ const ReportModal = ({ open, onClose, row, onExport, onCopy, onRefresh }) => {
       ) : null}
 
       <div className="report-actions">
-        <button className="btn btn-secondary" type="button" onClick={onRefresh}>Atualizar dados</button>
-        <button className="btn btn-secondary" type="button" onClick={onCopy}>Copiar resumo</button>
-        <button className="btn btn-primary" type="button" onClick={onExport}>Exportar PDF</button>
+        {typeof onRefresh === 'function' ? (
+          <button className="btn btn-secondary" type="button" onClick={onRefresh}>
+            Atualizar dados
+          </button>
+        ) : null}
+        {typeof onCopy === 'function' ? (
+          <button className="btn btn-secondary" type="button" onClick={onCopy}>
+            <Icon name="copy" size={14} /> Copiar texto
+          </button>
+        ) : null}
+        <button
+          className="btn btn-secondary"
+          type="button"
+          onClick={handleScreenshot}
+          disabled={screenshotting}
+        >
+          <Icon name="camera" size={14} /> {screenshotting ? 'Copiando...' : 'Copiar imagem'}
+        </button>
+        {typeof onExport === 'function' ? (
+          <button className="btn btn-primary" type="button" onClick={onExport}>
+            Exportar PDF
+          </button>
+        ) : null}
       </div>
     </Modal>
   )
