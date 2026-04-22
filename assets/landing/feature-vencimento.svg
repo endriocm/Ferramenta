@@ -18,7 +18,7 @@
   <line x1="140" y1="382" x2="1060" y2="382" stroke="#29415E"/>
   <line x1="580" y1="248" x2="580" y2="382" stroke="#29415E"/>
   <path d="M180 350L468 350L580 316L710 266L868 220L1024 178" stroke="url(#payoff)" stroke-width="7" stroke-linecap="round"/>
-  <text x="140" y="248" fill="#95A8C7" font-family="Arial, sans-serif" font-size="12">Grafico de payoff com eixos</text>
+  <text x="140" y="248" fill="#95A8C7" font-family="Arial, sans-serif" font-size="12">Gráfico de payoff com eixos</text>
 
   <rect x="102" y="448" width="998" height="214" rx="14" fill="#0F1A2C" stroke="#2E4261"/>
   <rect x="130" y="478" width="942" height="40" rx="8" fill="#21324C"/>

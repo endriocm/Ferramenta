@@ -8,7 +8,7 @@
   <rect width="1200" height="760" rx="24" fill="url(#bg)"/>
   <rect x="68" y="64" width="1064" height="632" rx="22" fill="#121D30" stroke="#344864"/>
   <rect x="100" y="102" width="1000" height="86" rx="14" fill="#1B2A44"/>
-  <text x="132" y="154" fill="#E3ECFA" font-family="Arial, sans-serif" font-size="24">Tags e vinculos</text>
+  <text x="132" y="154" fill="#E3ECFA" font-family="Arial, sans-serif" font-size="24">Tags e vínculos</text>
 
   <rect x="100" y="224" width="326" height="436" rx="14" fill="#0F1A2A" stroke="#2C405F"/>
   <rect x="128" y="258" width="270" height="18" rx="9" fill="#283E5F"/>

@@ -36,7 +36,7 @@
   <circle cx="548" cy="314" r="7" fill="#F1C40F"/>
   <circle cx="736" cy="254" r="7" fill="#F1C40F"/>
   <circle cx="938" cy="224" r="7" fill="#F1C40F"/>
-  <text x="448" y="194" fill="#9AB0D1" font-family="Arial, sans-serif" font-size="12">Vencimentos e cenarios</text>
+  <text x="448" y="194" fill="#9AB0D1" font-family="Arial, sans-serif" font-size="12">Vencimentos e cenários</text>
 
   <rect x="98" y="436" width="1004" height="230" rx="16" fill="#101B2D" stroke="#2F4464"/>
   <rect x="122" y="468" width="960" height="34" rx="8" fill="#20314C"/>
