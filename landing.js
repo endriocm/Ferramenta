@@ -55,9 +55,9 @@ const setLatestVersionLabel = async (latestYmlUrl) => {
     const text = await response.text()
     const version = parseLatestVersion(text)
     if (!version) throw new Error('latest-version-not-found')
-    versionNode.textContent = `Versao disponivel: ${version}`
+    versionNode.textContent = `Versão disponível: ${version}`
   } catch {
-    versionNode.textContent = 'Versao disponivel: consultar instalador Latest'
+    versionNode.textContent = 'Versão disponível: consultar instalador Latest'
   }
 }
 
